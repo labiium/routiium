@@ -44,13 +44,14 @@ Note:
 #![forbid(unsafe_code)]
 
 use anyhow::{anyhow, Result};
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 // ==============================
@@ -65,6 +66,19 @@ pub struct ApiKeyInfo {
     pub expires_at: Option<u64>,
     pub revoked_at: Option<u64>,
     pub scopes: Option<Vec<String>>,
+}
+
+impl From<ApiKeyRecord> for ApiKeyInfo {
+    fn from(rec: ApiKeyRecord) -> Self {
+        Self {
+            id: rec.id,
+            label: rec.label,
+            created_at: rec.created_at,
+            expires_at: rec.expires_at,
+            revoked_at: rec.revoked_at,
+            scopes: rec.scopes,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -397,38 +411,132 @@ fn make_default_store() -> Result<Arc<dyn KeyStore>> {
 
 pub struct AuthManager {
     store: Arc<dyn KeyStore>,
+    cache: Option<Arc<RwLock<HashMap<String, ApiKeyRecord>>>>,
 }
 
 impl AuthManager {
+    fn from_store(store: Arc<dyn KeyStore>) -> Result<Self> {
+        let cache = if Self::cache_enabled() {
+            match store.list() {
+                Ok(records) => {
+                    let len = records.len();
+                    let mut map = HashMap::with_capacity(len);
+                    for rec in records {
+                        map.insert(rec.id.clone(), rec);
+                    }
+                    if len > 0 {
+                        info!(
+                            "API key cache warmed with {} entr{}",
+                            len,
+                            if len == 1 { "y" } else { "ies" }
+                        );
+                    } else {
+                        debug!("API key cache warmed (store empty)");
+                    }
+                    Some(Arc::new(RwLock::new(map)))
+                }
+                Err(err) => {
+                    warn!(
+                        "Failed to preload API key cache (continuing without cache): {}",
+                        err
+                    );
+                    None
+                }
+            }
+        } else {
+            debug!("API key cache disabled via ROUTIIUM_KEYS_DISABLE_CACHE");
+            None
+        };
+
+        Ok(Self { store, cache })
+    }
+
+    fn cache_enabled() -> bool {
+        !env_truthy("ROUTIIUM_KEYS_DISABLE_CACHE", false)
+    }
+
     pub fn new_default() -> Result<Self> {
-        Ok(Self {
-            store: make_default_store()?,
-        })
+        let store = make_default_store()?;
+        Self::from_store(store)
     }
 
     pub fn new_with_redis_url(url: &str) -> Result<Self> {
-        Ok(Self {
-            store: redis_store_impl::make_store_with_url(url)?,
-        })
+        let store = redis_store_impl::make_store_with_url(url)?;
+        Self::from_store(store)
     }
 
     pub fn new_with_sled_path(path: &std::path::Path) -> Result<Self> {
-        Ok(Self {
-            store: sled_store_impl::SledStore::open_path(path.to_path_buf())
-                .map(|s| Arc::new(s) as Arc<dyn KeyStore>)?,
-        })
+        let store = sled_store_impl::SledStore::open_path(path.to_path_buf())
+            .map(|s| Arc::new(s) as Arc<dyn KeyStore>)?;
+        Self::from_store(store)
     }
 
     pub fn new_sled_default() -> Result<Self> {
-        Ok(Self {
-            store: sled_store_impl::make_store()?,
-        })
+        let store = sled_store_impl::make_store()?;
+        Self::from_store(store)
     }
 
     pub fn new_redis_default() -> Result<Self> {
-        Ok(Self {
-            store: redis_store_impl::make_store()?,
+        let store = redis_store_impl::make_store()?;
+        Self::from_store(store)
+    }
+
+    fn cache_lookup(&self, id: &str) -> Option<ApiKeyRecord> {
+        self.cache
+            .as_ref()
+            .and_then(|cache| cache.read().ok().and_then(|map| map.get(id).cloned()))
+    }
+
+    fn cache_upsert(&self, rec: &ApiKeyRecord) {
+        if let Some(cache) = &self.cache {
+            if let Ok(mut map) = cache.write() {
+                map.insert(rec.id.clone(), rec.clone());
+            }
+        }
+    }
+
+    fn cache_snapshot(&self) -> Option<Vec<ApiKeyRecord>> {
+        self.cache.as_ref().and_then(|cache| {
+            cache
+                .read()
+                .ok()
+                .map(|map| map.values().cloned().collect::<Vec<_>>())
         })
+    }
+
+    fn store_get_with_metrics(&self, id: &str) -> Result<Option<ApiKeyRecord>> {
+        let start = Instant::now();
+        let result = self.store.get(id);
+        Self::log_store_latency("get", start.elapsed());
+        result
+    }
+
+    fn fetch_record(&self, id: &str) -> Option<ApiKeyRecord> {
+        match self.store_get_with_metrics(id) {
+            Ok(Some(rec)) => {
+                self.cache_upsert(&rec);
+                Some(rec)
+            }
+            Ok(None) => None,
+            Err(err) => {
+                warn!("API key store lookup failed: {}", err);
+                None
+            }
+        }
+    }
+
+    fn log_store_latency(operation: &str, elapsed: Duration) {
+        if elapsed >= Duration::from_millis(250) {
+            warn!(
+                duration_ms = elapsed.as_millis() as u64,
+                "API key store {} latency", operation
+            );
+        } else if elapsed >= Duration::from_millis(50) {
+            debug!(
+                duration_ms = elapsed.as_millis() as u64,
+                "API key store {} latency", operation
+            );
+        }
     }
 
     // --------------------------
@@ -492,7 +600,10 @@ impl AuthManager {
         };
 
         // Store (blocking sync under the hood of our async trait wrapper)
+        let put_start = Instant::now();
         self.store.put(&rec)?;
+        Self::log_store_latency("put", put_start.elapsed());
+        self.cache_upsert(&rec);
 
         Ok(GeneratedKey {
             id,
@@ -510,9 +621,7 @@ impl AuthManager {
             None => return Verification::InvalidTokenFormat,
         };
 
-        let rec_opt = self.store.get(&id).unwrap_or(None);
-
-        let rec = match rec_opt {
+        let rec = match self.cache_lookup(&id).or_else(|| self.fetch_record(&id)) {
             Some(r) => r,
             None => return Verification::NotFound,
         };
@@ -557,43 +666,63 @@ impl AuthManager {
     }
 
     pub fn revoke(&self, id: &str) -> Result<bool> {
-        if let Some(mut rec) = self.store.get(id)? {
+        if let Some(mut rec) = self.store_get_with_metrics(id)? {
             if rec.revoked_at.is_none() {
                 rec.revoked_at = Some(now_epoch());
+                let put_start = Instant::now();
                 self.store.put(&rec)?;
+                Self::log_store_latency("put", put_start.elapsed());
+                self.cache_upsert(&rec);
                 return Ok(true);
             }
+            self.cache_upsert(&rec);
             return Ok(false);
         }
         Ok(false)
     }
 
     pub fn set_expiration(&self, id: &str, expires_at: Option<u64>) -> Result<bool> {
-        if let Some(mut rec) = self.store.get(id)? {
+        if let Some(mut rec) = self.store_get_with_metrics(id)? {
             rec.expires_at = expires_at;
+            let put_start = Instant::now();
             self.store.put(&rec)?;
+            Self::log_store_latency("put", put_start.elapsed());
+            self.cache_upsert(&rec);
             return Ok(true);
         }
         Ok(false)
     }
 
     pub fn list_keys(&self) -> Result<Vec<ApiKeyInfo>> {
+        if let Some(records) = self.cache_snapshot() {
+            return Ok(records.into_iter().map(ApiKeyInfo::from).collect());
+        }
+
         let recs = self.store.list()?;
-        Ok(recs
-            .into_iter()
-            .map(|r| ApiKeyInfo {
-                id: r.id,
-                label: r.label,
-                created_at: r.created_at,
-                expires_at: r.expires_at,
-                revoked_at: r.revoked_at,
-                scopes: r.scopes,
-            })
-            .collect())
+        if let Some(cache) = &self.cache {
+            if let Ok(mut map) = cache.write() {
+                map.clear();
+                for rec in &recs {
+                    map.insert(rec.id.clone(), rec.clone());
+                }
+            }
+        }
+
+        Ok(recs.into_iter().map(ApiKeyInfo::from).collect())
     }
 
     pub fn purge(&self, cutoff_epoch: u64) -> Result<usize> {
-        self.store.purge(cutoff_epoch)
+        let removed = self.store.purge(cutoff_epoch)?;
+        if let Some(cache) = &self.cache {
+            if let Ok(mut map) = cache.write() {
+                map.retain(|_, rec| {
+                    let expired = rec.expires_at.map(|e| e <= cutoff_epoch).unwrap_or(false);
+                    let revoked = rec.revoked_at.map(|r| r <= cutoff_epoch).unwrap_or(false);
+                    !(expired || revoked)
+                });
+            }
+        }
+        Ok(removed)
     }
 
     // --------------------------
@@ -644,9 +773,10 @@ impl AuthManager {
         match backend {
             KeyBackend::Redis { url } => Self::new_with_redis_url(&url),
             KeyBackend::Sled { path } => Self::new_with_sled_path(&path),
-            KeyBackend::Memory => Ok(Self {
-                store: memory_store_impl::make_store()?,
-            }),
+            KeyBackend::Memory => {
+                let store = memory_store_impl::make_store()?;
+                Self::from_store(store)
+            }
         }
     }
 
@@ -987,12 +1117,68 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct CountingStore {
+        inner: RwLock<HashMap<String, ApiKeyRecord>>,
+        get_calls: AtomicUsize,
+    }
+
+    impl CountingStore {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn drain_gets(&self) -> usize {
+            self.get_calls.swap(0, Ordering::SeqCst)
+        }
+    }
+
+    impl KeyStore for CountingStore {
+        fn put(&self, rec: &ApiKeyRecord) -> Result<()> {
+            self.inner
+                .write()
+                .expect("counting store put")
+                .insert(rec.id.clone(), rec.clone());
+            Ok(())
+        }
+
+        fn get(&self, id: &str) -> Result<Option<ApiKeyRecord>> {
+            self.get_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .inner
+                .read()
+                .expect("counting store get")
+                .get(id)
+                .cloned())
+        }
+
+        fn list(&self) -> Result<Vec<ApiKeyRecord>> {
+            Ok(self
+                .inner
+                .read()
+                .expect("counting store list")
+                .values()
+                .cloned()
+                .collect())
+        }
+
+        fn purge(&self, cutoff_epoch: u64) -> Result<usize> {
+            let mut guard = self.inner.write().expect("counting store purge");
+            let before = guard.len();
+            guard.retain(|_, rec| {
+                let expired = rec.expires_at.map(|e| e <= cutoff_epoch).unwrap_or(false);
+                let revoked = rec.revoked_at.map(|r| r <= cutoff_epoch).unwrap_or(false);
+                !(expired || revoked)
+            });
+            Ok(before.saturating_sub(guard.len()))
+        }
+    }
 
     #[tokio::test]
     async fn round_trip_memory_backend() {
-        let mgr = AuthManager {
-            store: super::memory_store_impl::make_store().unwrap(),
-        };
+        let mgr = AuthManager::from_backend(KeyBackend::Memory).unwrap();
 
         // generate with TTL
         let out = mgr
@@ -1012,5 +1198,54 @@ mod tests {
             Verification::Revoked { .. } => {}
             x => panic!("expected revoked, got {:?}", x),
         }
+    }
+
+    #[tokio::test]
+    async fn verify_hits_cache_without_store_read() {
+        let store = Arc::new(CountingStore::new());
+        let mgr = AuthManager::from_store(store.clone()).unwrap();
+        store.drain_gets(); // warm-up list
+
+        let out = mgr
+            .generate_key(Some("cached".into()), None, None)
+            .expect("generate key");
+        assert_eq!(
+            store.drain_gets(),
+            0,
+            "generate should not require store reads"
+        );
+
+        match mgr.verify(&out.token) {
+            Verification::Valid { .. } => {}
+            other => panic!("expected valid token, got {:?}", other),
+        }
+        assert_eq!(
+            store.drain_gets(),
+            0,
+            "cache should satisfy verification without hitting the store"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_reflects_revocation() {
+        let store = Arc::new(CountingStore::new());
+        let mgr = AuthManager::from_store(store.clone()).unwrap();
+        store.drain_gets();
+
+        let out = mgr
+            .generate_key(Some("revoke-cache".into()), None, None)
+            .expect("generate key");
+        assert!(mgr.revoke(&out.id).expect("revoke succeeds"));
+        store.drain_gets(); // discard the store read performed during revoke
+
+        match mgr.verify(&out.token) {
+            Verification::Revoked { .. } => {}
+            other => panic!("expected revoked token, got {:?}", other),
+        }
+        assert_eq!(
+            store.drain_gets(),
+            0,
+            "post-revoke verification should still use the cache"
+        );
     }
 }

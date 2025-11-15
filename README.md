@@ -109,6 +109,7 @@ Routiium loads `.env`, `.envfile`, or any path referenced via `ENV_FILE`, `ENVFI
 - `ROUTIIUM_REDIS_POOL_MAX` – r2d2 pool size for Redis (default 16).
 - `ROUTIIUM_SLED_PATH` – path for the embedded sled database (default `./data/keys.db` when the `sled` feature is enabled).
 - `ROUTIIUM_KEYS_REQUIRE_EXPIRATION`, `ROUTIIUM_KEYS_ALLOW_NO_EXPIRATION`, `ROUTIIUM_KEYS_DEFAULT_TTL_SECONDS` – key issuance policy toggles.
+- `ROUTIIUM_KEYS_DISABLE_CACHE` – set to `1/true` to skip the in-memory API key cache. By default Routiium eagerly loads and maintains every key in-process so sled-backed verification never blocks on disk I/O; disable the cache when multiple Routiium instances share the same external store and you prefer every verification to hit that backend directly.
 
 ### Analytics & Pricing
 
@@ -143,6 +144,8 @@ Routiium loads `.env`, `.envfile`, or any path referenced via `ENV_FILE`, `ENVFI
 
 1. **Managed mode** (recommended): set `OPENAI_API_KEY` (and any additional provider env vars referenced by routing rules). Clients call Routiium with internally issued tokens (`sk_<id>.<secret>`). The proxy validates them through `ApiKeyManager` before substituting provider secrets upstream.
 2. **Passthrough mode**: leave `OPENAI_API_KEY` unset. Clients send their provider key in `Authorization: Bearer ...` and Routiium forwards it upstream unchanged (still applying conversion, routing, analytics, etc.).
+
+Managed mode keeps a hot, in-process cache of every issued API key so sled-backed deployments never block on host filesystem latency during verification. The cache is warmed at startup and updated immediately on `generate`, `revoke`, and `set_expiration`. Set `ROUTIIUM_KEYS_DISABLE_CACHE=1` if you need every verification to go back to a shared store (e.g., Redis in multi-node setups).
 
 ## Multi-backend Routing & Router Integration
 
