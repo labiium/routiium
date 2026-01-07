@@ -257,6 +257,85 @@
       "enabled": false
     },
     {
+      "id": "aws-bedrock-claude",
+      "description": "Route Claude models to AWS Bedrock",
+      "match_strategy": {
+        "prefix": {
+          "prefix": "claude-"
+        }
+      },
+      "backends": [
+        {
+          "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+          "mode": "bedrock",
+          "weight": 1
+        }
+      ],
+      "load_balance": "first",
+      "priority": 85,
+      "transform": {
+        "rewrite_model": "anthropic.claude-3-sonnet-20240229-v1:0"
+      },
+      "enabled": false
+    },
+    {
+      "id": "aws-bedrock-anthropic-direct",
+      "description": "Route anthropic.* model IDs directly to Bedrock",
+      "match_strategy": {
+        "prefix": {
+          "prefix": "anthropic."
+        }
+      },
+      "backends": [
+        {
+          "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+          "mode": "bedrock",
+          "weight": 1
+        }
+      },
+      "load_balance": "first",
+      "priority": 90,
+      "enabled": false
+    },
+    {
+      "id": "aws-bedrock-llama",
+      "description": "Route Llama models to AWS Bedrock",
+      "match_strategy": {
+        "glob": {
+          "pattern": "meta.llama*"
+        }
+      },
+      "backends": [
+        {
+          "base_url": "https://bedrock-runtime.us-west-2.amazonaws.com",
+          "mode": "bedrock",
+          "weight": 1
+        }
+      ],
+      "load_balance": "first",
+      "priority": 75,
+      "enabled": false
+    },
+    {
+      "id": "aws-bedrock-titan",
+      "description": "Route Amazon Titan models to AWS Bedrock",
+      "match_strategy": {
+        "prefix": {
+          "prefix": "amazon.titan"
+        }
+      },
+      "backends": [
+        {
+          "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+          "mode": "bedrock",
+          "weight": 1
+        }
+      ],
+      "load_balance": "first",
+      "priority": 70,
+      "enabled": false
+    },
+    {
       "id": "catch-all-fallback",
       "description": "Fallback rule for any unmatched model (lowest priority)",
       "match_strategy": "any",

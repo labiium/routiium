@@ -21,6 +21,7 @@ Note: Keep the mapping rules aligned with OpenAI docs; the Responses API evolves
 pub mod analytics;
 pub mod analytics_middleware;
 pub mod auth;
+pub mod bedrock;
 
 pub mod conversion;
 pub mod mcp_client;

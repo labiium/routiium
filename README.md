@@ -8,6 +8,7 @@ Routiium is an Actix-web service and Rust crate that exposes OpenAI-compatible `
 
 - Converts legacy Chat Completions requests, responses, and SSE chunks into the Responses API format (and back) while preserving tools, multimodal parts, logprobs, and token usage.
 - Proxies `/v1/chat/completions` and `/v1/responses` to multiple upstream providers with per-model base URLs, custom headers, managed or passthrough auth, and automatic system prompt injection.
+- **AWS Bedrock Support** - Full integration with AWS Bedrock including Claude 3, Llama 3, Titan, and other models with complete tool calling and multimodal support (see [AWS_BEDROCK.md](AWS_BEDROCK.md)).
 - Integrates with Router services (remote HTTP or local alias files) for policy-aware routing and falls back to legacy prefix rules defined via `ROUTIIUM_BACKENDS`.
 - Issues, verifies, revokes, and expires first-party API keys (Redis, sled, or in-memory backends) so clients never see provider secrets.
 - Pulls Model Context Protocol (MCP) tools into each request so clients automatically see the union of their declared tools plus any connected MCP servers.
@@ -88,12 +89,15 @@ Routiium loads `.env`, `.envfile`, or any path referenced via `ENV_FILE`, `ENVFI
 
 ### Routing & Upstream Selection
 
-- `ROUTIIUM_BACKENDS` – semicolon-separated rules (`prefix`, `base`/`base_url`, optional `key_env`, optional `mode=responses|chat`). Example:
+- `ROUTIIUM_BACKENDS` – semicolon-separated rules (`prefix`, `base`/`base_url`, optional `key_env`, optional `mode=responses|chat|bedrock`). Example:
 
   ```bash
   export OPENAI_API_KEY=sk-openai...
   export ANTHROPIC_API_KEY=sk-anthropic...
-  export ROUTIIUM_BACKENDS="prefix=gpt-;base=https://api.openai.com/v1;key_env=OPENAI_API_KEY;mode=responses; prefix=claude-;base=https://api.anthropic.com/v1;key_env=ANTHROPIC_API_KEY;mode=responses; prefix=llama;base=http://localhost:11434/v1;mode=chat"
+  export AWS_ACCESS_KEY_ID=your-access-key
+  export AWS_SECRET_ACCESS_KEY=your-secret-key
+  export AWS_REGION=us-east-1
+  export ROUTIIUM_BACKENDS="prefix=gpt-;base=https://api.openai.com/v1;key_env=OPENAI_API_KEY;mode=responses; prefix=claude-;base=https://api.anthropic.com/v1;key_env=ANTHROPIC_API_KEY;mode=responses; prefix=anthropic.;base=https://bedrock-runtime.us-east-1.amazonaws.com;mode=bedrock; prefix=llama;base=http://localhost:11434/v1;mode=chat"
   ```
 
 - `ROUTIIUM_ROUTER_URL` – enable the HTTP Router client (Schema 1.1). Helper env vars:

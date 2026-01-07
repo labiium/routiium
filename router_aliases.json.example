@@ -62,5 +62,30 @@
     "mode": "responses",
     "model_id": "gpt-4o-mini",
     "auth_env": "OPENAI_API_KEY"
+  },
+  "bedrock-claude-sonnet": {
+    "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+    "mode": "bedrock",
+    "model_id": "anthropic.claude-3-sonnet-20240229-v1:0"
+  },
+  "bedrock-claude-opus": {
+    "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+    "mode": "bedrock",
+    "model_id": "anthropic.claude-3-opus-20240229-v1:0"
+  },
+  "bedrock-claude-haiku": {
+    "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+    "mode": "bedrock",
+    "model_id": "anthropic.claude-3-haiku-20240307-v1:0"
+  },
+  "bedrock-llama-70b": {
+    "base_url": "https://bedrock-runtime.us-west-2.amazonaws.com",
+    "mode": "bedrock",
+    "model_id": "meta.llama3-70b-instruct-v1:0"
+  },
+  "bedrock-titan": {
+    "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+    "mode": "bedrock",
+    "model_id": "amazon.titan-text-express-v1"
   }
 }

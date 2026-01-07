@@ -66,6 +66,7 @@ fn map_router_mode(mode: RouterUpstreamMode) -> crate::util::UpstreamMode {
     match mode {
         RouterUpstreamMode::Responses => crate::util::UpstreamMode::Responses,
         RouterUpstreamMode::Chat => crate::util::UpstreamMode::Chat,
+        RouterUpstreamMode::Bedrock => crate::util::UpstreamMode::Bedrock,
     }
 }
 
@@ -152,10 +153,10 @@ async fn resolve_upstream(
                         "key_env" | "api_key_env" => key_env_local = Some(v),
                         "mode" => {
                             let vv = v.to_ascii_lowercase();
-                            mode_local = if vv == "chat" {
-                                Some(crate::util::UpstreamMode::Chat)
-                            } else {
-                                Some(crate::util::UpstreamMode::Responses)
+                            mode_local = match vv.as_str() {
+                                "chat" => Some(crate::util::UpstreamMode::Chat),
+                                "bedrock" => Some(crate::util::UpstreamMode::Bedrock),
+                                _ => Some(crate::util::UpstreamMode::Responses),
                             };
                         }
                         _ => {}
@@ -687,9 +688,75 @@ async fn responses_passthrough(
         }
     }
 
+    // Handle Bedrock mode separately (uses AWS SDK instead of HTTP)
+    if matches!(resolution.mode, crate::util::UpstreamMode::Bedrock) {
+        // Convert to Chat format first
+        let chat_req = crate::conversion::responses_json_to_chat_request(&effective_body);
+        
+        // Convert to Bedrock format
+        let (_content_type, bedrock_body) = match crate::bedrock::chat_to_bedrock_request(&chat_req) {
+            Ok(result) => result,
+            Err(e) => {
+                return error_response(
+                    http::StatusCode::BAD_REQUEST,
+                    &format!("Failed to convert to Bedrock format: {}", e),
+                );
+            }
+        };
+
+        // Extract region from base_url or use default
+        let region = resolution
+            .base_url
+            .split('.')
+            .nth(1)
+            .unwrap_or("us-east-1");
+
+        // Invoke Bedrock model (non-streaming for now)
+        match crate::bedrock::invoke_bedrock_model(
+            &resolution.model_id,
+            bedrock_body,
+            region,
+        )
+        .await
+        {
+            Ok(bedrock_response) => {
+                // Convert Bedrock response to Chat Completions format
+                match crate::bedrock::bedrock_to_chat_response(
+                    bedrock_response,
+                    &resolution.model_id,
+                    None,
+                ) {
+                    Ok(chat_response) => {
+                        // Convert Chat to Responses format
+                        let responses_response =
+                            crate::conversion::chat_to_responses_response(&chat_response);
+                        let mut builder = HttpResponse::Ok();
+                        if let Some(plan) = resolution.plan.as_ref() {
+                            insert_route_headers(&mut builder, plan, &resolution.model_id);
+                        }
+                        return builder.json(responses_response);
+                    }
+                    Err(e) => {
+                        return error_response(
+                            http::StatusCode::INTERNAL_SERVER_ERROR,
+                            &format!("Failed to convert Bedrock response: {}", e),
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                return error_response(
+                    http::StatusCode::BAD_GATEWAY,
+                    &format!("Bedrock invocation failed: {}", e),
+                );
+            }
+        }
+    }
+
     let endpoint = match resolution.mode {
         crate::util::UpstreamMode::Responses => "responses",
         crate::util::UpstreamMode::Chat => "chat/completions",
+        crate::util::UpstreamMode::Bedrock => "bedrock/invoke", // Shouldn't reach here
     };
     let base = resolution.base_url.trim_end_matches('/');
 
@@ -1129,9 +1196,80 @@ async fn chat_completions_passthrough(
         }
     }
 
+    // Handle Bedrock mode separately (uses AWS SDK instead of HTTP)
+    if matches!(resolution.mode, crate::util::UpstreamMode::Bedrock) {
+        // Parse body as Chat Completions request
+        let chat_req = match serde_json::from_value::<ChatCompletionRequest>(body.clone()) {
+            Ok(req) => req,
+            Err(e) => {
+                return error_response(
+                    http::StatusCode::BAD_REQUEST,
+                    &format!("Invalid chat request: {}", e),
+                );
+            }
+        };
+        
+        // Convert to Bedrock format
+        let (_content_type, bedrock_body) = match crate::bedrock::chat_to_bedrock_request(&chat_req) {
+            Ok(result) => result,
+            Err(e) => {
+                return error_response(
+                    http::StatusCode::BAD_REQUEST,
+                    &format!("Failed to convert to Bedrock format: {}", e),
+                );
+            }
+        };
+
+        // Extract region from base_url or use default
+        let region = resolution
+            .base_url
+            .split('.')
+            .nth(1)
+            .unwrap_or("us-east-1");
+
+        // Invoke Bedrock model (non-streaming for now)
+        match crate::bedrock::invoke_bedrock_model(
+            &resolution.model_id,
+            bedrock_body,
+            region,
+        )
+        .await
+        {
+            Ok(bedrock_response) => {
+                // Convert Bedrock response to Chat Completions format
+                match crate::bedrock::bedrock_to_chat_response(
+                    bedrock_response,
+                    &resolution.model_id,
+                    None,
+                ) {
+                    Ok(chat_response) => {
+                        let mut builder = HttpResponse::Ok();
+                        if let Some(plan) = resolution.plan.as_ref() {
+                            insert_route_headers(&mut builder, plan, &resolution.model_id);
+                        }
+                        return builder.json(chat_response);
+                    }
+                    Err(e) => {
+                        return error_response(
+                            http::StatusCode::INTERNAL_SERVER_ERROR,
+                            &format!("Failed to convert Bedrock response: {}", e),
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                return error_response(
+                    http::StatusCode::BAD_GATEWAY,
+                    &format!("Bedrock invocation failed: {}", e),
+                );
+            }
+        }
+    }
+
     let endpoint = match resolution.mode {
         crate::util::UpstreamMode::Responses => "responses",
         crate::util::UpstreamMode::Chat => "chat/completions",
+        crate::util::UpstreamMode::Bedrock => "bedrock/invoke", // Shouldn't reach here
     };
     let base = resolution.base_url.trim_end_matches('/');
 

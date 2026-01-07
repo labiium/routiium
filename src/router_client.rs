@@ -26,12 +26,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 
-/// Mode for upstream API (Responses or Chat Completions)
+/// Mode for upstream API (Responses, Chat Completions, or Bedrock)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum UpstreamMode {
     Responses,
     Chat,
+    Bedrock,
 }
 
 impl Default for UpstreamMode {

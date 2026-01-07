@@ -110,9 +110,10 @@ pub fn env_bind_addr() -> String {
 pub enum UpstreamMode {
     Responses,
     Chat,
+    Bedrock,
 }
 
-/// Read ROUTIIUM_UPSTREAM_MODE from env ("responses" | "chat"), default "responses".
+/// Read ROUTIIUM_UPSTREAM_MODE from env ("responses" | "chat" | "bedrock"), default "responses".
 pub fn upstream_mode_from_env() -> UpstreamMode {
     match std::env::var("ROUTIIUM_UPSTREAM_MODE")
         .unwrap_or_default()
@@ -121,6 +122,7 @@ pub fn upstream_mode_from_env() -> UpstreamMode {
         .as_str()
     {
         "chat" => UpstreamMode::Chat,
+        "bedrock" => UpstreamMode::Bedrock,
         _ => UpstreamMode::Responses,
     }
 }
@@ -480,6 +482,7 @@ fn parse_mode(s: &str) -> Option<UpstreamMode> {
     match v.as_str() {
         "chat" => Some(UpstreamMode::Chat),
         "responses" => Some(UpstreamMode::Responses),
+        "bedrock" => Some(UpstreamMode::Bedrock),
         _ => None,
     }
 }
@@ -584,6 +587,7 @@ pub async fn sse_proxy_stream_with_bearer_routed(
     let endpoint = match mode {
         UpstreamMode::Responses => "/responses",
         UpstreamMode::Chat => "/chat/completions",
+        UpstreamMode::Bedrock => "/bedrock/invoke", // Not actually used for Bedrock (uses AWS SDK)
     };
     let real_url = format!(
         "{}/{}",

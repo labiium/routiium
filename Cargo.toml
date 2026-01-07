@@ -62,6 +62,12 @@ sled = "0.34"
 r2d2 = "0.8"
 redis = "0.24"
 
+# AWS Bedrock support
+aws-config = "1.1"
+aws-sdk-bedrockruntime = "1.13"
+aws-smithy-runtime-api = "1.1"
+base64 = "0.21"
+async-stream = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
