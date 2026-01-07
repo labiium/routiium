@@ -22,6 +22,19 @@ pub mod analytics;
 pub mod analytics_middleware;
 pub mod auth;
 pub mod bedrock;
+pub mod chat_history;
+pub mod chat_history_jsonl;
+pub mod chat_history_manager;
+pub mod chat_history_memory;
+
+#[cfg(feature = "sqlite")]
+pub mod chat_history_sqlite;
+
+#[cfg(feature = "postgres")]
+pub mod chat_history_postgres;
+
+#[cfg(feature = "turso")]
+pub mod chat_history_turso;
 
 pub mod conversion;
 pub mod mcp_client;
@@ -37,6 +50,23 @@ pub mod util;
 // Re-export the primary conversion function for ergonomic library use.
 pub use crate::analytics::{AnalyticsEvent, AnalyticsManager, CostInfo, TokenUsage};
 pub use crate::auth::{ApiKeyInfo, ApiKeyManager, GeneratedKey, Verification};
+pub use crate::chat_history::{
+    ChatHistoryError, ChatHistoryStore, CompositeStore, Conversation, ConversationFilters,
+    CostInfo as ChatCostInfo, MCPInfo, Message, MessageFilters, MessageRole, PrivacyLevel,
+    RoutingInfo, StorageStats, TokenInfo,
+};
+pub use crate::chat_history_jsonl::JsonlChatHistoryStore;
+pub use crate::chat_history_manager::{ChatHistoryConfig, ChatHistoryManager};
+pub use crate::chat_history_memory::MemoryChatHistoryStore;
+
+#[cfg(feature = "sqlite")]
+pub use crate::chat_history_sqlite::SqliteChatHistoryStore;
+
+#[cfg(feature = "postgres")]
+pub use crate::chat_history_postgres::PostgresChatHistoryStore;
+
+#[cfg(feature = "turso")]
+pub use crate::chat_history_turso::TursoChatHistoryStore;
 pub use crate::pricing::{ModelPricing, PricingConfig};
 pub use crate::router_client::{
     CachedRouterClient, FallbackConfig, HttpRouterClient, HttpRouterConfig, LocalPolicyRouter,
