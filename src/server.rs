@@ -692,9 +692,10 @@ async fn responses_passthrough(
     if matches!(resolution.mode, crate::util::UpstreamMode::Bedrock) {
         // Convert to Chat format first
         let chat_req = crate::conversion::responses_json_to_chat_request(&effective_body);
-        
+
         // Convert to Bedrock format
-        let (_content_type, bedrock_body) = match crate::bedrock::chat_to_bedrock_request(&chat_req) {
+        let (_content_type, bedrock_body) = match crate::bedrock::chat_to_bedrock_request(&chat_req)
+        {
             Ok(result) => result,
             Err(e) => {
                 return error_response(
@@ -705,19 +706,10 @@ async fn responses_passthrough(
         };
 
         // Extract region from base_url or use default
-        let region = resolution
-            .base_url
-            .split('.')
-            .nth(1)
-            .unwrap_or("us-east-1");
+        let region = resolution.base_url.split('.').nth(1).unwrap_or("us-east-1");
 
         // Invoke Bedrock model (non-streaming for now)
-        match crate::bedrock::invoke_bedrock_model(
-            &resolution.model_id,
-            bedrock_body,
-            region,
-        )
-        .await
+        match crate::bedrock::invoke_bedrock_model(&resolution.model_id, bedrock_body, region).await
         {
             Ok(bedrock_response) => {
                 // Convert Bedrock response to Chat Completions format
@@ -1208,9 +1200,10 @@ async fn chat_completions_passthrough(
                 );
             }
         };
-        
+
         // Convert to Bedrock format
-        let (_content_type, bedrock_body) = match crate::bedrock::chat_to_bedrock_request(&chat_req) {
+        let (_content_type, bedrock_body) = match crate::bedrock::chat_to_bedrock_request(&chat_req)
+        {
             Ok(result) => result,
             Err(e) => {
                 return error_response(
@@ -1221,19 +1214,10 @@ async fn chat_completions_passthrough(
         };
 
         // Extract region from base_url or use default
-        let region = resolution
-            .base_url
-            .split('.')
-            .nth(1)
-            .unwrap_or("us-east-1");
+        let region = resolution.base_url.split('.').nth(1).unwrap_or("us-east-1");
 
         // Invoke Bedrock model (non-streaming for now)
-        match crate::bedrock::invoke_bedrock_model(
-            &resolution.model_id,
-            bedrock_body,
-            region,
-        )
-        .await
+        match crate::bedrock::invoke_bedrock_model(&resolution.model_id, bedrock_body, region).await
         {
             Ok(bedrock_response) => {
                 // Convert Bedrock response to Chat Completions format

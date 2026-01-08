@@ -1,0 +1,43 @@
+{
+  "rules": [
+    {
+      "condition": {
+        "field": "model",
+        "operator": "prefix",
+        "value": "anthropic."
+      },
+      "route": "bedrock_claude"
+    },
+    {
+      "condition": {
+        "field": "model",
+        "operator": "prefix",
+        "value": "amazon."
+      },
+      "route": "bedrock_titan"
+    },
+    {
+      "condition": {
+        "field": "model",
+        "operator": "prefix",
+        "value": "meta."
+      },
+      "route": "bedrock_llama"
+    }
+  ],
+  "backends": {
+    "bedrock_claude": {
+      "url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+      "mode": "bedrock"
+    },
+    "bedrock_titan": {
+      "url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+      "mode": "bedrock"
+    },
+    "bedrock_llama": {
+      "url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+      "mode": "bedrock"
+    }
+  }
+}
+
