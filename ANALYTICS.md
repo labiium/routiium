@@ -2,7 +2,7 @@
 
 ## Overview
 
-The analytics system provides comprehensive tracking and analysis capabilities for all API requests processed by routiium. It captures detailed metrics about requests, responses, performance, authentication, and routing.
+The analytics system provides comprehensive tracking and analysis capabilities for all API requests processed by routiium. It captures detailed metrics about requests, responses, performance, authentication, routing, **token usage, and costs**. When integrated with a pricing configuration, the system automatically calculates and tracks costs for all requests, enabling detailed cost analysis and budgeting.
 
 ## Architecture
 
@@ -30,6 +30,8 @@ The analytics system provides comprehensive tracking and analysis capabilities f
 - Simple to inspect with tools like `jq` or import into external systems
 - Parent directories are created automatically
 - Data persists until you clear the file via the `/analytics/clear` endpoint or by removing the file
+- **Best for:** Small to medium deployments, easy debugging, external tool integration
+- **Performance:** Fast writes, slower queries on large datasets
 
 Configuration:
 ```bash
@@ -42,6 +44,8 @@ export ROUTIIUM_ANALYTICS_JSONL_PATH=/var/log/routiium/analytics.jsonl
 - Efficient time-based range queries using sorted sets
 - Model and endpoint indexing for fast filtering
 - Scales horizontally
+- **Best for:** Production deployments, high-volume traffic, distributed systems
+- **Performance:** Fast reads and writes, excellent for time-series queries
 
 Configuration:
 ```bash
@@ -54,6 +58,8 @@ export ROUTIIUM_ANALYTICS_TTL_SECONDS=2592000  # 30 days
 - Good for single-server deployments
 - No external dependencies
 - Automatic persistence
+- **Best for:** Single-server deployments without Redis
+- **Performance:** Good balance of speed and simplicity
 
 Configuration:
 ```bash
@@ -66,6 +72,8 @@ export ROUTIIUM_ANALYTICS_TTL_SECONDS=2592000
 - Limited by available RAM
 - Data lost on restart
 - Automatic size limiting
+- **Best for:** Development, testing, CI/CD pipelines
+- **Performance:** Fastest, but not persistent
 
 Configuration:
 ```bash
@@ -113,6 +121,24 @@ pub struct AnalyticsEvent {
 - `duration_ms`: Total request duration in milliseconds
 - `ttfb_ms`: Time to first byte (for streaming)
 - `upstream_duration_ms`: Upstream request time
+- `tokens_per_second`: Output tokens divided by duration (for performance analysis)
+
+### TokenUsage (Optional, when available)
+Detailed token breakdown from the provider response:
+- `prompt_tokens`: Input/prompt tokens consumed
+- `completion_tokens`: Output/completion tokens generated
+- `total_tokens`: Sum of prompt and completion tokens
+- `cached_tokens`: Tokens served from cache (if applicable, e.g., OpenAI prompt caching)
+- `reasoning_tokens`: Extended reasoning tokens (for o1/o3 models)
+
+### CostInfo (Optional, when pricing config is loaded)
+Calculated cost information based on token usage and model pricing:
+- `input_cost`: Cost for input tokens (USD)
+- `output_cost`: Cost for output tokens (USD)
+- `cached_cost`: Cost for cached tokens (USD, if applicable)
+- `total_cost`: Sum of all costs (USD)
+- `currency`: Currency code (e.g., "USD")
+- `pricing_model`: Model name used for pricing lookup
 
 ### AuthMetadata
 - `authenticated`: Authentication status
@@ -122,16 +148,86 @@ pub struct AnalyticsEvent {
 
 ### RoutingMetadata
 - `backend`: Backend provider (OpenAI, Anthropic, etc.)
-- `upstream_mode`: "chat" or "responses"
+- `upstream_mode`: "chat", "responses", or "bedrock"
 - `mcp_enabled`: Whether MCP was used
 - `mcp_servers`: List of MCP servers invoked
 - `system_prompt_applied`: System prompt injection flag
+
+## Cost Tracking Integration
+
+### Enabling Cost Tracking
+
+To enable automatic cost calculation, create a pricing configuration file:
+
+**pricing.json:**
+```json
+{
+  "models": {
+    "gpt-4o": {
+      "input_per_million": 2.50,
+      "output_per_million": 10.00,
+      "cached_per_million": 1.25,
+      "reasoning_per_million": null
+    },
+    "gpt-4o-mini": {
+      "input_per_million": 0.150,
+      "output_per_million": 0.600,
+      "cached_per_million": 0.075,
+      "reasoning_per_million": null
+    },
+    "o1": {
+      "input_per_million": 15.00,
+      "output_per_million": 60.00,
+      "cached_per_million": 7.50,
+      "reasoning_per_million": 60.00
+    }
+  },
+  "default": {
+    "input_per_million": 1.00,
+    "output_per_million": 2.00,
+    "cached_per_million": 0.50,
+    "reasoning_per_million": null
+  }
+}
+```
+
+**Configuration:**
+```bash
+export ROUTIIUM_PRICING_CONFIG=/path/to/pricing.json
+```
+
+### Cost Calculation
+
+When pricing is configured:
+1. Analytics middleware extracts token usage from provider responses
+2. Costs are calculated using the formula: `(tokens / 1,000,000) × price_per_million`
+3. All costs are tracked in USD (or configured currency)
+4. Costs are aggregated by model, user, and time period
+
+**Supported token types:**
+- **Input tokens**: Standard prompt/input tokens
+- **Output tokens**: Generated completion tokens
+- **Cached tokens**: Tokens served from provider cache (50% discount on OpenAI)
+- **Reasoning tokens**: Extended reasoning for o1/o3 models (billed separately)
+
+### Cost Queries
+
+Query costs using aggregate endpoint:
+```bash
+# Total cost over last 24 hours
+curl "http://localhost:8088/analytics/aggregate?start=$(date -d '24 hours ago' +%s)&end=$(date +%s)" | \
+  jq '.total_cost, .cost_by_model'
+
+# Cost per model
+curl "http://localhost:8088/analytics/aggregate" | \
+  jq '.cost_by_model'
+```
 
 ## API Endpoints
 
 ### GET /analytics/stats
 
-Returns current analytics system statistics.
+Returns current analytics system statistics, including cost information.
 
 **Response:**
 ```json
@@ -139,7 +235,13 @@ Returns current analytics system statistics.
   "total_events": 1542,
   "backend_type": "redis",
   "ttl_seconds": 2592000,
-  "max_events": null
+  "max_events": null,
+  "total_cost": 125.45,
+  "total_input_tokens": 1500000,
+  "total_output_tokens": 750000,
+  "total_cached_tokens": 250000,
+  "total_reasoning_tokens": 0,
+  "avg_tokens_per_second": 325.4
 }
 ```
 
@@ -180,7 +282,23 @@ Query individual events with optional time range and limit.
       "performance": {
         "duration_ms": 1247,
         "ttfb_ms": null,
-        "upstream_duration_ms": 1200
+        "upstream_duration_ms": 1200,
+        "tokens_per_second": 102.5
+      },
+      "token_usage": {
+        "prompt_tokens": 42,
+        "completion_tokens": 128,
+        "total_tokens": 170,
+        "cached_tokens": 20,
+        "reasoning_tokens": null
+      },
+      "cost": {
+        "input_cost": 0.0000063,
+        "output_cost": 0.0000768,
+        "cached_cost": 0.0000015,
+        "total_cost": 0.0000846,
+        "currency": "USD",
+        "pricing_model": "gpt-4o-mini"
       },
       "auth": {
         "authenticated": true,
@@ -219,7 +337,15 @@ Get aggregated metrics over a time period.
   "failed_requests": 19,
   "total_input_tokens": 45230,
   "total_output_tokens": 89441,
+  "total_cached_tokens": 12500,
+  "total_reasoning_tokens": 0,
   "avg_duration_ms": 1247.3,
+  "avg_tokens_per_second": 325.4,
+  "total_cost": 125.45,
+  "cost_by_model": {
+    "gpt-4o": 98.32,
+    "gpt-4o-mini": 27.13
+  },
   "models_used": {
     "gpt-4o": 892,
     "gpt-4o-mini": 650
@@ -255,10 +381,20 @@ Export analytics data in JSON or CSV format.
 - status_code
 - success
 - duration_ms
-- input_tokens
-- output_tokens
+- ttfb_ms
+- tokens_per_second
+- input_tokens (from token_usage)
+- output_tokens (from token_usage)
+- cached_tokens (from token_usage)
+- reasoning_tokens (from token_usage)
+- input_cost (from cost)
+- output_cost (from cost)
+- cached_cost (from cost)
+- total_cost (from cost)
 - backend
 - upstream_mode
+- api_key_id
+- api_key_label
 
 **Response Headers:**
 - `Content-Type`: application/json or text/csv
@@ -278,17 +414,54 @@ Clear all analytics data from storage.
 
 ## Use Cases
 
-### Cost Tracking
-Monitor token usage across models and time periods to estimate API costs:
+### Cost Tracking & Budgeting
+
+**Monitor actual costs** (when pricing config is loaded):
 ```bash
+# Get total costs and breakdown by model
 curl "http://localhost:8088/analytics/aggregate?start=1704067200&end=1704153600" | \
-  jq '.total_input_tokens, .total_output_tokens, .models_used'
+  jq '{
+    total_cost,
+    cost_by_model,
+    total_input_tokens,
+    total_output_tokens,
+    total_cached_tokens,
+    total_reasoning_tokens
+  }'
+```
+
+**Track cost per user** (when using managed mode):
+```bash
+# Export and filter by API key
+curl "http://localhost:8088/analytics/export?format=csv&start=1704067200" -o analytics.csv
+grep "key_abc123" analytics.csv | awk -F',' '{sum+=$20} END {print "Total: $"sum}'
+```
+
+**Monitor token efficiency**:
+```bash
+# Average tokens per second by model
+curl "http://localhost:8088/analytics/aggregate" | \
+  jq '.avg_tokens_per_second'
+```
+
+**Cost projection**:
+```bash
+# Calculate hourly rate and project monthly
+curl "http://localhost:8088/analytics/aggregate?start=$(date -d '1 hour ago' +%s)" | \
+  jq '.total_cost * 24 * 30'  # Hourly × 24 × 30
 ```
 
 ### Performance Monitoring
-Track request latency and identify slow endpoints:
+Track request latency, throughput, and identify slow endpoints:
 ```bash
-curl "http://localhost:8088/analytics/aggregate" | jq '.avg_duration_ms'
+# Average duration and tokens per second
+curl "http://localhost:8088/analytics/aggregate" | \
+  jq '{avg_duration_ms, avg_tokens_per_second}'
+
+# Find slow requests
+curl "http://localhost:8088/analytics/events?limit=1000" | \
+  jq '.events[] | select(.performance.duration_ms > 5000) | 
+    {id, model: .request.model, duration: .performance.duration_ms}'
 ```
 
 ### Usage Analytics
@@ -341,35 +514,91 @@ def get_metrics():
 ### Grafana Dashboard
 Create time-series visualizations by querying aggregated data at regular intervals.
 
-### Cost Calculation
-Calculate estimated costs based on token usage:
+### Cost Calculation & Reporting
+
+**Real-time cost dashboard** (when pricing config is enabled):
 ```python
 import requests
+from datetime import datetime, timedelta
 
-PRICING = {
-    "gpt-4o": {"input": 0.005, "output": 0.015},  # per 1K tokens
-    "gpt-4o-mini": {"input": 0.00015, "output": 0.0006}
-}
+def get_cost_report(hours=24):
+    """Get detailed cost report for last N hours"""
+    now = int(datetime.now().timestamp())
+    start = int((datetime.now() - timedelta(hours=hours)).timestamp())
+    
+    resp = requests.get(
+        f"http://localhost:8088/analytics/aggregate",
+        params={"start": start, "end": now}
+    )
+    data = resp.json()
+    
+    print(f"Cost Report - Last {hours} hours")
+    print("=" * 60)
+    print(f"Total Cost: ${data['total_cost']:.4f}")
+    print(f"Total Requests: {data['total_requests']}")
+    print(f"Average Cost per Request: ${data['total_cost'] / data['total_requests']:.6f}")
+    print()
+    
+    print("Cost by Model:")
+    for model, cost in sorted(data['cost_by_model'].items(), key=lambda x: x[1], reverse=True):
+        requests = data['models_used'][model]
+        avg_cost = cost / requests
+        print(f"  {model:30} ${cost:8.4f} ({requests:5} req, ${avg_cost:.6f}/req)")
+    print()
+    
+    print("Token Usage:")
+    print(f"  Input tokens:     {data['total_input_tokens']:,}")
+    print(f"  Output tokens:    {data['total_output_tokens']:,}")
+    print(f"  Cached tokens:    {data['total_cached_tokens']:,}")
+    print(f"  Reasoning tokens: {data['total_reasoning_tokens']:,}")
+    print()
+    
+    print("Performance:")
+    print(f"  Avg duration:     {data['avg_duration_ms']:.1f} ms")
+    print(f"  Avg throughput:   {data['avg_tokens_per_second']:.1f} tokens/sec")
 
-resp = requests.get("http://localhost:8088/analytics/aggregate")
-data = resp.json()
+get_cost_report(hours=24)
+```
 
-total_cost = 0
-for model, count in data["models_used"].items():
-    if model in PRICING:
-        # Estimate average tokens per request
-        avg_in = data["total_input_tokens"] / data["total_requests"]
-        avg_out = data["total_output_tokens"] / data["total_requests"]
-        
-        model_cost = (
-            (avg_in / 1000 * PRICING[model]["input"]) +
-            (avg_out / 1000 * PRICING[model]["output"])
-        ) * count
-        
-        total_cost += model_cost
-        print(f"{model}: ${model_cost:.4f}")
+**Budget alerts**:
+```python
+def check_budget_alert(budget_usd=100.0, period_hours=24):
+    """Alert if costs exceed budget"""
+    now = int(datetime.now().timestamp())
+    start = int((datetime.now() - timedelta(hours=period_hours)).timestamp())
+    
+    resp = requests.get(
+        f"http://localhost:8088/analytics/aggregate",
+        params={"start": start, "end": now}
+    )
+    data = resp.json()
+    
+    if data['total_cost'] > budget_usd:
+        print(f"⚠️  BUDGET ALERT: ${data['total_cost']:.2f} exceeds ${budget_usd:.2f}")
+        return True
+    else:
+        print(f"✓ Budget OK: ${data['total_cost']:.2f} / ${budget_usd:.2f}")
+        return False
+```
 
-print(f"Total estimated cost: ${total_cost:.4f}")
+**Cost per user tracking**:
+```python
+def user_costs():
+    """Get costs per API key"""
+    resp = requests.get("http://localhost:8088/analytics/events?limit=10000")
+    data = resp.json()
+    
+    user_costs = {}
+    for event in data['events']:
+        if event.get('cost'):
+            user = event['auth']['api_key_label'] or event['auth']['api_key_id']
+            user_costs[user] = user_costs.get(user, 0) + event['cost']['total_cost']
+    
+    print("Cost per User:")
+    for user, cost in sorted(user_costs.items(), key=lambda x: x[1], reverse=True):
+        print(f"  {user:30} ${cost:.4f}")
+
+user_costs()
 ```
 
 ## Best Practices
@@ -377,17 +606,51 @@ print(f"Total estimated cost: ${total_cost:.4f}")
 1. **Set Appropriate TTL**: Configure TTL based on your compliance and storage requirements
    - Development: 7 days (604800 seconds)
    - Production: 30-90 days (2592000-7776000 seconds)
+   - Compliance-driven: Adjust based on data retention policies
 
 2. **Use Redis for Production**: Redis provides the best performance and reliability for production workloads
+   - Supports clustering for horizontal scaling
+   - Fast time-series queries
+   - Automatic TTL management
 
-3. **Regular Exports**: Set up scheduled exports for long-term archival:
+3. **Regular Exports**: Set up scheduled exports for long-term archival and external analysis:
    ```bash
+   # Daily export at midnight
    0 0 * * * curl "http://localhost:8088/analytics/export?format=csv" -o "/backups/analytics-$(date +\%Y-\%m-\%d).csv"
+   
+   # Weekly cost report
+   0 0 * * 0 python3 /scripts/weekly_cost_report.py
    ```
 
 4. **Monitor Storage Usage**: Check analytics stats regularly to ensure storage isn't growing unbounded
+   ```bash
+   # Check total events and estimated storage
+   curl "http://localhost:8088/analytics/stats" | jq '{total_events, backend_type, total_cost}'
+   ```
 
-5. **Filter Sensitive Data**: Analytics intentionally doesn't store message content or full API keys
+5. **Enable Cost Tracking**: Always configure pricing for accurate cost monitoring
+   ```bash
+   export ROUTIIUM_PRICING_CONFIG=/path/to/pricing.json
+   ```
+
+6. **Filter Sensitive Data**: Analytics intentionally doesn't store message content or full API keys
+   - Only hashed key IDs and labels are stored
+   - No message payloads are captured
+   - IP addresses can be anonymized via reverse proxy
+
+7. **Set Budget Alerts**: Implement monitoring for cost thresholds
+   ```bash
+   # Example: Alert if hourly costs exceed $10
+   */30 * * * * /scripts/check_budget.sh
+   ```
+
+8. **Optimize Token Usage**: Monitor tokens_per_second to identify performance issues
+   ```bash
+   # Find models with low throughput
+   curl "http://localhost:8088/analytics/events?limit=1000" | \
+     jq '.events[] | select(.performance.tokens_per_second < 100) | 
+       {model: .request.model, tps: .performance.tokens_per_second}'
+   ```
 
 ## Privacy and Security
 
@@ -405,3 +668,58 @@ The analytics system is designed with privacy in mind:
 - **Batch exports**: Large exports may take time; use appropriate time ranges
 - **Memory limits**: In memory mode, old events are automatically pruned
 - **Async recording**: Analytics recording is non-blocking and won't slow down requests
+- **Cost calculation**: Minimal overhead (~1-2ms) when pricing config is loaded
+- **Token extraction**: Automatically parses token usage from provider responses
+
+## Pricing Configuration Reference
+
+### Pricing File Format
+
+```json
+{
+  "models": {
+    "model-name": {
+      "input_per_million": 2.50,
+      "output_per_million": 10.00,
+      "cached_per_million": 1.25,
+      "reasoning_per_million": null
+    }
+  },
+  "default": {
+    "input_per_million": 1.00,
+    "output_per_million": 2.00,
+    "cached_per_million": 0.50,
+    "reasoning_per_million": null
+  }
+}
+```
+
+### Pricing Lookup Logic
+
+1. Exact model name match (e.g., "gpt-4o-mini-2024-07-18")
+2. Fallback to prefix match (e.g., "gpt-4o-mini")
+3. Use default pricing if no match found
+4. Skip cost calculation if pricing unavailable
+
+### Updating Pricing
+
+Pricing can be updated without restarting:
+```bash
+# Edit pricing.json, then reload
+curl -X POST http://localhost:8088/reload/all
+```
+
+Or use dynamic pricing updates (if using Router integration):
+- Router can return cost information in RoutePlan
+- Analytics will use Router-provided costs when available
+
+### Cost Accuracy
+
+**Important**: Costs are estimates based on token counts and pricing configuration:
+- Token counts come from provider responses (accurate)
+- Pricing must match your actual provider pricing
+- Some providers offer volume discounts not reflected in base pricing
+- Cached token discounts are model-specific
+- Always reconcile with provider billing statements
+
+**Best practice**: Export analytics monthly and compare with provider invoices to validate accuracy.

@@ -4,7 +4,8 @@ Routiium is an HTTP service that:
 - Converts OpenAI Chat Completions requests into the modern OpenAI Responses API payloads.
 - Proxies both Chat Completions and Responses requests to one or more upstream providers.
 - Optionally injects system prompts per model/API at runtime.
-- Provides API key issuance/validation (managed mode), analytics collection, and runtime config reloads.
+- Provides API key issuance/validation (managed mode), analytics collection with cost tracking, and runtime config reloads.
+- Supports intelligent routing via Router integration with virtual model aliases and policy enforcement.
 
 This document details all HTTP routes, expected authentication, parameters, and examples.
 
@@ -18,15 +19,17 @@ Content-Type: application/json unless otherwise specified
 Routiium supports two modes:
 
 1) Managed mode (recommended)
-- Condition: Server has OPENAI_API_KEY set.
+- Condition: Server has OPENAI_API_KEY set or uses Router-based authentication.
 - Client sends an internal access key using Authorization: Bearer sk_<id>.<secret>.
-- The proxy validates the token (issue/revoke/expire via the “Keys” endpoints) and substitutes the upstream provider key (OPENAI_API_KEY or per-backend key_env).
+- The proxy validates the token (issue/revoke/expire via the "Keys" endpoints) and substitutes the upstream provider key (OPENAI_API_KEY or per-backend key_env).
 - Use the Keys endpoints to issue/revoke client tokens.
+- Provides full analytics, cost tracking, and usage monitoring capabilities.
 
 2) Passthrough mode
 - Condition: OPENAI_API_KEY is NOT set on the server.
 - Client sends their provider API key directly using Authorization: Bearer <provider_api_key>.
 - The proxy forwards that upstream unchanged.
+- Limited analytics capabilities (no per-user tracking).
 
 Common headers:
 - Authorization: Bearer <token>
@@ -37,19 +40,53 @@ Error responses:
 - Status: appropriate 4xx/5xx
 - Body: {"error":{"message":"human-readable error"}}
 
+Observability headers (when Router is enabled):
+- X-Route-Id: Unique route identifier for correlation
+- X-Resolved-Model: Actual upstream model used
+- X-Policy-Rev: Policy revision from Router
+- X-Content-Used: Privacy attestation (what content Router consumed)
+- X-Route-Cache: Cache status (hit, miss, stale)
+- Router-Schema: Router API schema version
+
 
 ## Routing and Multi-backend
 
-You can route requests by model prefix and optionally translate payloads when the upstream only supports Chat Completions:
+Routiium supports two routing modes:
+
+### 1. Router-based Routing (Recommended)
+Use a Router service to enable virtual model aliases, policy enforcement, and intelligent routing decisions.
+
+Configuration:
+```bash
+ROUTIIUM_ROUTER_URL=http://router:9090
+ROUTIIUM_ROUTER_TIMEOUT_MS=50
+ROUTIIUM_ROUTER_PRIVACY_MODE=features  # features, summary, or full
+ROUTIIUM_ROUTER_STRICT=1               # Fail on router errors
+ROUTIIUM_CACHE_TTL_MS=60000            # Plan cache TTL
+```
+
+Benefits:
+- Virtual model aliases (e.g., "edu-fast" → "gpt-4o-mini")
+- Cost-aware routing and budgeting
+- Policy enforcement (privacy tiers, rate limits)
+- Multi-turn conversation stickiness
+- Dynamic catalog updates without restarts
+
+### 2. Legacy Prefix-based Routing
+Route by model prefix with static configuration:
 
 - ROUTIIUM_BACKENDS rules (semicolon-separated):
   - prefix=<model_prefix>
   - base|base_url=<upstream_base_url>
   - key_env|api_key_env=<ENV_VAR_WITH_API_KEY> (optional)
-  - mode=responses|chat (optional; default from env; for /v1/responses non-stream calls, “chat” will translate the payload into Chat Completions form)
+  - mode=responses|chat|bedrock (optional; default from env)
 
 Example:
+```bash
 ROUTIIUM_BACKENDS="gpt-4o,base=https://api.openai.com/v1,mode=responses;local-,base=http://localhost:8000/v1,key_env=LOCAL_API_KEY,mode=chat"
+```
+
+Fallback: When Router is unavailable and ROUTIIUM_ROUTER_STRICT is not set, the system falls back to legacy routing.
 
 
 ## System Prompt Injection
@@ -58,7 +95,35 @@ If a system prompt config is loaded, Routiium can inject system prompts:
 - For /v1/responses: injects a {"role":"system","content":"..."} message into messages based on injection_mode: prepend (default), append, or replace.
 - For /v1/chat/completions: injects a system message by re-serializing the chat payload.
 
+Configuration supports:
+- Global system prompts
+- Per-model overrides
+- Per-API overrides
+- Injection modes: prepend, append, replace
+
 Configuration is hot-reloadable (see Reload endpoints).
+
+## Cost Tracking and Pricing
+
+When ROUTIIUM_PRICING_CONFIG is set, Routiium tracks costs for all requests:
+- Calculates costs based on token usage and model pricing
+- Supports input, output, cached, and reasoning tokens
+- Tracks costs per model, per user, and per time period
+- Integrates with analytics for cost reports
+
+Pricing config format:
+```json
+{
+  "models": {
+    "gpt-4o": {
+      "input_per_million": 2.50,
+      "output_per_million": 10.00,
+      "cached_per_million": 1.25,
+      "reasoning_per_million": null
+    }
+  }
+}
+```
 
 
 # Endpoints
@@ -75,12 +140,15 @@ The service registers these routes:
 - POST /keys/set_expiration
 - POST /reload/mcp
 - POST /reload/system_prompt
+- POST /reload/routing
 - POST /reload/all
 - GET /analytics/stats
 - GET /analytics/events
 - GET /analytics/aggregate
 - GET /analytics/export
 - POST /analytics/clear
+- GET /chat_history/:conversation_id
+- DELETE /chat_history/:conversation_id
 
 
 ## GET /status
@@ -111,7 +179,28 @@ Example response:
   "features": {
     "mcp": { "enabled": true, "config_path": "mcp.json", "reloadable": true },
     "system_prompt": { "enabled": true, "config_path": "system_prompt.json", "reloadable": true },
-    "analytics": { "enabled": true, "stats": { "total_events": 123, "...": "..." } }
+    "analytics": { 
+      "enabled": true, 
+      "backend": "jsonl",
+      "stats": { 
+        "total_events": 123,
+        "total_cost": 12.45,
+        "total_input_tokens": 50000,
+        "total_output_tokens": 25000
+      } 
+    },
+    "router": {
+      "mode": "remote",
+      "url": "http://router:9090",
+      "strict": true,
+      "cache_hits": 42,
+      "cache_misses": 18
+    },
+    "pricing": {
+      "enabled": true,
+      "config_path": "pricing.json",
+      "models_count": 15
+    }
   }
 }
 ```
@@ -166,6 +255,7 @@ Streaming:
 - The proxy streams upstream tokens/events back to the client.
 
 Example (managed mode):
+Example (streaming):
 ```
 curl -N -X POST http://localhost:PORT/v1/chat/completions \
   -H "Authorization: Bearer sk_abc.def" \
@@ -175,6 +265,16 @@ curl -N -X POST http://localhost:PORT/v1/chat/completions \
     "stream": true,
     "messages":[{"role":"user","content":"Tell me a joke"}]
   }'
+```
+
+Response headers (with Router):
+```
+HTTP/1.1 200 OK
+X-Route-Id: route_abc123xyz
+X-Resolved-Model: gpt-4o-mini-2024-07-18
+X-Policy-Rev: 42
+X-Content-Used: features_only
+Router-Schema: 1.1
 ```
 
 Example (passthrough mode):
@@ -365,6 +465,21 @@ Response (success):
 }
 ```
 
+### POST /reload/routing
+
+Reloads routing configuration (local alias map or ROUTIIUM_BACKENDS).
+
+Auth: None (protect via network ACL)
+
+Response (success):
+```json
+{
+  "success": true,
+  "message": "Routing configuration reloaded",
+  "backends_count": 3
+}
+```
+
 ### POST /reload/all
 
 Reloads both MCP and system prompt configurations (when configured).
@@ -388,6 +503,11 @@ Response (example):
     "per_model_count": 1,
     "per_api_count": 2,
     "injection_mode": "prepend"
+  },
+  "routing": {
+    "success": true,
+    "message": "Routing configuration reloaded",
+    "backends_count": 3
   }
 }
 ```
@@ -397,11 +517,36 @@ Response (example):
 
 If analytics initializes successfully from the environment, these endpoints are enabled.
 
+Storage backends:
+- **JSONL** (default): Append-only log at `data/analytics.jsonl`
+- **Redis**: Production-ready with TTL and indexing
+- **Sled**: Embedded database for single-server deployments
+- **Memory**: Development only, data lost on restart
+
+Configuration:
+```bash
+# JSONL (default)
+ROUTIIUM_ANALYTICS_JSONL_PATH=./data/analytics.jsonl
+
+# Redis (recommended for production)
+ROUTIIUM_ANALYTICS_REDIS_URL=redis://localhost:6379
+ROUTIIUM_ANALYTICS_TTL_SECONDS=2592000  # 30 days
+
+# Sled
+ROUTIIUM_ANALYTICS_SLED_PATH=./analytics.db
+ROUTIIUM_ANALYTICS_TTL_SECONDS=2592000
+
+# Memory (dev only)
+ROUTIIUM_ANALYTICS_FORCE_MEMORY=true
+ROUTIIUM_ANALYTICS_MAX_EVENTS=10000
+```
+
 Notes:
 - Time parameters are Unix seconds.
 - Defaults:
   - events/aggregate default to the last 1 hour if not specified
   - export defaults to last 24 hours and "json" format
+- Cost tracking requires ROUTIIUM_PRICING_CONFIG to be set
 
 ### GET /analytics/stats
 
@@ -409,11 +554,27 @@ High-level analytics stats.
 
 Auth: None (protect via network ACL)
 
-Response: Stats JSON (implementation-defined, includes totals, limits, etc.)
+Response: Stats JSON with cost tracking information
 
 Example:
 ```
 curl -s http://localhost:PORT/analytics/stats | jq
+```
+
+Example response:
+```json
+{
+  "total_events": 1542,
+  "backend_type": "jsonl",
+  "ttl_seconds": null,
+  "max_events": null,
+  "total_cost": 45.67,
+  "total_input_tokens": 150000,
+  "total_output_tokens": 75000,
+  "total_cached_tokens": 25000,
+  "total_reasoning_tokens": 0,
+  "avg_tokens_per_second": 325.4
+}
 ```
 
 ### GET /analytics/events
@@ -430,8 +591,49 @@ Query parameters:
 Response:
 ```json
 {
-  "events": [ /* ... */ ],
-  "count": 42,
+  "events": [
+    {
+      "id": "evt_abc123",
+      "timestamp": 1730000100,
+      "request": {
+        "endpoint": "/v1/chat/completions",
+        "method": "POST",
+        "model": "gpt-4o-mini",
+        "stream": false,
+        "input_tokens": 50
+      },
+      "response": {
+        "status_code": 200,
+        "success": true,
+        "output_tokens": 120
+      },
+      "performance": {
+        "duration_ms": 1247,
+        "tokens_per_second": 96.3
+      },
+      "token_usage": {
+        "prompt_tokens": 50,
+        "completion_tokens": 120,
+        "total_tokens": 170,
+        "cached_tokens": 20,
+        "reasoning_tokens": null
+      },
+      "cost": {
+        "input_cost": 0.0000075,
+        "output_cost": 0.000072,
+        "cached_cost": 0.0000015,
+        "total_cost": 0.0000810,
+        "currency": "USD",
+        "pricing_model": "gpt-4o-mini"
+      },
+      "routing": {
+        "backend": "openai",
+        "upstream_mode": "chat",
+        "system_prompt_applied": true
+      }
+    }
+  ],
+  "count": 1,
   "start": 1730000000,
   "end": 1730003600
 }
@@ -459,6 +661,39 @@ Example:
 curl -s "http://localhost:PORT/analytics/aggregate?start=1730000000&end=1730007200" | jq
 ```
 
+Example response:
+```json
+{
+  "total_requests": 1542,
+  "successful_requests": 1523,
+  "failed_requests": 19,
+  "total_input_tokens": 45230,
+  "total_output_tokens": 89441,
+  "total_cached_tokens": 12500,
+  "total_reasoning_tokens": 0,
+  "avg_duration_ms": 1247.3,
+  "avg_tokens_per_second": 325.4,
+  "total_cost": 45.67,
+  "cost_by_model": {
+    "gpt-4o": 32.50,
+    "gpt-4o-mini": 13.17
+  },
+  "models_used": {
+    "gpt-4o": 892,
+    "gpt-4o-mini": 650
+  },
+  "endpoints_hit": {
+    "/v1/chat/completions": 892,
+    "/v1/responses": 650
+  },
+  "backends_used": {
+    "openai": 1542
+  },
+  "period_start": 1730000000,
+  "period_end": 1730007200
+}
+```
+
 ### GET /analytics/export
 
 Export events for a time range.
@@ -471,8 +706,16 @@ Query parameters:
 - format (string, optional) – "json" (default) or "csv"
 
 Responses:
-- JSON: application/json attachment
-- CSV: text/csv attachment with header row
+- JSON: application/json attachment (complete event data)
+- CSV: text/csv attachment with header row (flattened data)
+
+CSV columns include:
+- id, timestamp, endpoint, method, model, stream
+- status_code, success, duration_ms
+- input_tokens, output_tokens, cached_tokens, reasoning_tokens
+- input_cost, output_cost, cached_cost, total_cost
+- backend, upstream_mode, tokens_per_second
+- api_key_id, api_key_label
 
 Examples:
 ```
@@ -523,15 +766,38 @@ curl -N -X POST http://localhost:PORT/v1/responses \
   }'
 ```
 
-## Chat Completions passthrough with system prompt injection
+## Chat Completions with Router alias and cost tracking
 ```
 curl -s -X POST http://localhost:PORT/v1/chat/completions \
   -H "Authorization: Bearer sk_abc.def" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-4o-mini",
+    "model": "edu-fast",
     "messages": [{"role":"user","content":"Write a haiku about latencies"}]
   }' | jq
+```
+
+Response includes cost information when pricing is configured:
+```json
+{
+  "id": "chatcmpl-abc123",
+  "model": "gpt-4o-mini-2024-07-18",
+  "usage": {
+    "prompt_tokens": 15,
+    "completion_tokens": 20,
+    "total_tokens": 35,
+    "prompt_tokens_details": {
+      "cached_tokens": 10
+    }
+  }
+}
+```
+
+Check response headers:
+```
+X-Route-Id: route_xyz789
+X-Resolved-Model: gpt-4o-mini-2024-07-18
+X-Policy-Rev: 42
 ```
 
 
@@ -547,10 +813,21 @@ curl -s -X POST http://localhost:PORT/v1/chat/completions \
 # Environment Variables (selected)
 
 - OPENAI_API_KEY – Enables managed mode; used as default upstream key if not overridden by routing.
-- ROUTIIUM_BACKENDS – Multi-backend routing config; see “Routing and Multi-backend”.
+- ROUTIIUM_BACKENDS – Multi-backend routing config; see "Routing and Multi-backend".
 - ROUTIIUM_KEYS_REQUIRE_EXPIRATION – Require expiration when generating keys ("1|true|yes|on").
 - ROUTIIUM_KEYS_DEFAULT_TTL_SECONDS – Default TTL for key generation.
 - ROUTIIUM_PRICING_CONFIG – Optional pricing JSON file to enable cost tracking aligned with your provider list.
+- ROUTIIUM_ROUTER_URL – Base URL for remote Router API (enables Router-based routing).
+- ROUTIIUM_ROUTER_TIMEOUT_MS – HTTP timeout for Router calls (default: 15ms).
+- ROUTIIUM_ROUTER_PRIVACY_MODE – Content sharing level: features, summary, or full (default: features).
+- ROUTIIUM_ROUTER_STRICT – Fail requests if routing fails (1|true|yes|on).
+- ROUTIIUM_CACHE_TTL_MS – Cache horizon for Router plans (default: 15000ms).
+- ROUTIIUM_ANALYTICS_JSONL_PATH – Path to JSONL analytics log (default: ./data/analytics.jsonl).
+- ROUTIIUM_ANALYTICS_REDIS_URL – Redis URL for analytics storage.
+- ROUTIIUM_ANALYTICS_SLED_PATH – Sled database path for analytics.
+- ROUTIIUM_ANALYTICS_TTL_SECONDS – TTL for analytics events in Redis/Sled.
+- ROUTIIUM_ANALYTICS_FORCE_MEMORY – Use in-memory analytics (dev only).
+- ROUTIIUM_ANALYTICS_MAX_EVENTS – Max events in memory mode.
 
 Notes:
 - In managed mode, an Authorization bearer is mandatory and is validated; the upstream provider key is selected by routing (key_env if configured, else OPENAI_API_KEY).

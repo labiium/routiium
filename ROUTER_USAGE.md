@@ -1,6 +1,18 @@
 # Routiium Router Usage Guide
 
-The router layer lets Routiium resolve human-friendly model aliases into concrete upstream endpoints and policies. This guide explains how routing decisions are made, which configuration hooks are available, and how to wire everything up in Docker.
+The router layer lets Routiium resolve human-friendly model aliases into concrete upstream endpoints and policies. This guide explains how routing decisions are made, which configuration hooks are available, how to wire everything up in Docker, and how to verify and troubleshoot router integration.
+
+**Table of Contents:**
+- [How Routing Works](#1-how-routing-works)
+- [Router Modes](#2-router-modes)
+- [Request Privacy Levels](#3-request-privacy-levels)
+- [Plans, Caching, and Headers](#4-plans-caching-and-headers)
+- [Setup Recipes](#5-setup-recipes)
+- [Docker & Docker Compose](#6-docker--docker-compose)
+- [Verification & Troubleshooting](#7-verification--troubleshooting)
+- [Practical Examples](#8-practical-examples)
+- [Router + Analytics Integration](#9-router--analytics-integration)
+- [Reference: Key Router Environment Variables](#10-reference-key-router-environment-variables)
 
 ---
 
@@ -90,6 +102,7 @@ The router’s `RoutePlan.content_used` field (and the `X-Content-Used` response
    cargo run --example router_service
    ```
    This serves `/route/plan`, `/route/feedback`, and `/catalog/models` on `http://127.0.0.1:9090`.
+
 2. Point Routiium at it:
    ```bash
    ROUTIIUM_ROUTER_URL=http://127.0.0.1:9090 \
@@ -97,13 +110,48 @@ The router’s `RoutePlan.content_used` field (and the `X-Content-Used` response
    ROUTIIUM_CACHE_TTL_MS=60000 \
    routiium --system-prompt-config=system_prompt.json
    ```
+
 3. Optional env knobs:
    - `ROUTIIUM_ROUTER_STRICT=1` – fail the request if the router rejects an alias.
    - `ROUTIIUM_ROUTER_MTLS=1` – enable mutual TLS (expect OS-level certs).
    - `ROUTIIUM_ROUTER_TIMEOUT_MS` – per-request timeout (ms).
    - `ROUTIIUM_CACHE_TTL_MS` – maximum cache TTL (ms) for remote plans.
+   - `ROUTIIUM_ROUTER_PRIVACY_MODE` – content sharing level (features, summary, full).
 
-Use the response headers or `/status` (`"router": { "mode": "remote", ... }`) to verify the connection. Router outages produce `WARN` logs; combine with strict mode to surface issues quickly.
+4. Verify the connection:
+   ```bash
+   # Check status endpoint
+   curl http://localhost:8088/status | jq '.router'
+   
+   # Expected output:
+   {
+     "mode": "remote",
+     "url": "http://127.0.0.1:9090",
+     "strict": false,
+     "cache_hits": 0,
+     "cache_misses": 0,
+     "privacy_mode": "features"
+   }
+   ```
+
+5. Test with a request:
+   ```bash
+   # Send a request using a router alias
+   curl -X POST http://localhost:8088/v1/chat/completions \
+     -H "Authorization: Bearer sk_test.abc123" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "model": "edu-fast",
+       "messages": [{"role":"user","content":"Hello"}]
+     }' -i
+   
+   # Check response headers for router metadata:
+   # X-Route-Id: route_abc123xyz
+   # X-Resolved-Model: gpt-4o-mini-2024-07-18
+   # Router-Schema: 1.1
+   ```
+
+Use the response headers or `/status` endpoint to verify the connection. Router outages produce `WARN` logs; combine with strict mode to surface issues quickly.
 
 ---
 
@@ -182,15 +230,568 @@ Expose the router on the same Docker network so Routiium can reach `http://route
 
 ## 7. Verification & Troubleshooting
 
-- `curl http://localhost:8088/status | jq '.router'` – confirms whether Routiium is using a local or remote router, cache stats, and strict mode.  
-- Inspect response headers from any `/v1/*` call (`x-route-id`, `router-schema`, `x-resolved-model`). Missing headers usually mean the fallback path was used.  
-- Enable `ROUTIIUM_ROUTER_STRICT=1` in staging to catch typos early; disable it in production when you prefer graceful degradation to legacy routing.  
-- Router logs should show `RouteRequest.alias` values that match `model` fields from clients; mismatches mean upstream clients are referencing unknown aliases.  
-- If you see `Router plan unavailable… falling back to legacy routing` in logs, verify network reachability, schema compatibility, and policy revisions.
+### 7.1 Basic Verification
+
+**Check Router Status:**
+```bash
+curl http://localhost:8088/status | jq '.router'
+```
+
+Expected output (remote router):
+```json
+{
+  "mode": "remote",
+  "url": "http://router:9090",
+  "strict": false,
+  "cache_hits": 42,
+  "cache_misses": 18,
+  "privacy_mode": "features"
+}
+```
+
+Expected output (local aliases):
+```json
+{
+  "mode": "local",
+  "policy": "file:///app/router_aliases.json",
+  "aliases_count": 5
+}
+```
+
+**Inspect Response Headers:**
+Every router-resolved request includes these headers:
+```bash
+curl -X POST http://localhost:8088/v1/chat/completions \
+  -H "Authorization: Bearer sk_test.abc" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"edu-fast","messages":[{"role":"user","content":"test"}]}' \
+  -i | grep -i "x-route\|router-schema"
+
+# Expected headers:
+# X-Route-Id: route_01JQ2K2C7Y3X
+# X-Resolved-Model: gpt-4o-mini-2024-07-18
+# X-Policy-Rev: 42
+# X-Content-Used: features_only
+# X-Route-Cache: hit
+# Router-Schema: 1.1
+```
+
+**Missing headers** indicate fallback to legacy routing was used.
+
+### 7.2 Common Issues
+
+#### Issue: "Router plan unavailable… falling back to legacy routing"
+
+**Symptoms:**
+- Logs show fallback warnings
+- Response headers missing `X-Route-Id`
+- Requests work but use `ROUTIIUM_BACKENDS` or global upstream
+
+**Diagnosis:**
+```bash
+# 1. Check router connectivity
+curl http://router:9090/capabilities
+
+# 2. Test direct router API call
+curl -X POST http://router:9090/route/plan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "schema_version":"1.1",
+    "alias":"edu-fast",
+    "api":"responses",
+    "caps":["text"]
+  }'
+
+# 3. Check Routiium logs
+docker logs routiium | grep -i router
+
+# 4. Verify environment variables
+docker exec routiium env | grep ROUTIIUM_ROUTER
+```
+
+**Solutions:**
+- Verify `ROUTIIUM_ROUTER_URL` is reachable from Routiium container
+- Check router service is running: `docker ps | grep router`
+- Ensure network connectivity: add both to same Docker network
+- Verify router schema compatibility (should be 1.1)
+- Check router logs for errors
+
+#### Issue: "Unknown model alias" or 404 from router
+
+**Symptoms:**
+- Router returns 404 or error
+- Logs show "Router rejected alias"
+- With `ROUTIIUM_ROUTER_STRICT=1`: request fails with 502
+
+**Diagnosis:**
+```bash
+# 1. List available models in router catalog
+curl http://router:9090/catalog/models | jq '.models[].id'
+
+# 2. Check what alias you're requesting
+curl http://localhost:8088/analytics/events?limit=10 | \
+  jq '.events[].request.model'
+
+# 3. Query router directly with your alias
+curl -X POST http://router:9090/route/plan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "schema_version":"1.1",
+    "alias":"your-alias-here",
+    "api":"responses",
+    "caps":["text"]
+  }' | jq
+```
+
+**Solutions:**
+- Update router aliases to include the requested model
+- Fix client code to use correct alias names
+- For local router: edit `router_aliases.json` and restart
+- For remote router: update router service configuration
+
+#### Issue: High latency or timeout errors
+
+**Symptoms:**
+- Slow response times
+- Timeout errors in logs
+- `ROUTIIUM_ROUTER_TIMEOUT_MS` errors
+
+**Diagnosis:**
+```bash
+# 1. Check router response time
+time curl -X POST http://router:9090/route/plan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "schema_version":"1.1",
+    "alias":"edu-fast",
+    "api":"responses",
+    "caps":["text"]
+  }'
+
+# 2. Check cache effectiveness
+curl http://localhost:8088/status | jq '.router | {cache_hits, cache_misses}'
+
+# 3. Monitor router performance
+curl http://localhost:8088/analytics/aggregate | \
+  jq '{avg_duration_ms, total_requests}'
+```
+
+**Solutions:**
+- Increase `ROUTIIUM_ROUTER_TIMEOUT_MS` (default: 15ms, try 50-100ms)
+- Increase `ROUTIIUM_CACHE_TTL_MS` to reduce router calls (default: 15000ms)
+- Ensure router and Routiium are in same AZ/region
+- Optimize router service performance
+- Enable router plan caching with appropriate TTL
+
+#### Issue: Cached plans not being used
+
+**Symptoms:**
+- High cache miss rate
+- Every request shows `X-Route-Cache: miss`
+- Poor performance despite caching enabled
+
+**Diagnosis:**
+```bash
+# Check cache stats
+curl http://localhost:8088/status | jq '.router'
+
+# Verify cache headers in responses
+curl -X POST http://localhost:8088/v1/chat/completions \
+  -H "Authorization: Bearer sk_test.abc" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"edu-fast","messages":[{"role":"user","content":"test"}]}' \
+  -i | grep X-Route-Cache
+
+# Make multiple identical requests
+for i in {1..5}; do
+  curl -X POST http://localhost:8088/v1/chat/completions \
+    -H "Authorization: Bearer sk_test.abc" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"edu-fast","messages":[{"role":"user","content":"test $i"}]}' \
+    -i 2>&1 | grep X-Route-Cache
+done
+```
+
+**Solutions:**
+- Verify `ROUTIIUM_CACHE_TTL_MS` is set and reasonable (60000 = 1 minute)
+- Check router returns valid `ttl_ms` in RoutePlan
+- Ensure cache key factors are stable (same alias, api, basic params)
+- Router plan `freeze_key` changes invalidate cache
+
+#### Issue: Privacy mode not working as expected
+
+**Symptoms:**
+- Router receives more/less content than expected
+- `X-Content-Used` header shows unexpected value
+
+**Diagnosis:**
+```bash
+# Check current privacy mode
+curl http://localhost:8088/status | jq '.router.privacy_mode'
+
+# Test with different modes
+ROUTIIUM_ROUTER_PRIVACY_MODE=full routiium &
+curl -X POST http://localhost:8088/v1/chat/completions \
+  -H "Authorization: Bearer sk_test.abc" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"edu-fast","messages":[{"role":"user","content":"test"}]}' \
+  -i | grep X-Content-Used
+```
+
+**Solutions:**
+- Set `ROUTIIUM_ROUTER_PRIVACY_MODE` to desired level: `features`, `summary`, or `full`
+- Restart Routiium after changing environment variables
+- Verify router logs to see what content it receives
+- Check `RouteRequest.content_attestation` in router logs
+
+### 7.3 Monitoring Best Practices
+
+**Enable Strict Mode in Staging:**
+```bash
+ROUTIIUM_ROUTER_STRICT=1
+```
+This makes routing failures explicit, helping catch configuration issues early.
+
+**Disable Strict Mode in Production:**
+```bash
+# Unset or set to 0
+ROUTIIUM_ROUTER_STRICT=0
+```
+Allows graceful fallback to legacy routing if router is unavailable.
+
+**Monitor Router Health:**
+```bash
+# Add to monitoring script
+curl -f http://router:9090/capabilities || alert "Router down"
+
+# Check cache efficiency
+cache_ratio=$(curl -s http://localhost:8088/status | \
+  jq -r '.router | .cache_hits / (.cache_hits + .cache_misses)')
+echo "Cache hit ratio: $cache_ratio"
+```
+
+**Alert on Fallback Usage:**
+```bash
+# Monitor logs for fallback warnings
+docker logs routiium 2>&1 | grep -i "falling back to legacy routing" && \
+  alert "Router fallback detected"
+```
+
+### 7.4 Debug Checklist
+
+- [ ] Router service is running: `curl http://router:9090/capabilities`
+- [ ] Routiium can reach router: test from Routiium container
+- [ ] `ROUTIIUM_ROUTER_URL` is set correctly
+- [ ] Router aliases are configured for requested models
+- [ ] Response headers include `X-Route-Id` and `X-Resolved-Model`
+- [ ] Cache hit ratio is reasonable (>50% for repeated requests)
+- [ ] Privacy mode matches requirements
+- [ ] Provider API keys are available (check `auth_env` in plans)
+- [ ] Router schema version matches (1.1)
+- [ ] No timeout errors in logs
 
 ---
 
-## 8. Reference: Key Router Environment Variables
+## 8. Practical Examples
+
+### 8.1 Testing Router Integration
+
+**Basic alias resolution:**
+```bash
+# Request using alias
+curl -X POST http://localhost:8088/v1/chat/completions \
+  -H "Authorization: Bearer sk_test.abc123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "edu-fast",
+    "messages": [
+      {"role": "user", "content": "What is HTTP/2?"}
+    ]
+  }' | jq
+
+# Check resolved model in response headers
+# X-Resolved-Model: gpt-4o-mini-2024-07-18
+```
+
+**Streaming with router:**
+```bash
+curl -N -X POST http://localhost:8088/v1/chat/completions \
+  -H "Authorization: Bearer sk_test.abc123" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "model": "edu-premium",
+    "stream": true,
+    "messages": [
+      {"role": "user", "content": "Write a haiku about routing"}
+    ]
+  }'
+```
+
+**Using conversation stickiness:**
+```bash
+# First turn (router returns plan_token in response)
+curl -X POST http://localhost:8088/v1/responses \
+  -H "Authorization: Bearer sk_test.abc123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "edu-fast",
+    "conversation": {"id": "conv_123"},
+    "input": [
+      {"role": "user", "content": "Hello, remember this: X=42"}
+    ]
+  }' -i
+
+# Note the X-Route-Id in response headers
+# X-Route-Id: route_abc123xyz
+
+# Second turn (uses stickiness to same upstream)
+curl -X POST http://localhost:8088/v1/responses \
+  -H "Authorization: Bearer sk_test.abc123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "edu-fast",
+    "conversation": {"id": "conv_123"},
+    "input": [
+      {"role": "user", "content": "What was X?"}
+    ],
+    "previous_response_id": "resp_from_first_turn"
+  }' -i
+
+# Should show same X-Resolved-Model as first turn
+```
+
+### 8.2 Router Catalog Queries
+
+**List available models:**
+```bash
+curl http://router:9090/catalog/models | jq '.models[] | {
+  id,
+  provider,
+  aliases,
+  status,
+  cost: .cost | {input_per_million, output_per_million}
+}'
+```
+
+**Filter by capability:**
+```bash
+# Find models with vision support
+curl http://router:9090/catalog/models | jq '.models[] | 
+  select(.capabilities.modalities | contains(["image"])) | 
+  {id, modalities: .capabilities.modalities}'
+```
+
+**Check model health:**
+```bash
+curl http://router:9090/catalog/models | jq '.models[] | 
+  select(.status != "healthy") | 
+  {id, status, status_reason}'
+```
+
+### 8.3 Privacy Mode Examples
+
+**Features only (default):**
+```bash
+ROUTIIUM_ROUTER_PRIVACY_MODE=features
+
+# Router receives only metadata: caps, token estimates, modalities
+# No message content sent to router
+```
+
+**Summary mode:**
+```bash
+ROUTIIUM_ROUTER_PRIVACY_MODE=summary
+
+# Router receives short summary of latest user message
+# Useful for content-aware routing without full content
+```
+
+**Full mode:**
+```bash
+ROUTIIUM_ROUTER_PRIVACY_MODE=full
+
+# Router receives system prompt and last 5 turns
+# Use only when router needs full context for policy enforcement
+```
+
+**Verify privacy level:**
+```bash
+curl -X POST http://localhost:8088/v1/chat/completions \
+  -H "Authorization: Bearer sk_test.abc" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"edu-fast","messages":[{"role":"user","content":"test"}]}' \
+  -i | grep X-Content-Used
+
+# Expected: X-Content-Used: features_only
+```
+
+### 8.4 Cost-Aware Routing
+
+**Router can enforce budget limits:**
+```bash
+# Router rejects if estimated cost exceeds budget
+curl -X POST http://localhost:8088/v1/chat/completions \
+  -H "Authorization: Bearer sk_test.abc" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "edu-premium",
+    "messages": [
+      {"role": "user", "content": "'"$(cat large_document.txt)"'"}
+    ]
+  }'
+
+# Router may return 429 with retry_hint_ms if over budget
+```
+
+**Check cost in analytics:**
+```bash
+# After router-routed requests with cost tracking
+curl http://localhost:8088/analytics/aggregate | jq '{
+  total_cost,
+  cost_by_model,
+  avg_cost_per_request: (.total_cost / .total_requests)
+}'
+```
+
+### 8.5 Testing Fallback Behavior
+
+**Test with router down (strict mode disabled):**
+```bash
+# Stop router
+docker stop router
+
+# Request should fallback to ROUTIIUM_BACKENDS
+curl -X POST http://localhost:8088/v1/chat/completions \
+  -H "Authorization: Bearer sk_test.abc" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role":"user","content":"test"}]
+  }' | jq
+
+# Check logs for fallback message
+docker logs routiium 2>&1 | tail -20 | grep "falling back"
+```
+
+**Test with strict mode enabled:**
+```bash
+# Enable strict mode
+docker exec routiium sh -c 'export ROUTIIUM_ROUTER_STRICT=1'
+
+# Request should fail with 502 when router is down
+curl -X POST http://localhost:8088/v1/chat/completions \
+  -H "Authorization: Bearer sk_test.abc" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "edu-fast",
+    "messages": [{"role":"user","content":"test"}]
+  }' | jq
+
+# Expected: 502 Bad Gateway with error message
+```
+
+---
+
+## 9. Router + Analytics Integration
+
+### 9.1 Tracking Router Usage
+
+**Router resolution analytics:**
+```bash
+# Get models resolved by router
+curl http://localhost:8088/analytics/events?limit=100 | jq '
+  .events[] | 
+  {
+    requested: .request.model,
+    resolved: (.routing.backend + "/" + .request.model),
+    cache_status: .routing.cache_status
+  }
+'
+```
+
+**Cache efficiency analysis:**
+```bash
+# Analyze cache hit rates over time
+curl http://localhost:8088/analytics/aggregate | jq '{
+  total_requests,
+  router_stats: {
+    cache_hits: (.router_cache_hits // 0),
+    cache_misses: (.router_cache_misses // 0),
+    hit_ratio: ((.router_cache_hits // 0) / ((.router_cache_hits // 0) + (.router_cache_misses // 0)))
+  }
+}'
+```
+
+### 9.2 Cost Analysis with Router
+
+**Per-alias cost tracking:**
+```bash
+# Export analytics and group by original alias
+curl "http://localhost:8088/analytics/export?format=csv" -o analytics.csv
+
+# Analyze with awk/pandas
+awk -F',' 'NR>1 {alias[$4]; cost[$4]+=$21} END {
+  for (a in alias) print a, cost[a]
+}' analytics.csv
+```
+
+**Router-driven cost optimization:**
+```python
+import requests
+from collections import defaultdict
+
+def analyze_router_cost_decisions():
+    """Analyze if router is making cost-effective decisions"""
+    resp = requests.get("http://localhost:8088/analytics/events?limit=1000")
+    events = resp.json()['events']
+    
+    alias_costs = defaultdict(lambda: {'count': 0, 'total_cost': 0})
+    
+    for event in events:
+        if event.get('cost'):
+            alias = event['request']['model']
+            alias_costs[alias]['count'] += 1
+            alias_costs[alias]['total_cost'] += event['cost']['total_cost']
+    
+    print("Router Alias Cost Analysis:")
+    print("=" * 60)
+    for alias, stats in sorted(alias_costs.items()):
+        avg_cost = stats['total_cost'] / stats['count']
+        print(f"{alias:30} ${stats['total_cost']:8.4f} "
+              f"({stats['count']:5} req, ${avg_cost:.6f}/req)")
+
+analyze_router_cost_decisions()
+```
+
+### 9.3 Performance Monitoring
+
+**Router latency impact:**
+```bash
+# Compare request durations with/without router
+curl http://localhost:8088/analytics/aggregate | jq '{
+  avg_duration_ms,
+  avg_upstream_duration_ms,
+  router_overhead_ms: (.avg_duration_ms - .avg_upstream_duration_ms)
+}'
+```
+
+**Identify slow routes:**
+```bash
+curl http://localhost:8088/analytics/events?limit=500 | jq '
+  .events[] | 
+  select(.performance.duration_ms > 3000) |
+  {
+    model: .request.model,
+    backend: .routing.backend,
+    duration_ms: .performance.duration_ms
+  }
+'
+```
+
+---
+
+## 10. Reference: Key Router Environment Variables
 
 | Env var | Default | Purpose |
 | ------- | ------- | ------- |
