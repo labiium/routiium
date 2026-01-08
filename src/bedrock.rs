@@ -233,12 +233,12 @@ fn chat_to_anthropic_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(
     if let Some(tools) = &chat_req.tools {
         let bedrock_tools: Vec<Value> = tools
             .iter()
-            .filter_map(|tool| match tool {
-                chat::ToolDefinition::Function { function } => Some(json!({
+            .map(|tool| match tool {
+                chat::ToolDefinition::Function { function } => json!({
                     "name": function.name,
                     "description": function.description.as_ref().unwrap_or(&function.name),
                     "input_schema": function.parameters
-                })),
+                }),
             })
             .collect();
 
@@ -1552,7 +1552,7 @@ mod tests {
             model: "mistral.ministral-3b-instruct".to_string(),
             messages: vec![ChatMessage {
                 role: Role::User,
-                content: content,
+                content,
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,

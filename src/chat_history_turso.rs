@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 
 /// Turso/libsql storage backend
 pub struct TursoChatHistoryStore {
+    #[allow(dead_code)]
     db: Database,
     // Shared connection for thread-safe access
     conn: Arc<Mutex<Connection>>,
@@ -135,19 +136,19 @@ impl ChatHistoryStore for TursoChatHistoryStore {
         let tool_calls_json = message
             .tool_calls
             .as_ref()
-            .map(|t| Self::serialize_json(t))
+            .map(Self::serialize_json)
             .transpose()?;
         let transformations_json = message
             .routing
             .transformations_applied
             .as_ref()
-            .map(|t| Self::serialize_json(t))
+            .map(Self::serialize_json)
             .transpose()?;
         let mcp_servers_json = Self::serialize_json(&message.mcp.mcp_servers)?;
         let cost_info_json = message
             .cost_info
             .as_ref()
-            .map(|c| Self::serialize_json(c))
+            .map(Self::serialize_json)
             .transpose()?;
         let privacy_level_json = Self::serialize_json(&message.privacy_level)?;
 
@@ -217,19 +218,19 @@ impl ChatHistoryStore for TursoChatHistoryStore {
             let tool_calls_json = message
                 .tool_calls
                 .as_ref()
-                .map(|t| Self::serialize_json(t))
+                .map(Self::serialize_json)
                 .transpose()?;
             let transformations_json = message
                 .routing
                 .transformations_applied
                 .as_ref()
-                .map(|t| Self::serialize_json(t))
+                .map(Self::serialize_json)
                 .transpose()?;
             let mcp_servers_json = Self::serialize_json(&message.mcp.mcp_servers)?;
             let cost_info_json = message
                 .cost_info
                 .as_ref()
-                .map(|c| Self::serialize_json(c))
+                .map(Self::serialize_json)
                 .transpose()?;
             let privacy_level_json = Self::serialize_json(&message.privacy_level)?;
 

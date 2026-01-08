@@ -844,14 +844,12 @@ async fn responses_passthrough(
                 }
                 response.streaming(stream)
             }
-            Err(e) => {
-                return router_error_response(
-                    http::StatusCode::BAD_GATEWAY,
-                    &e.to_string(),
-                    resolution.plan.as_ref(),
-                    &resolution.model_id,
-                );
-            }
+            Err(e) => router_error_response(
+                http::StatusCode::BAD_GATEWAY,
+                &e.to_string(),
+                resolution.plan.as_ref(),
+                &resolution.model_id,
+            ),
         }
     } else {
         let mut outbound_body = effective_body.clone();
@@ -895,14 +893,12 @@ async fn responses_passthrough(
                 }
                 builder.body(bytes)
             }
-            Err(e) => {
-                return router_error_response(
-                    http::StatusCode::BAD_GATEWAY,
-                    &e.to_string(),
-                    resolution.plan.as_ref(),
-                    &resolution.model_id,
-                );
-            }
+            Err(e) => router_error_response(
+                http::StatusCode::BAD_GATEWAY,
+                &e.to_string(),
+                resolution.plan.as_ref(),
+                &resolution.model_id,
+            ),
         }
     }
 }
@@ -1337,14 +1333,12 @@ async fn chat_completions_passthrough(
                 }
                 response.streaming(stream)
             }
-            Err(e) => {
-                return router_error_response(
-                    http::StatusCode::BAD_GATEWAY,
-                    &e.to_string(),
-                    resolution.plan.as_ref(),
-                    &resolution.model_id,
-                );
-            }
+            Err(e) => router_error_response(
+                http::StatusCode::BAD_GATEWAY,
+                &e.to_string(),
+                resolution.plan.as_ref(),
+                &resolution.model_id,
+            ),
         }
     } else {
         let mut outbound_body = body.clone();
@@ -1403,14 +1397,12 @@ async fn chat_completions_passthrough(
                 }
                 builder.body(bytes)
             }
-            Err(e) => {
-                return router_error_response(
-                    http::StatusCode::BAD_GATEWAY,
-                    &e.to_string(),
-                    resolution.plan.as_ref(),
-                    &resolution.model_id,
-                );
-            }
+            Err(e) => router_error_response(
+                http::StatusCode::BAD_GATEWAY,
+                &e.to_string(),
+                resolution.plan.as_ref(),
+                &resolution.model_id,
+            ),
         }
     }
 }
@@ -1866,7 +1858,7 @@ async fn reload_all(state: web::Data<AppState>) -> impl Responder {
 }
 
 /// Analytics endpoints
-
+///
 /// Get analytics statistics
 async fn analytics_stats(state: web::Data<AppState>) -> impl Responder {
     match &state.analytics {

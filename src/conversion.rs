@@ -924,7 +924,7 @@ fn map_messages(src: &[chat::ChatMessage]) -> Vec<resp::ResponsesMessage> {
             let mut content_value = map_message_content(&m.content);
             let has_tool_calls = tool_calls_raw
                 .as_ref()
-                .map_or(false, |items| !items.is_empty());
+                .is_some_and(|items| !items.is_empty());
 
             if content_value.is_null() && matches!(m.role, chat::Role::Assistant) && has_tool_calls
             {

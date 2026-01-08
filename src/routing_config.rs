@@ -47,17 +47,14 @@ pub enum LoadBalanceStrategy {
 }
 
 /// Upstream mode (Responses API or Chat Completions API)
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+/// Upstream mode (responses, chat, or bedrock)
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum UpstreamMode {
+    #[default]
     Responses,
     Chat,
-}
-
-impl Default for UpstreamMode {
-    fn default() -> Self {
-        Self::Responses
-    }
+    Bedrock,
 }
 
 /// Backend configuration

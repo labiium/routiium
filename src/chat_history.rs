@@ -27,7 +27,7 @@ pub enum ChatHistoryError {
 pub type Result<T> = std::result::Result<T, ChatHistoryError>;
 
 /// Privacy level for message content storage
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PrivacyLevel {
     /// Store only metadata, no content
@@ -35,13 +35,8 @@ pub enum PrivacyLevel {
     /// Store summary/fingerprint only
     Summary,
     /// Store full content
+    #[default]
     Full,
-}
-
-impl Default for PrivacyLevel {
-    fn default() -> Self {
-        Self::Full
-    }
 }
 
 /// Conversation metadata

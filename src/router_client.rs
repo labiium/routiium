@@ -27,25 +27,21 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 
 /// Mode for upstream API (Responses, Chat Completions, or Bedrock)
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum UpstreamMode {
+    #[default]
     Responses,
     Chat,
     Bedrock,
 }
 
-impl Default for UpstreamMode {
-    fn default() -> Self {
-        Self::Responses
-    }
-}
-
 /// Privacy mode for Router communication
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PrivacyMode {
     /// Only features/hashes, no raw content (default, safest)
+    #[default]
     FeaturesOnly,
     /// Include short summaries of system prompt and last-K turns
     Summary,
@@ -53,14 +49,8 @@ pub enum PrivacyMode {
     Full,
 }
 
-impl Default for PrivacyMode {
-    fn default() -> Self {
-        Self::FeaturesOnly
-    }
-}
-
 /// Privacy/compliance tier hint
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PrivacyTier {
     /// Educational cloud OK
@@ -70,13 +60,8 @@ pub enum PrivacyTier {
     /// Public cloud with DPA
     PublicCloudDpa,
     /// No restrictions
+    #[default]
     Unrestricted,
-}
-
-impl Default for PrivacyTier {
-    fn default() -> Self {
-        Self::Unrestricted
-    }
 }
 
 /// Model capabilities metadata
