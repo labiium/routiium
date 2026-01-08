@@ -15,6 +15,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
   rust:
@@ -23,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, "1.72.0"]
+        toolchain: [stable, "1.85.0"]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -39,17 +40,41 @@ jobs:
         with:
           workspaces: |
             . -> target
+          cache-on-failure: true
 
       - name: Show toolchain versions
         run: |
           rustc --version
           cargo --version
+          echo "Rust version: $(rustc --version)"
+          echo "Cargo version: $(cargo --version)"
+
+      - name: Verify Cargo.lock is up to date
+        run: cargo fetch --locked
 
       - name: Cargo fmt (check)
         run: cargo fmt --all -- --check
+        if: matrix.toolchain == 'stable'
 
       - name: Cargo clippy (warnings as errors)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Cargo build (debug)
+        run: cargo build --locked
+
+      - name: Cargo build (release)
+        run: cargo build --release --locked
+
       - name: Cargo tests
         run: cargo test --all --locked --no-fail-fast
+
+      - name: Check dependency tree
+        run: cargo tree
+        if: matrix.toolchain == 'stable'
+
+      - name: Verify MSRV compatibility
+        run: |
+          if [ "${{ matrix.toolchain }}" = "1.85.0" ]; then
+            echo "✓ Building with MSRV (1.85.0)"
+            cargo build --release --locked
+          fi

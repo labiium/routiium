@@ -5,12 +5,17 @@
 # - Ensure required components (rustfmt, clippy) are available by default.
 #
 # Notes:
+# - Updated to 1.85.0 to support dependencies requiring edition2024 features
 # - CI may additionally test on the latest stable toolchain; this pin guarantees
 #   that the code remains compatible with the declared MSRV.
 # - Developers can temporarily override with `RUSTUP_TOOLCHAIN=stable` or by using
 #   `rustup override set <toolchain>` in their workspace if needed.
+#
+# Changelog:
+# - 2024: Updated from 1.82.0 to 1.85.0 to fix CI/CD build failures
+#   (home crate 0.5.12 requires edition2024 support)
 
 [toolchain]
-channel = "1.82.0"
+channel = "1.85.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
