@@ -656,7 +656,7 @@ async fn test_conversation_list_with_filters() {
         ..Default::default()
     };
     let convs = store.list_conversations(&filters).await.unwrap();
-    assert!(convs.len() >= 1);
+    assert!(!convs.is_empty());
 }
 
 #[tokio::test]
@@ -867,7 +867,7 @@ async fn test_complex_routing_scenario() {
         .filter(|m| {
             // True aliasing: gpt-4 -> claude-3-opus (different model family)
             // Not aliasing: gpt-4 -> gpt-4-0613 (just version specification)
-            m.routing.requested_model.as_ref().map(|r| r.as_str()) == Some("gpt-4")
+            m.routing.requested_model.as_deref() == Some("gpt-4")
                 && m.routing
                     .actual_model
                     .as_ref()
