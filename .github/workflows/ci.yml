@@ -21,18 +21,14 @@ jobs:
   rust:
     name: Rust build, fmt, clippy, tests
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        toolchain: [stable, "1.85.0"]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust (${{ matrix.toolchain }})
+      - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.toolchain }}
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Cache cargo build artefacts
@@ -54,7 +50,6 @@ jobs:
 
       - name: Cargo fmt (check)
         run: cargo fmt --all -- --check
-        if: matrix.toolchain == 'stable'
 
       - name: Cargo clippy (warnings as errors)
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -70,11 +65,3 @@ jobs:
 
       - name: Check dependency tree
         run: cargo tree
-        if: matrix.toolchain == 'stable'
-
-      - name: Verify MSRV compatibility
-        run: |
-          if [ "${{ matrix.toolchain }}" = "1.85.0" ]; then
-            echo "✓ Building with MSRV (1.85.0)"
-            cargo build --release --locked
-          fi

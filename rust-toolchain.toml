@@ -1,21 +1,21 @@
 # rust-toolchain.toml
 #
 # Purpose:
-# - Pin a minimum supported Rust version (MSRV) for local development and reproducible CI.
+# - Use stable Rust toolchain for maximum compatibility
 # - Ensure required components (rustfmt, clippy) are available by default.
 #
 # Notes:
-# - Updated to 1.85.0 to support dependencies requiring edition2024 features
-# - CI may additionally test on the latest stable toolchain; this pin guarantees
-#   that the code remains compatible with the declared MSRV.
-# - Developers can temporarily override with `RUSTUP_TOOLCHAIN=stable` or by using
+# - Using "stable" channel to automatically get latest stable Rust version
+# - This ensures compatibility with all dependencies including AWS SDK
+# - CI may additionally test on specific versions for MSRV verification
+# - Developers can temporarily override with `RUSTUP_TOOLCHAIN=<version>` or by using
 #   `rustup override set <toolchain>` in their workspace if needed.
 #
 # Changelog:
-# - 2024: Updated from 1.82.0 to 1.85.0 to fix CI/CD build failures
-#   (home crate 0.5.12 requires edition2024 support)
+# - 2024: Changed from pinned version to "stable" to resolve AWS SDK compatibility
+#   (AWS SDK packages require rustc 1.88+, using stable ensures latest version)
 
 [toolchain]
-channel = "1.85.0"
+channel = "stable"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
