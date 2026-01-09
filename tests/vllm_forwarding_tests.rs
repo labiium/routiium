@@ -1,8 +1,9 @@
 use actix_web::{test, web, App};
 use axum::{extract::State, routing::post, Json, Router};
+use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
@@ -11,7 +12,7 @@ use routiium::server::config_routes;
 use routiium::system_prompt_config::SystemPromptConfig;
 use routiium::util::AppState;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
 
 #[derive(Clone)]
 struct UpstreamState {
@@ -102,16 +103,14 @@ impl Drop for EnvRestore {
 
 #[actix_web::test]
 async fn chat_passthrough_preserves_vllm_args_with_prompt_injection() {
-    let _restore = {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        EnvRestore::capture(&[
-            "OPENAI_BASE_URL",
-            "OPENAI_API_KEY",
-            "ROUTIIUM_BACKENDS",
-            "ROUTIIUM_ROUTER_URL",
-            "ROUTIIUM_ROUTER_STRICT",
-        ])
-    };
+    let _guard = ENV_LOCK.lock().await;
+    let _restore = EnvRestore::capture(&[
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "ROUTIIUM_BACKENDS",
+        "ROUTIIUM_ROUTER_URL",
+        "ROUTIIUM_ROUTER_STRICT",
+    ]);
 
     let upstream_response = json!({
         "id": "chatcmpl-test",
@@ -126,14 +125,11 @@ async fn chat_passthrough_preserves_vllm_args_with_prompt_injection() {
     });
     let upstream = MockUpstream::start(upstream_response).await;
 
-    {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        std::env::set_var("OPENAI_BASE_URL", format!("{}/v1", upstream.base_url));
-        std::env::remove_var("OPENAI_API_KEY");
-        std::env::remove_var("ROUTIIUM_BACKENDS");
-        std::env::remove_var("ROUTIIUM_ROUTER_URL");
-        std::env::remove_var("ROUTIIUM_ROUTER_STRICT");
-    }
+    std::env::set_var("OPENAI_BASE_URL", format!("{}/v1", upstream.base_url));
+    std::env::remove_var("OPENAI_API_KEY");
+    std::env::remove_var("ROUTIIUM_BACKENDS");
+    std::env::remove_var("ROUTIIUM_ROUTER_URL");
+    std::env::remove_var("ROUTIIUM_ROUTER_STRICT");
 
     let mut per_api = HashMap::new();
     per_api.insert("chat".to_string(), "System prompt".to_string());
@@ -193,16 +189,14 @@ async fn chat_passthrough_preserves_vllm_args_with_prompt_injection() {
 
 #[actix_web::test]
 async fn chat_passthrough_preserves_reasoning_content() {
-    let _restore = {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        EnvRestore::capture(&[
-            "OPENAI_BASE_URL",
-            "OPENAI_API_KEY",
-            "ROUTIIUM_BACKENDS",
-            "ROUTIIUM_ROUTER_URL",
-            "ROUTIIUM_ROUTER_STRICT",
-        ])
-    };
+    let _guard = ENV_LOCK.lock().await;
+    let _restore = EnvRestore::capture(&[
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "ROUTIIUM_BACKENDS",
+        "ROUTIIUM_ROUTER_URL",
+        "ROUTIIUM_ROUTER_STRICT",
+    ]);
 
     let upstream_response = json!({
         "id": "chatcmpl-reasoning",
@@ -222,14 +216,11 @@ async fn chat_passthrough_preserves_reasoning_content() {
     });
     let upstream = MockUpstream::start(upstream_response).await;
 
-    {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        std::env::set_var("OPENAI_BASE_URL", format!("{}/v1", upstream.base_url));
-        std::env::remove_var("OPENAI_API_KEY");
-        std::env::remove_var("ROUTIIUM_BACKENDS");
-        std::env::remove_var("ROUTIIUM_ROUTER_URL");
-        std::env::remove_var("ROUTIIUM_ROUTER_STRICT");
-    }
+    std::env::set_var("OPENAI_BASE_URL", format!("{}/v1", upstream.base_url));
+    std::env::remove_var("OPENAI_API_KEY");
+    std::env::remove_var("ROUTIIUM_BACKENDS");
+    std::env::remove_var("ROUTIIUM_ROUTER_URL");
+    std::env::remove_var("ROUTIIUM_ROUTER_STRICT");
 
     let state = AppState {
         analytics: None,
@@ -267,16 +258,14 @@ async fn chat_passthrough_preserves_reasoning_content() {
 
 #[actix_web::test]
 async fn responses_passthrough_forwards_vllm_args_in_chat_mode() {
-    let _restore = {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        EnvRestore::capture(&[
-            "OPENAI_BASE_URL",
-            "OPENAI_API_KEY",
-            "ROUTIIUM_BACKENDS",
-            "ROUTIIUM_ROUTER_URL",
-            "ROUTIIUM_ROUTER_STRICT",
-        ])
-    };
+    let _guard = ENV_LOCK.lock().await;
+    let _restore = EnvRestore::capture(&[
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "ROUTIIUM_BACKENDS",
+        "ROUTIIUM_ROUTER_URL",
+        "ROUTIIUM_ROUTER_STRICT",
+    ]);
 
     let upstream_response = json!({
         "id": "chatcmpl-resp",
@@ -291,15 +280,12 @@ async fn responses_passthrough_forwards_vllm_args_in_chat_mode() {
     });
     let upstream = MockUpstream::start(upstream_response).await;
 
-    {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        std::env::set_var("OPENAI_BASE_URL", format!("{}/v1", upstream.base_url));
-        std::env::remove_var("OPENAI_API_KEY");
-        std::env::set_var(
-            "ROUTIIUM_BACKENDS",
-            format!("prefix=local-,base={}/v1,mode=chat", upstream.base_url),
-        );
-    }
+    std::env::set_var("OPENAI_BASE_URL", format!("{}/v1", upstream.base_url));
+    std::env::remove_var("OPENAI_API_KEY");
+    std::env::set_var(
+        "ROUTIIUM_BACKENDS",
+        format!("prefix=local-,base={}/v1,mode=chat", upstream.base_url),
+    );
 
     let state = AppState {
         analytics: None,
