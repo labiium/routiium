@@ -416,6 +416,56 @@ pub fn responses_json_to_chat_request(v: &serde_json::Value) -> chat::ChatComple
     }
 }
 
+fn merge_response_extras_into_chat(src: &Value, dest: &mut Value) {
+    let Some(src_obj) = src.as_object() else {
+        return;
+    };
+    let Some(dest_obj) = dest.as_object_mut() else {
+        return;
+    };
+
+    const EXCLUDED_KEYS: [&str; 19] = [
+        "model",
+        "messages",
+        "input",
+        "temperature",
+        "top_p",
+        "max_output_tokens",
+        "stop",
+        "presence_penalty",
+        "frequency_penalty",
+        "logit_bias",
+        "user",
+        "n",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "stream",
+        "conversation",
+        "conversation_id",
+        "previous_response_id",
+    ];
+
+    for (key, value) in src_obj {
+        if dest_obj.contains_key(key) {
+            continue;
+        }
+        if EXCLUDED_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        dest_obj.insert(key.clone(), value.clone());
+    }
+}
+
+/// Convert a Responses-shaped JSON payload into a Chat Completions JSON payload,
+/// preserving non-standard top-level fields for passthrough backends (e.g., vLLM).
+pub fn responses_json_to_chat_value(v: &Value) -> Value {
+    let chat_req = responses_json_to_chat_request(v);
+    let mut chat_val = serde_json::to_value(chat_req).unwrap_or_else(|_| Value::Object(Map::new()));
+    merge_response_extras_into_chat(v, &mut chat_val);
+    chat_val
+}
+
 #[cfg(test)]
 mod tests_responses_to_chat {
     use super::*;

@@ -59,7 +59,7 @@ MODEL=gpt-4.1-nano
 If routiium is already running:
 
 ```bash
-./run_tests.sh
+ROUTIIUM_TEST_USE_EXTERNAL=1 ./run_tests.sh
 ```
 
 This skips server startup and runs tests immediately.
@@ -81,6 +81,21 @@ cargo run --release
 
 # Run tests
 pytest tests/ -v -s
+```
+
+## Auto-Managed Server via pytest
+
+The pytest suite can now launch and teardown routiium automatically. Just run:
+
+```bash
+cd python_tests
+pytest tests/ -v -s
+```
+
+To force tests to target an already running server, set:
+
+```bash
+ROUTIIUM_TEST_USE_EXTERNAL=1 pytest tests/ -v -s
 ```
 
 ## Automated Chat CLI Smoke Test

@@ -400,11 +400,8 @@ pub async fn sse_proxy_stream(
     let real_url = rewrite_responses_url_for_mode(url, mode);
     let mut body = payload.clone();
     if matches!(mode, UpstreamMode::Chat) {
-        // Translate Responses-shaped input to Chat request
-        let chat_req = crate::conversion::responses_json_to_chat_request(&body);
-        if let Ok(v) = serde_json::to_value(chat_req) {
-            body = v;
-        }
+        // Translate Responses-shaped input to Chat request (preserve extra params).
+        body = crate::conversion::responses_json_to_chat_value(&body);
     }
 
     let mut rb = client
@@ -598,10 +595,7 @@ pub async fn sse_proxy_stream_with_bearer_routed(
     // Translate payload if mode = Chat (vLLM/Ollama path)
     let mut body = payload.clone();
     if matches!(mode, UpstreamMode::Chat) {
-        let chat_req = crate::conversion::responses_json_to_chat_request(&body);
-        if let Ok(v) = serde_json::to_value(chat_req) {
-            body = v;
-        }
+        body = crate::conversion::responses_json_to_chat_value(&body);
     }
 
     // Determine effective bearer: explicit > provider key_env > OPENAI_API_KEY

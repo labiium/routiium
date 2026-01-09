@@ -303,6 +303,47 @@ fn strip_responses_only_fields(payload: &mut serde_json::Value) {
     }
 }
 
+fn inject_system_prompt_chat_json(payload: &mut serde_json::Value, prompt: &str, mode: &str) {
+    let Some(messages) = payload.get_mut("messages").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+
+    let is_system = |msg: &serde_json::Value| {
+        msg.get("role")
+            .and_then(|v| v.as_str())
+            .map(|role| role == "system")
+            .unwrap_or(false)
+    };
+
+    let system_message = serde_json::json!({
+        "role": "system",
+        "content": prompt
+    });
+
+    match mode {
+        "append" => {
+            let mut last_system_pos: Option<usize> = None;
+            for (idx, msg) in messages.iter().enumerate() {
+                if is_system(msg) {
+                    last_system_pos = Some(idx);
+                }
+            }
+            if let Some(pos) = last_system_pos {
+                messages.insert(pos + 1, system_message);
+            } else {
+                messages.push(system_message);
+            }
+        }
+        "replace" => {
+            messages.retain(|m| !is_system(m));
+            messages.insert(0, system_message);
+        }
+        _ => {
+            messages.insert(0, system_message);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -758,10 +799,7 @@ async fn responses_passthrough(
 
         let mut stream_body = effective_body.clone();
         if matches!(resolution.mode, crate::util::UpstreamMode::Chat) {
-            let chat_req = crate::conversion::responses_json_to_chat_request(&stream_body);
-            if let Ok(v) = serde_json::to_value(chat_req) {
-                stream_body = v;
-            }
+            stream_body = crate::conversion::responses_json_to_chat_value(&stream_body);
         }
 
         let real_url = format!("{}/{}", base, endpoint);
@@ -854,10 +892,7 @@ async fn responses_passthrough(
     } else {
         let mut outbound_body = effective_body.clone();
         if matches!(resolution.mode, crate::util::UpstreamMode::Chat) {
-            let chat_req = crate::conversion::responses_json_to_chat_request(&outbound_body);
-            if let Ok(v) = serde_json::to_value(chat_req) {
-                outbound_body = v;
-            }
+            outbound_body = crate::conversion::responses_json_to_chat_value(&outbound_body);
         }
 
         let real_url = format!("{}/{}", base, endpoint);
@@ -1055,17 +1090,7 @@ async fn chat_completions_passthrough(
     let model = body.get("model").and_then(|v| v.as_str());
 
     if let Some(prompt) = system_prompt_guard.get_prompt(model, Some("chat")) {
-        // Deserialize to ChatCompletionRequest for injection
-        if let Ok(mut req) = serde_json::from_value::<ChatCompletionRequest>(body.clone()) {
-            crate::conversion::inject_system_prompt_chat(
-                &mut req,
-                &prompt,
-                &system_prompt_guard.injection_mode,
-            );
-            if let Ok(modified) = serde_json::to_value(&req) {
-                body = modified;
-            }
-        }
+        inject_system_prompt_chat_json(&mut body, &prompt, &system_prompt_guard.injection_mode);
     }
     drop(system_prompt_guard);
 
