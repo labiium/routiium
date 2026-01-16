@@ -888,6 +888,15 @@ fn bedrock_mistral_to_chat(
     model: &str,
     request_id: Option<String>,
 ) -> Result<chat::ChatCompletionResponse> {
+    if let Some(output) = response.get("Output").and_then(|o| o.as_object()) {
+        if let Some(err_type) = output.get("__type").and_then(|t| t.as_str()) {
+            return Err(anyhow!("Bedrock error: {err_type}"));
+        }
+    }
+    if let Some(err_type) = response.get("__type").and_then(|t| t.as_str()) {
+        return Err(anyhow!("Bedrock error: {err_type}"));
+    }
+
     // Mistral response can be in different formats
     let mut content_text = String::new();
     let mut tool_calls: Vec<chat::ToolCall> = Vec::new();
@@ -1073,6 +1082,8 @@ pub async fn invoke_bedrock_model(model_id: &str, body: Value, region: &str) -> 
     let response = client
         .invoke_model()
         .model_id(model_id)
+        .content_type("application/json")
+        .accept("application/json")
         .body(Blob::new(body_bytes))
         .send()
         .await
@@ -1119,6 +1130,8 @@ pub async fn invoke_bedrock_model_streaming(
     let response = client
         .invoke_model_with_response_stream()
         .model_id(model_id)
+        .content_type("application/json")
+        .accept("application/json")
         .body(Blob::new(body_bytes))
         .send()
         .await
