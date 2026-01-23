@@ -718,6 +718,7 @@ fn bedrock_anthropic_to_chat(
             Some(tool_calls)
         },
         function_call: None,
+        reasoning_content: None,
     };
 
     let id = request_id.unwrap_or_else(|| format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()));
@@ -807,6 +808,7 @@ fn bedrock_titan_to_chat(
                 content: Some(content),
                 tool_calls: None,
                 function_call: None,
+                reasoning_content: None,
             },
             finish_reason: Some(finish_reason.to_string()),
             logprobs: None,
@@ -873,6 +875,7 @@ fn bedrock_meta_to_chat(
                 content: Some(content),
                 tool_calls: None,
                 function_call: None,
+                reasoning_content: None,
             },
             finish_reason: Some(finish_reason.to_string()),
             logprobs: None,
@@ -888,6 +891,12 @@ fn bedrock_mistral_to_chat(
     model: &str,
     request_id: Option<String>,
 ) -> Result<chat::ChatCompletionResponse> {
+    // Debug: Log raw Bedrock response for Mistral models
+    tracing::debug!(
+        "Raw Mistral Bedrock response: {}",
+        serde_json::to_string_pretty(&response).unwrap_or_else(|_| format!("{:?}", response))
+    );
+
     if let Some(output) = response.get("Output").and_then(|o| o.as_object()) {
         if let Some(err_type) = output.get("__type").and_then(|t| t.as_str()) {
             return Err(anyhow!("Bedrock error: {err_type}"));
@@ -897,12 +906,90 @@ fn bedrock_mistral_to_chat(
         return Err(anyhow!("Bedrock error: {err_type}"));
     }
 
-    // Mistral response can be in different formats
+    // Check if Bedrock already returned OpenAI-compatible format (Ministral models)
+    // These models return: {"choices": [{"message": {"content": "..."}}], "usage": {...}}
+    if let Some(choices) = response.get("choices").and_then(|c| c.as_array()) {
+        if let Some(first_choice) = choices.first() {
+            if let Some(message) = first_choice.get("message") {
+                // This is already an OpenAI Chat Completions response, just return it
+                // with minor adjustments to ensure compatibility
+                let content = message
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string());
+
+                let finish_reason = first_choice
+                    .get("finish_reason")
+                    .and_then(|f| f.as_str())
+                    .map(|s| s.to_string());
+
+                let usage = if let Some(usage_obj) = response.get("usage") {
+                    let prompt_tokens = usage_obj
+                        .get("prompt_tokens")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0);
+                    let completion_tokens = usage_obj
+                        .get("completion_tokens")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0);
+
+                    Some(chat::ChatUsage {
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens: prompt_tokens + completion_tokens,
+                        reasoning_tokens: None,
+                        cached_tokens: None,
+                    })
+                } else {
+                    None
+                };
+
+                let id = request_id.unwrap_or_else(|| {
+                    response
+                        .get("id")
+                        .and_then(|i| i.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()))
+                });
+
+                return Ok(chat::ChatCompletionResponse {
+                    id,
+                    object: "chat.completion".to_string(),
+                    created: response
+                        .get("created")
+                        .and_then(|c| c.as_u64())
+                        .unwrap_or_else(|| {
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs()
+                        }),
+                    model: model.to_string(),
+                    choices: vec![chat::ChatChoice {
+                        index: 0,
+                        message: chat::ChatResponseMessage {
+                            role: "assistant".to_string(),
+                            content,
+                            tool_calls: None,
+                            function_call: None,
+                            reasoning_content: None,
+                        },
+                        finish_reason,
+                        logprobs: None,
+                    }],
+                    usage,
+                    system_fingerprint: None,
+                });
+            }
+        }
+    }
+
+    // Mistral response can be in different formats (legacy format handling)
     let mut content_text = String::new();
     let mut tool_calls: Vec<chat::ToolCall> = Vec::new();
     let mut finish_reason = "stop";
 
-    // Check for new Ministral format (similar to Anthropic)
+    // Check for Anthropic-style format
     if let Some(content_array) = response.get("content").and_then(|c| c.as_array()) {
         for item in content_array {
             if let Some(obj) = item.as_object() {
@@ -1016,6 +1103,7 @@ fn bedrock_mistral_to_chat(
                     Some(tool_calls)
                 },
                 function_call: None,
+                reasoning_content: None,
             },
             finish_reason: Some(finish_reason.to_string()),
             logprobs: None,

@@ -86,6 +86,7 @@ pub fn responses_to_chat_response(
             Some(tool_calls)
         },
         function_call: None,
+        reasoning_content: None,
     };
     // Create single choice
     let choice = chat::ChatChoice {

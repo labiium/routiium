@@ -119,7 +119,30 @@ async fn resolve_upstream(
         }
     }
 
-    // Fallback to legacy prefix-based routing
+    // Try routing config first (if loaded)
+    let routing_guard = state.routing_config.read().await;
+    if let Ok(route) = routing_guard.resolve_route(requested_model) {
+        // Resolve alias to get the actual model ID
+        let resolved_model = routing_guard.resolve_alias(requested_model);
+        drop(routing_guard);
+        // Convert routing_config::UpstreamMode to util::UpstreamMode
+        let mode = match route.mode {
+            crate::routing_config::UpstreamMode::Responses => crate::util::UpstreamMode::Responses,
+            crate::routing_config::UpstreamMode::Chat => crate::util::UpstreamMode::Chat,
+            crate::routing_config::UpstreamMode::Bedrock => crate::util::UpstreamMode::Bedrock,
+        };
+        return Ok(UpstreamResolution {
+            base_url: route.base_url.clone(),
+            mode,
+            key_env: route.key_env.clone(),
+            headers: None,
+            model_id: resolved_model,
+            plan: None,
+        });
+    }
+    drop(routing_guard);
+
+    // Fallback to legacy prefix-based routing via ROUTIIUM_BACKENDS env var
     let mut base_url: Option<String> = None;
     let mut mode: Option<crate::util::UpstreamMode> = None;
     let mut key_env: Option<String> = None;

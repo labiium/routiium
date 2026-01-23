@@ -159,6 +159,9 @@ pub struct ChatResponseMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(default)]
     pub function_call: Option<FunctionCall>, // Legacy
+    /// Reasoning content for o1/o3 models (exposed chain-of-thought)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 /// Choice in a Chat Completions response
