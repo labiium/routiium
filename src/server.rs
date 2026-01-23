@@ -119,26 +119,42 @@ async fn resolve_upstream(
         }
     }
 
-    // Try routing config first (if loaded)
+    // Try routing config first (if loaded and actually has a match/default)
     let routing_guard = state.routing_config.read().await;
-    if let Ok(route) = routing_guard.resolve_route(requested_model) {
-        // Resolve alias to get the actual model ID
-        let resolved_model = routing_guard.resolve_alias(requested_model);
-        drop(routing_guard);
-        // Convert routing_config::UpstreamMode to util::UpstreamMode
-        let mode = match route.mode {
-            crate::routing_config::UpstreamMode::Responses => crate::util::UpstreamMode::Responses,
-            crate::routing_config::UpstreamMode::Chat => crate::util::UpstreamMode::Chat,
-            crate::routing_config::UpstreamMode::Bedrock => crate::util::UpstreamMode::Bedrock,
-        };
-        return Ok(UpstreamResolution {
-            base_url: route.base_url.clone(),
-            mode,
-            key_env: route.key_env.clone(),
-            headers: None,
-            model_id: resolved_model,
-            plan: None,
-        });
+    let resolved_alias = if !requested_model.is_empty() {
+        routing_guard.resolve_alias(requested_model)
+    } else {
+        String::new()
+    };
+    let has_rule =
+        !requested_model.is_empty() && routing_guard.find_rule(resolved_alias.as_str()).is_some();
+    let has_default = routing_guard.default_backend.is_some();
+    if has_rule || has_default {
+        if let Ok(route) = routing_guard.resolve_route(requested_model) {
+            // Resolve alias to get the actual model ID
+            let resolved_model = if !requested_model.is_empty() {
+                resolved_alias.clone()
+            } else {
+                std::env::var("MODEL").unwrap_or_else(|_| "gpt-5-nano".to_string())
+            };
+            drop(routing_guard);
+            // Convert routing_config::UpstreamMode to util::UpstreamMode
+            let mode = match route.mode {
+                crate::routing_config::UpstreamMode::Responses => {
+                    crate::util::UpstreamMode::Responses
+                }
+                crate::routing_config::UpstreamMode::Chat => crate::util::UpstreamMode::Chat,
+                crate::routing_config::UpstreamMode::Bedrock => crate::util::UpstreamMode::Bedrock,
+            };
+            return Ok(UpstreamResolution {
+                base_url: route.base_url.clone(),
+                mode,
+                key_env: route.key_env.clone(),
+                headers: None,
+                model_id: resolved_model,
+                plan: None,
+            });
+        }
     }
     drop(routing_guard);
 
@@ -199,7 +215,11 @@ async fn resolve_upstream(
     }
 
     let resolved_model = if !requested_model.is_empty() {
-        requested_model.to_string()
+        if !resolved_alias.is_empty() {
+            resolved_alias
+        } else {
+            requested_model.to_string()
+        }
     } else {
         std::env::var("MODEL").unwrap_or_else(|_| "gpt-5-nano".to_string())
     };
