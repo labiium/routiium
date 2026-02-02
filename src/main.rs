@@ -308,14 +308,26 @@ async fn main() -> std::io::Result<()> {
     };
 
     // Startup mode announcement (managed vs passthrough)
-    let managed_mode = std::env::var("OPENAI_API_KEY")
+    let managed_override = std::env::var("ROUTIIUM_MANAGED_MODE")
         .ok()
-        .filter(|v| !v.trim().is_empty())
-        .is_some();
+        .filter(|v| !v.trim().is_empty());
+    let managed_mode = routiium::util::managed_mode_from_env();
     if managed_mode {
-        tracing::info!("Auth mode: managed (internal upstream key; client bearer tokens validated and substituted upstream)");
+        if let Some(raw) = managed_override {
+            tracing::info!(
+                "Auth mode: managed (override via ROUTIIUM_MANAGED_MODE={})",
+                raw
+            );
+        } else {
+            tracing::info!("Auth mode: managed (OPENAI_API_KEY present)");
+        }
+    } else if let Some(raw) = managed_override {
+        tracing::info!(
+            "Auth mode: passthrough (override via ROUTIIUM_MANAGED_MODE={})",
+            raw
+        );
     } else {
-        tracing::info!("Auth mode: passthrough (client bearer tokens forwarded upstream)");
+        tracing::info!("Auth mode: passthrough (no OPENAI_API_KEY)");
     }
 
     let addr = env_bind_addr();

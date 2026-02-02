@@ -2,6 +2,47 @@ use crate::models::chat;
 use crate::models::responses as resp;
 use serde_json::{Map, Value};
 
+/// Parse <thought> tags from content and extract reasoning text.
+/// Returns (actual_content, reasoning_text) where reasoning_text is the content
+/// inside <thought>...</thought> tags, and actual_content is everything else.
+pub fn parse_thought_tags(content: &str) -> (String, Option<String>) {
+    let mut actual_content = String::new();
+    let mut reasoning_parts: Vec<String> = Vec::new();
+    let mut remaining = content;
+
+    while let Some(start_idx) = remaining.find("<thought>") {
+        // Add content before <thought> to actual_content
+        actual_content.push_str(&remaining[..start_idx]);
+
+        // Find the closing tag
+        let after_start = &remaining[start_idx + 9..]; // 9 = len("<thought>")
+        if let Some(end_idx) = after_start.find("</thought>") {
+            // Extract reasoning content
+            let reasoning_content = &after_start[..end_idx];
+            if !reasoning_content.is_empty() {
+                reasoning_parts.push(reasoning_content.to_string());
+            }
+            // Continue with content after </thought>
+            remaining = &after_start[end_idx + 10..]; // 10 = len("</thought>")
+        } else {
+            // No closing tag found, treat rest as actual content
+            actual_content.push_str(&remaining[start_idx..]);
+            break;
+        }
+    }
+
+    // Add any remaining content
+    actual_content.push_str(remaining);
+
+    let reasoning = if reasoning_parts.is_empty() {
+        None
+    } else {
+        Some(reasoning_parts.join("\n\n"))
+    };
+
+    (actual_content.trim().to_string(), reasoning)
+}
+
 // ============================================================================
 // Response Body Conversion Functions
 // ============================================================================
@@ -65,6 +106,7 @@ pub fn responses_to_chat_response(
                     name: name.clone(),
                     arguments: arguments.clone(),
                 },
+                extra_content: None,
             });
             finish_reason = "tool_calls";
         }
@@ -76,17 +118,29 @@ pub fn responses_to_chat_response(
         content = Some(String::new());
     }
 
+    // Parse <thought> tags to extract reasoning content
+    let (actual_content, reasoning) = content
+        .as_ref()
+        .map(|c| parse_thought_tags(c))
+        .unwrap_or_else(|| (String::new(), None));
+
     // Build the assistant message
     let message = chat::ChatResponseMessage {
         role: "assistant".to_string(),
-        content,
+        content: if actual_content.is_empty() && !tool_calls.is_empty() {
+            None
+        } else if actual_content.is_empty() {
+            Some(String::new())
+        } else {
+            Some(actual_content)
+        },
         tool_calls: if tool_calls.is_empty() {
             None
         } else {
             Some(tool_calls)
         },
         function_call: None,
-        reasoning_content: None,
+        reasoning,
     };
     // Create single choice
     let choice = chat::ChatChoice {
@@ -195,6 +249,7 @@ pub fn responses_chunk_to_chat_chunk(
                             name: Some(name.clone()),
                             arguments: Some(arguments.clone()),
                         }),
+                        extra_content: None,
                     });
                 }
                 resp::OutputItem::AssistantMessage { content, .. }
@@ -220,6 +275,7 @@ pub fn responses_chunk_to_chat_chunk(
         } else {
             Some(tool_call_deltas)
         },
+        reasoning: None,
     };
 
     let choice = chat::ChatStreamChoice {
@@ -337,6 +393,8 @@ pub fn responses_json_to_chat_request(v: &serde_json::Value) -> chat::ChatComple
         .map(|s| s.to_string());
     let n = v.get("n").and_then(|x| x.as_u64()).map(|u| u as u32);
 
+    let extra_body = v.get("extra_body").cloned();
+
     // Tools
     let tools = v.get("tools").and_then(|t| t.as_array()).map(|arr| {
         arr.iter()
@@ -414,6 +472,7 @@ pub fn responses_json_to_chat_request(v: &serde_json::Value) -> chat::ChatComple
         tool_choice,
         response_format,
         stream,
+        extra_body,
     }
 }
 
@@ -687,6 +746,7 @@ mod tests_responses_to_chat {
             tool_choice: Some(json!("auto")),
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = super::to_responses_request(&req, None);
@@ -737,6 +797,7 @@ mod tests_responses_to_chat {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = super::to_responses_request(&req, None);
@@ -807,6 +868,7 @@ pub fn to_responses_request(
         // Stateful conversation id (optional)
         conversation,
         previous_response_id: None,
+        extra_body: src.extra_body.clone(),
     }
 }
 
@@ -1185,6 +1247,7 @@ mod tests {
             tool_choice: None,
             response_format: None,
             stream: Some(false),
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, Some("conv-xyz".into()));
@@ -1243,6 +1306,7 @@ mod tests {
                 extra,
             }),
             stream: Some(true),
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -1291,6 +1355,7 @@ mod tests {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);

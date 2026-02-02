@@ -98,6 +98,10 @@ pub struct ResponsesRequest {
     /// Optional pointer to a prior Responses ID (state chaining)
     #[serde(default)]
     pub previous_response_id: Option<String>,
+
+    /// Provider-specific extra options (e.g., Gemini thinking_config)
+    #[serde(default)]
+    pub extra_body: Option<serde_json::Value>,
 }
 
 impl Serialize for ResponsesRequest {
@@ -185,6 +189,9 @@ impl Serialize for ResponsesRequest {
         }
         if let Some(prev) = self.previous_response_id.as_ref() {
             root.insert("previous_response_id".into(), Value::String(prev.clone()));
+        }
+        if let Some(extra) = self.extra_body.as_ref() {
+            root.insert("extra_body".into(), extra.clone());
         }
 
         Value::Object(root).serialize(serializer)

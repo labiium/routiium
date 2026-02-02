@@ -124,6 +124,10 @@ pub struct ChatCompletionRequest {
     // Streaming
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+
+    /// Provider-specific extra options (e.g., Gemini thinking_config)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_body: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -138,6 +142,9 @@ pub struct ToolCall {
     #[serde(rename = "type")]
     pub call_type: String, // "function"
     pub function: FunctionCall,
+    /// Provider-specific extra content (e.g., Gemini thought_signature)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_content: Option<serde_json::Value>,
 }
 
 /// Function call details
@@ -159,9 +166,9 @@ pub struct ChatResponseMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(default)]
     pub function_call: Option<FunctionCall>, // Legacy
-    /// Reasoning content for o1/o3 models (exposed chain-of-thought)
+    /// Reasoning content extracted from <thought> tags (Gemini and other reasoning models)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_content: Option<String>,
+    pub reasoning: Option<String>,
 }
 
 /// Choice in a Chat Completions response
@@ -223,6 +230,9 @@ pub struct ChatDelta {
     pub content: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<ToolCallDelta>>,
+    /// Reasoning content delta for streaming (Gemini and other reasoning models)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// Tool call delta in streaming
@@ -236,6 +246,9 @@ pub struct ToolCallDelta {
     pub call_type: Option<String>,
     #[serde(default)]
     pub function: Option<FunctionCallDelta>,
+    /// Provider-specific extra content (e.g., Gemini thought_signature)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_content: Option<serde_json::Value>,
 }
 
 /// Function call delta
@@ -269,4 +282,26 @@ pub struct ChatCompletionChunk {
     pub choices: Vec<ChatStreamChoice>,
     #[serde(default)]
     pub usage: Option<ChatUsage>, // Only in final chunk
+}
+
+/// OpenAI-compatible model information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Model {
+    /// Model ID
+    pub id: String,
+    /// Object type (always "model")
+    pub object: String,
+    /// Creation timestamp
+    pub created: u64,
+    /// Model owner (e.g., "openai")
+    pub owned_by: String,
+}
+
+/// OpenAI-compatible models list response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelsResponse {
+    /// Object type (always "list")
+    pub object: String,
+    /// List of models
+    pub data: Vec<Model>,
 }

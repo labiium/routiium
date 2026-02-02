@@ -81,6 +81,7 @@ Routiium loads `.env`, `.envfile`, or any path referenced via `ENV_FILE`, `ENVFI
 - `RUST_LOG` – tracing filter, e.g. `info,tower_http=info`.
 - `OPENAI_BASE_URL` – default upstream base URL (`https://api.openai.com/v1`).
 - `OPENAI_API_KEY` – presence enables managed auth and serves as the fallback upstream bearer.
+- `ROUTIIUM_MANAGED_MODE` – override auth mode selection (`managed|force|true` to require Routiium keys even without `OPENAI_API_KEY`, `passthrough|false` to disable). Defaults to auto (managed when `OPENAI_API_KEY` is present).
 - `MODEL` – default model when the client omits `model`.
 - `ROUTIIUM_UPSTREAM_MODE` – `responses` (default) or `chat`; `chat` rewrites upstream calls to `/v1/chat/completions` and converts payloads (handy for vLLM/Ollama).
 - `ROUTIIUM_HTTP_TIMEOUT_SECONDS` – reqwest client timeout.
@@ -130,8 +131,9 @@ Routiium loads `.env`, `.envfile`, or any path referenced via `ENV_FILE`, `ENVFI
 | `POST /convert` | Convert a Chat Completions payload into a Responses payload (applies system prompts, merges MCP tools, supports `conversation_id`). | None |
 | `POST /v1/responses` | Native Responses proxy (handles system prompts, legacy tool formats, routing, analytics, streaming). | Managed or passthrough bearer |
 | `POST /v1/chat/completions` | Native Chat Completions proxy with prompt injection and optional conversion of Responses-shaped upstream bodies. | Managed or passthrough bearer |
-| `GET /keys` | List issued API keys (id, label, timestamps, scopes). | Protect via network ACLs |
+| `GET /keys` | List issued API keys (id, label, timestamps, scopes). Supports `label`, `label_prefix`, `include_revoked=false`. | Protect via network ACLs |
 | `POST /keys/generate` | Issue a new `sk_<id>.<secret>` token; body supports `label`, `ttl_seconds`, `expires_at`, `scopes`. | Protect via network ACLs |
+| `POST /keys/generate_batch` | Issue multiple keys in one call (`labels` array, optional `label_prefix`, `ttl_seconds`, `expires_at`, `scopes`). | Protect via network ACLs |
 | `POST /keys/revoke` | Revoke a key by id. | Protect via network ACLs |
 | `POST /keys/set_expiration` | Set or clear expiration on an existing key. | Protect via network ACLs |
 | `POST /reload/mcp` | Reload the MCP config and reconnect servers. | Typically internal |
@@ -146,8 +148,8 @@ Routiium loads `.env`, `.envfile`, or any path referenced via `ENV_FILE`, `ENVFI
 
 ## Authentication Modes
 
-1. **Managed mode** (recommended): set `OPENAI_API_KEY` (and any additional provider env vars referenced by routing rules). Clients call Routiium with internally issued tokens (`sk_<id>.<secret>`). The proxy validates them through `ApiKeyManager` before substituting provider secrets upstream.
-2. **Passthrough mode**: leave `OPENAI_API_KEY` unset. Clients send their provider key in `Authorization: Bearer ...` and Routiium forwards it upstream unchanged (still applying conversion, routing, analytics, etc.).
+1. **Managed mode** (recommended): set `OPENAI_API_KEY` (and any additional provider env vars referenced by routing rules). Clients call Routiium with internally issued tokens (`sk_<id>.<secret>`). The proxy validates them through `ApiKeyManager` before substituting provider secrets upstream. If you are routing only to providers that don't require OpenAI keys (e.g., Bedrock), you can force managed mode via `ROUTIIUM_MANAGED_MODE=force`.
+2. **Passthrough mode**: leave `OPENAI_API_KEY` unset, or explicitly set `ROUTIIUM_MANAGED_MODE=passthrough`. Clients send their provider key in `Authorization: Bearer ...` and Routiium forwards it upstream unchanged (still applying conversion, routing, analytics, etc.).
 
 Managed mode keeps a hot, in-process cache of every issued API key so sled-backed deployments never block on host filesystem latency during verification. The cache is warmed at startup and updated immediately on `generate`, `revoke`, and `set_expiration`. Set `ROUTIIUM_KEYS_DISABLE_CACHE=1` if you need every verification to go back to a shared store (e.g., Redis in multi-node setups).
 

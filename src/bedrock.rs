@@ -95,6 +95,20 @@ pub struct BedrockToolResult {
     pub content: String,
 }
 
+fn normalize_tool_call_id(id: &str) -> String {
+    let trimmed = id.trim();
+    if trimmed.len() == 9 && trimmed.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return trimmed.to_string();
+    }
+
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(trimmed.as_bytes());
+    let digest = hasher.finalize();
+    let hex = hex::encode(digest);
+    hex.chars().take(9).collect()
+}
+
 /// Convert Chat Completions request to Bedrock format
 pub fn chat_to_bedrock_request(chat_req: &chat::ChatCompletionRequest) -> Result<(String, Value)> {
     let provider = BedrockProvider::from_model_id(&chat_req.model)?;
@@ -352,106 +366,167 @@ fn chat_to_mistral_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(St
     let mut messages: Vec<Value> = Vec::new();
 
     for msg in &chat_req.messages {
-        let role = match msg.role {
-            chat::Role::System => "system",
-            chat::Role::User => "user",
-            chat::Role::Assistant => "assistant",
+        match msg.role {
+            chat::Role::System => {
+                if let Some(text) = msg.content.as_str() {
+                    messages.push(json!({
+                        "role": "system",
+                        "content": text
+                    }));
+                }
+            }
+            chat::Role::User => {
+                if let Some(content_array) = msg.content.as_array() {
+                    let mut content_parts: Vec<Value> = Vec::new();
+                    for part in content_array {
+                        if let Some(obj) = part.as_object() {
+                            if let Some(type_str) = obj.get("type").and_then(|t| t.as_str()) {
+                                match type_str {
+                                    "text" => {
+                                        if let Some(text) = obj.get("text").and_then(|t| t.as_str())
+                                        {
+                                            content_parts.push(json!({
+                                                "type": "text",
+                                                "text": text
+                                            }));
+                                        }
+                                    }
+                                    "image_url" => {
+                                        if let Some(image_url) = obj.get("image_url") {
+                                            let url = image_url
+                                                .get("url")
+                                                .and_then(|u| u.as_str())
+                                                .or_else(|| image_url.as_str());
+                                            if let Some(url) = url {
+                                                // Bedrock Mistral expects OpenAI-style image_url payloads.
+                                                content_parts.push(json!({
+                                                    "type": "image_url",
+                                                    "image_url": { "url": url }
+                                                }));
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+
+                    if !content_parts.is_empty() {
+                        messages.push(json!({
+                            "role": "user",
+                            "content": content_parts
+                        }));
+                    }
+                } else if let Some(text) = msg.content.as_str() {
+                    messages.push(json!({
+                        "role": "user",
+                        "content": text
+                    }));
+                }
+            }
+            chat::Role::Assistant => {
+                let content = if let Some(content_array) = msg.content.as_array() {
+                    let mut content_parts: Vec<Value> = Vec::new();
+                    for part in content_array {
+                        if let Some(obj) = part.as_object() {
+                            if let Some(type_str) = obj.get("type").and_then(|t| t.as_str()) {
+                                match type_str {
+                                    "text" => {
+                                        if let Some(text) = obj.get("text").and_then(|t| t.as_str())
+                                        {
+                                            content_parts.push(json!({
+                                                "type": "text",
+                                                "text": text
+                                            }));
+                                        }
+                                    }
+                                    "image_url" => {
+                                        if let Some(image_url) = obj.get("image_url") {
+                                            let url = image_url
+                                                .get("url")
+                                                .and_then(|u| u.as_str())
+                                                .or_else(|| image_url.as_str());
+                                            if let Some(url) = url {
+                                                content_parts.push(json!({
+                                                    "type": "image_url",
+                                                    "image_url": { "url": url }
+                                                }));
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    if content_parts.is_empty() {
+                        json!("")
+                    } else {
+                        json!(content_parts)
+                    }
+                } else if let Some(text) = msg.content.as_str() {
+                    json!(text)
+                } else {
+                    json!("")
+                };
+
+                let tool_calls = msg.tool_calls.as_ref().map(|calls| {
+                    calls
+                        .iter()
+                        .map(|tool_call| {
+                            let id = normalize_tool_call_id(&tool_call.id);
+                            json!({
+                                "id": id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_call.function.name,
+                                    "arguments": tool_call.function.arguments
+                                }
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                });
+
+                let mut message = json!({
+                    "role": "assistant",
+                    "content": content
+                });
+
+                let has_tool_calls = tool_calls
+                    .as_ref()
+                    .map(|calls| !calls.is_empty())
+                    .unwrap_or(false);
+                let has_content = match message.get("content") {
+                    Some(Value::String(text)) => !text.trim().is_empty(),
+                    Some(Value::Array(items)) => !items.is_empty(),
+                    _ => false,
+                };
+
+                if !has_content && !has_tool_calls {
+                    continue;
+                }
+
+                if let Some(tool_calls) = tool_calls {
+                    if let Some(obj) = message.as_object_mut() {
+                        obj.insert("tool_calls".to_string(), json!(tool_calls));
+                    }
+                }
+
+                messages.push(message);
+            }
             chat::Role::Tool => {
-                // Handle tool results
                 if let Some(tool_call_id) = &msg.tool_call_id {
+                    let tool_call_id = normalize_tool_call_id(tool_call_id);
                     let content_text = msg.content.as_str().unwrap_or("").to_string();
                     messages.push(json!({
                         "role": "tool",
-                        "name": tool_call_id,
+                        "tool_call_id": tool_call_id,
                         "content": content_text
                     }));
                 }
-                continue;
             }
-            _ => continue,
-        };
-
-        // Handle multimodal content (text + images)
-        if let Some(content_array) = msg.content.as_array() {
-            let mut content_parts: Vec<Value> = Vec::new();
-
-            for part in content_array {
-                if let Some(obj) = part.as_object() {
-                    if let Some(type_str) = obj.get("type").and_then(|t| t.as_str()) {
-                        match type_str {
-                            "text" => {
-                                if let Some(text) = obj.get("text").and_then(|t| t.as_str()) {
-                                    content_parts.push(json!({
-                                        "type": "text",
-                                        "text": text
-                                    }));
-                                }
-                            }
-                            "image_url" => {
-                                if let Some(image_url) = obj.get("image_url") {
-                                    let url = image_url
-                                        .get("url")
-                                        .and_then(|u| u.as_str())
-                                        .or_else(|| image_url.as_str());
-                                    if let Some(url) = url {
-                                        // Bedrock Mistral expects OpenAI-style image_url payloads.
-                                        content_parts.push(json!({
-                                            "type": "image_url",
-                                            "image_url": { "url": url }
-                                        }));
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-
-            if !content_parts.is_empty() {
-                messages.push(json!({
-                    "role": role,
-                    "content": content_parts
-                }));
-            }
-        } else if let Some(text) = msg.content.as_str() {
-            // Simple text content
-            messages.push(json!({
-                "role": role,
-                "content": text
-            }));
-        }
-
-        // Handle tool calls from assistant
-        if role == "assistant" {
-            if let Some(tool_calls) = &msg.tool_calls {
-                let mut tool_uses: Vec<Value> = Vec::new();
-                for tool_call in tool_calls {
-                    tool_uses.push(json!({
-                        "type": "tool_use",
-                        "id": tool_call.id,
-                        "name": tool_call.function.name,
-                        "input": serde_json::from_str::<Value>(&tool_call.function.arguments).unwrap_or(json!({}))
-                    }));
-                }
-
-                // Add tool uses to message content
-                if !tool_uses.is_empty() {
-                    if let Some(last_msg) = messages.last_mut() {
-                        if let Some(content) = last_msg.get_mut("content") {
-                            if let Some(content_array) = content.as_array_mut() {
-                                content_array.extend(tool_uses);
-                            } else if content.is_string() {
-                                // Convert string to array with text and tool_uses
-                                let text = content.as_str().unwrap_or("").to_string();
-                                let mut new_content = vec![json!({"type": "text", "text": text})];
-                                new_content.extend(tool_uses);
-                                *content = json!(new_content);
-                            }
-                        }
-                    }
-                }
-            }
+            _ => {}
         }
     }
 
@@ -633,6 +708,7 @@ fn bedrock_anthropic_to_chat(
                                     name: name.to_string(),
                                     arguments: serde_json::to_string(input)?,
                                 },
+                                extra_content: None,
                             });
                             finish_reason = "tool_calls";
                         }
@@ -688,7 +764,7 @@ fn bedrock_anthropic_to_chat(
             Some(tool_calls)
         },
         function_call: None,
-        reasoning_content: None,
+        reasoning: None,
     };
 
     let id = request_id.unwrap_or_else(|| format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()));
@@ -778,7 +854,7 @@ fn bedrock_titan_to_chat(
                 content: Some(content),
                 tool_calls: None,
                 function_call: None,
-                reasoning_content: None,
+                reasoning: None,
             },
             finish_reason: Some(finish_reason.to_string()),
             logprobs: None,
@@ -845,7 +921,7 @@ fn bedrock_meta_to_chat(
                 content: Some(content),
                 tool_calls: None,
                 function_call: None,
-                reasoning_content: None,
+                reasoning: None,
             },
             finish_reason: Some(finish_reason.to_string()),
             logprobs: None,
@@ -994,6 +1070,7 @@ fn bedrock_mistral_to_chat(
                                                         name: name.to_string(),
                                                         arguments: serde_json::to_string(input)?,
                                                     },
+                                                    extra_content: None,
                                                 });
                                                 finish_reason = "tool_calls";
                                             }
@@ -1032,6 +1109,7 @@ fn bedrock_mistral_to_chat(
                                             serde_json::to_string(&args)?
                                         },
                                     },
+                                    extra_content: None,
                                 });
                                 finish_reason = "tool_calls";
                             }
@@ -1076,6 +1154,7 @@ fn bedrock_mistral_to_chat(
                                         name: name.to_string(),
                                         arguments: serde_json::to_string(input)?,
                                     },
+                                    extra_content: None,
                                 });
                                 finish_reason = "tool_calls";
                             }
@@ -1163,7 +1242,7 @@ fn bedrock_mistral_to_chat(
                     Some(tool_calls)
                 },
                 function_call: None,
-                reasoning_content: None,
+                reasoning: None,
             },
             finish_reason: Some(finish_reason.to_string()),
             logprobs: None,
@@ -1180,6 +1259,20 @@ pub struct AwsConfig {
     pub access_key_id: Option<String>,
     pub secret_access_key: Option<String>,
     pub session_token: Option<String>,
+}
+
+fn log_bedrock_error<E>(action: &str, model_id: &str, region: &str, error: &E)
+where
+    E: std::fmt::Display + std::fmt::Debug,
+{
+    tracing::error!(
+        action,
+        model_id,
+        region,
+        error = %error,
+        error_debug = ?error,
+        "Bedrock invocation failed"
+    );
 }
 
 impl AwsConfig {
@@ -1235,7 +1328,10 @@ pub async fn invoke_bedrock_model(model_id: &str, body: Value, region: &str) -> 
         .body(Blob::new(body_bytes))
         .send()
         .await
-        .map_err(|e| anyhow!("Bedrock invocation failed: {}", e))?;
+        .map_err(|e| {
+            log_bedrock_error("invoke_model", model_id, region, &e);
+            anyhow!("Bedrock invocation failed: {}", e)
+        })?;
 
     // Parse response body
     let response_body = response.body().as_ref();
@@ -1258,7 +1354,11 @@ pub async fn invoke_bedrock_model_streaming(
     model_id: &str,
     body: Value,
     region: &str,
-) -> Result<impl futures_util::Stream<Item = Result<BedrockStreamEvent>>> {
+) -> Result<
+    std::pin::Pin<
+        Box<dyn futures_util::stream::Stream<Item = Result<BedrockStreamEvent>> + Send + 'static>,
+    >,
+> {
     use aws_config::BehaviorVersion;
     use aws_sdk_bedrockruntime::config::Region;
     use aws_sdk_bedrockruntime::primitives::Blob;
@@ -1283,13 +1383,40 @@ pub async fn invoke_bedrock_model_streaming(
         .body(Blob::new(body_bytes))
         .send()
         .await
-        .map_err(|e| anyhow!("Bedrock streaming invocation failed: {}", e))?;
+        .map_err(|e| {
+            log_bedrock_error("invoke_model_streaming", model_id, region, &e);
+            anyhow!("Bedrock streaming invocation failed: {}", e)
+        })?;
 
     // Get the event stream
     let mut stream = response.body;
 
+    let debug_stream = std::env::var("ROUTIIUM_BEDROCK_STREAM_DEBUG")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        })
+        .unwrap_or(false);
+    let model_id_owned = model_id.to_string();
+    let region_owned = region.to_string();
+    let max_buffer_bytes: usize = std::env::var("ROUTIIUM_BEDROCK_STREAM_MAX_BUFFER_BYTES")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(1_048_576);
+    let debug_stream_verbose = std::env::var("ROUTIIUM_BEDROCK_STREAM_DEBUG_VERBOSE")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        })
+        .unwrap_or(false);
+    let raw_log_chars: usize = std::env::var("ROUTIIUM_BEDROCK_STREAM_RAW_LOG_CHARS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(512);
+
     // Create a stream that yields our events
-    Ok(async_stream::stream! {
+    Ok(Box::pin(async_stream::stream! {
+        let mut buffer: Vec<u8> = Vec::new();
         loop {
             match stream.recv().await {
                 Ok(Some(event)) => {
@@ -1297,15 +1424,111 @@ pub async fn invoke_bedrock_model_streaming(
 
                     match event {
                         ResponseStream::Chunk(chunk) => {
-                            // Get the bytes from the chunk
                             if let Some(bytes) = chunk.bytes() {
-                                // Parse the chunk bytes as JSON
-                                if let Ok(chunk_json) = serde_json::from_slice::<Value>(bytes.as_ref()) {
-                                    yield Ok(BedrockStreamEvent {
-                                        chunk: Some(chunk_json),
-                                        done: false,
-                                    });
+                                if debug_stream && debug_stream_verbose {
+                                    let raw = String::from_utf8_lossy(bytes.as_ref());
+                                    let prefix: String = raw.chars().take(raw_log_chars).collect();
+                                    let suffix: String = raw
+                                        .chars()
+                                        .rev()
+                                        .take(raw_log_chars)
+                                        .collect::<String>()
+                                        .chars()
+                                        .rev()
+                                        .collect();
+                                    tracing::info!(
+                                        target: "routiium::bedrock_stream",
+                                        model_id = model_id_owned,
+                                        region = region_owned,
+                                        bytes_len = bytes.as_ref().len(),
+                                        raw_prefix = %prefix,
+                                        raw_suffix = %suffix,
+                                        "Bedrock stream raw bytes"
+                                    );
                                 }
+                                buffer.extend_from_slice(bytes.as_ref());
+                                if buffer.len() > max_buffer_bytes {
+                                    if debug_stream {
+                                        tracing::warn!(
+                                            target: "routiium::bedrock_stream",
+                                            model_id = model_id_owned,
+                                            region = region_owned,
+                                            bytes_len = buffer.len(),
+                                            max_buffer_bytes,
+                                            "Bedrock stream buffer exceeded limit; clearing"
+                                        );
+                                    }
+                                    buffer.clear();
+                                    continue;
+                                }
+
+                                let mut last_offset = 0usize;
+                                let mut had_error = false;
+                                let mut iter = serde_json::Deserializer::from_slice(buffer.as_slice())
+                                    .into_iter::<Value>();
+                                while let Some(value) = iter.next() {
+                                    match value {
+                                        Ok(chunk_json) => {
+                                            last_offset = iter.byte_offset();
+                                            if debug_stream {
+                                                tracing::info!(
+                                                    target: "routiium::bedrock_stream",
+                                                    model_id = model_id_owned,
+                                                    region = region_owned,
+                                                    chunk = %chunk_json,
+                                                    "Bedrock stream chunk"
+                                                );
+                                            }
+                                            yield Ok(BedrockStreamEvent {
+                                                chunk: Some(chunk_json),
+                                                done: false,
+                                            });
+                                        }
+                                        Err(err) => {
+                                            if err.is_eof() {
+                                                break;
+                                            }
+                                            had_error = true;
+                                            if debug_stream {
+                                                let raw = String::from_utf8_lossy(buffer.as_slice());
+                                                let prefix: String = raw.chars().take(200).collect();
+                                                let suffix: String = raw
+                                                    .chars()
+                                                    .rev()
+                                                    .take(200)
+                                                    .collect::<String>()
+                                                    .chars()
+                                                    .rev()
+                                                    .collect();
+                                                tracing::warn!(
+                                                    target: "routiium::bedrock_stream",
+                                                    model_id = model_id_owned,
+                                                    region = region_owned,
+                                                    bytes_len = buffer.len(),
+                                                    error = %err,
+                                                    raw_prefix = %prefix,
+                                                    raw_suffix = %suffix,
+                                                    "Bedrock stream JSON parse error"
+                                                );
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if last_offset > 0 {
+                                    buffer.drain(0..last_offset);
+                                }
+                                if had_error {
+                                    buffer.clear();
+                                }
+                            } else if debug_stream {
+                                tracing::warn!(
+                                    target: "routiium::bedrock_stream",
+                                    model_id = model_id_owned,
+                                    region = region_owned,
+                                    "Bedrock stream chunk had no bytes"
+                                );
                             }
                         }
                         _ => {
@@ -1329,7 +1552,7 @@ pub async fn invoke_bedrock_model_streaming(
             chunk: None,
             done: true,
         });
-    })
+    }))
 }
 
 /// Convert Bedrock streaming chunk to Chat Completions SSE format
@@ -1338,6 +1561,157 @@ pub fn bedrock_chunk_to_sse(
     model: &str,
     provider: &BedrockProvider,
 ) -> Result<String> {
+    let include_bedrock_id = std::env::var("ROUTIIUM_BEDROCK_STREAM_INCLUDE_ID")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        })
+        .unwrap_or(false);
+    let debug_stream = std::env::var("ROUTIIUM_BEDROCK_STREAM_DEBUG")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        })
+        .unwrap_or(false);
+    let bedrock_id = chunk.get("id").and_then(|v| v.as_str());
+    if let Some(choices) = chunk.get("choices").and_then(|v| v.as_array()) {
+        if let Some(choice) = choices.first() {
+            if let Some(delta) = choice.get("delta") {
+                if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+                    let finish_reason = choice
+                        .get("finish_reason")
+                        .and_then(|v| v.as_str())
+                        .map(|v| v.to_string());
+
+                    let sse_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
+                    let mut sse_event = json!({
+                        "id": sse_id,
+                        "object": "chat.completion.chunk",
+                        "created": std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs(),
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": { "content": content },
+                            "finish_reason": finish_reason
+                        }]
+                    });
+                    if include_bedrock_id {
+                        if let Some(id) = bedrock_id {
+                            if let Some(obj) = sse_event.as_object_mut() {
+                                obj.insert("bedrock_id".to_string(), json!(id));
+                            }
+                        }
+                    }
+                    if debug_stream {
+                        tracing::info!(
+                            target: "routiium::bedrock_stream",
+                            model = model,
+                            bedrock_id = bedrock_id,
+                            sse_id = %sse_id,
+                            "Bedrock chunk mapped to SSE"
+                        );
+                    }
+
+                    return Ok(format!("data: {}\n\n", sse_event));
+                }
+            }
+            if let Some(message_content) = choice
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|v| v.as_str())
+            {
+                let finish_reason = choice
+                    .get("finish_reason")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string());
+
+                let sse_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
+                let mut sse_event = json!({
+                    "id": sse_id,
+                    "object": "chat.completion.chunk",
+                    "created": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "content": message_content },
+                        "finish_reason": finish_reason
+                    }]
+                });
+                if include_bedrock_id {
+                    if let Some(id) = bedrock_id {
+                        if let Some(obj) = sse_event.as_object_mut() {
+                            obj.insert("bedrock_id".to_string(), json!(id));
+                        }
+                    }
+                }
+                if debug_stream {
+                    tracing::info!(
+                        target: "routiium::bedrock_stream",
+                        model = model,
+                        bedrock_id = bedrock_id,
+                        sse_id = %sse_id,
+                        "Bedrock chunk mapped to SSE"
+                    );
+                }
+
+                return Ok(format!("data: {}\n\n", sse_event));
+            }
+            if let Some(completion) = choice.get("completion").and_then(|v| v.as_str()) {
+                let finish_reason = choice
+                    .get("finish_reason")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string());
+
+                let sse_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
+                let mut sse_event = json!({
+                    "id": sse_id,
+                    "object": "chat.completion.chunk",
+                    "created": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "content": completion },
+                        "finish_reason": finish_reason
+                    }]
+                });
+                if include_bedrock_id {
+                    if let Some(id) = bedrock_id {
+                        if let Some(obj) = sse_event.as_object_mut() {
+                            obj.insert("bedrock_id".to_string(), json!(id));
+                        }
+                    }
+                }
+                if debug_stream {
+                    tracing::info!(
+                        target: "routiium::bedrock_stream",
+                        model = model,
+                        bedrock_id = bedrock_id,
+                        sse_id = %sse_id,
+                        "Bedrock chunk mapped to SSE"
+                    );
+                }
+
+                return Ok(format!("data: {}\n\n", sse_event));
+            }
+            if debug_stream {
+                tracing::warn!(
+                    target: "routiium::bedrock_stream",
+                    model = model,
+                    chunk = %chunk,
+                    "Bedrock chunk had choices but no content fields"
+                );
+            }
+        }
+    }
     let delta = match provider {
         BedrockProvider::Anthropic => {
             // Anthropic streaming format
@@ -1504,6 +1878,7 @@ mod tests {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let result = chat_to_bedrock_request(&req);
@@ -1553,6 +1928,7 @@ mod tests {
             tool_choice: Some(json!("auto")),
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let result = chat_to_bedrock_request(&req);
@@ -1628,6 +2004,7 @@ mod tests {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let result = chat_to_bedrock_request(&req);
@@ -1688,6 +2065,7 @@ mod tests {
             tool_choice: Some(json!("auto")),
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let result = chat_to_bedrock_request(&req);
@@ -1751,11 +2129,12 @@ mod tests {
         assert_eq!(content_array[0]["type"], "text");
         assert_eq!(content_array[0]["text"], "What's in this image?");
 
-        // Check image part
-        assert_eq!(content_array[1]["type"], "image");
-        assert_eq!(content_array[1]["source"]["type"], "base64");
-        assert_eq!(content_array[1]["source"]["media_type"], "image/png");
-        assert_eq!(content_array[1]["source"]["data"], "iVBORw0KGgoAAAANSU");
+        // Check image part (Mistral Bedrock expects image_url format)
+        assert_eq!(content_array[1]["type"], "image_url");
+        assert_eq!(
+            content_array[1]["image_url"]["url"],
+            "data:image/png;base64,iVBORw0KGgoAAAANSU"
+        );
     }
 
     #[test]

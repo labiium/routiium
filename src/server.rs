@@ -11,13 +11,13 @@ use std::task::{Context, Poll};
 use crate::conversion::{
     responses_chunk_to_chat_chunk, responses_to_chat_response, to_responses_request,
 };
-use crate::models::chat::ChatCompletionRequest;
+use crate::models::chat::{ChatCompletionRequest, Model, ModelsResponse};
 use crate::models::responses;
 use crate::router_client::{
     extract_route_request, PrivacyMode as RouterPrivacyMode, RouteError, RoutePlan,
     UpstreamMode as RouterUpstreamMode,
 };
-use crate::util::AppState;
+use crate::util::{managed_mode_from_env, AppState};
 
 use crate::util::error_response;
 use tracing::warn;
@@ -47,6 +47,46 @@ struct UpstreamResolution {
     headers: Option<HashMap<String, String>>,
     model_id: String,
     plan: Option<RoutePlan>,
+}
+
+fn mode_label(mode: crate::util::UpstreamMode) -> &'static str {
+    match mode {
+        crate::util::UpstreamMode::Responses => "responses",
+        crate::util::UpstreamMode::Chat => "chat",
+        crate::util::UpstreamMode::Bedrock => "bedrock",
+    }
+}
+
+fn request_client_ip(req: &HttpRequest) -> String {
+    req.connection_info()
+        .realip_remote_addr()
+        .unwrap_or("-")
+        .to_string()
+}
+
+fn log_request_start(
+    api: &str,
+    req: &HttpRequest,
+    requested_model: &str,
+    resolution: &UpstreamResolution,
+    stream: bool,
+) {
+    let route_id = resolution
+        .plan
+        .as_ref()
+        .map(|plan| plan.route_id.as_str())
+        .unwrap_or("-");
+    tracing::info!(
+        target: "routiium::request",
+        api,
+        client = request_client_ip(req),
+        requested_model,
+        resolved_model = %resolution.model_id,
+        mode = mode_label(resolution.mode),
+        stream,
+        route_id,
+        "request"
+    );
 }
 
 fn router_privacy_mode_from_env() -> RouterPrivacyMode {
@@ -676,10 +716,7 @@ async fn responses_passthrough(
     }
 
     // Determine managed (internal upstream key) vs passthrough mode
-    let env_api_key = std::env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|s| !s.trim().is_empty());
-    let managed_mode = env_api_key.is_some();
+    let managed_mode = managed_mode_from_env();
 
     // Extract client bearer
     let client_bearer = req
@@ -701,15 +738,39 @@ async fn responses_passthrough(
             match client_bearer.as_deref().map(|tok| manager.verify(tok)) {
                 Some(crate::auth::Verification::Valid { .. }) => None,
                 Some(crate::auth::Verification::Revoked { .. }) => {
+                    tracing::warn!(
+                        target: "routiium::auth",
+                        api = "responses",
+                        client = request_client_ip(&req),
+                        "API key revoked"
+                    );
                     return error_response(http::StatusCode::UNAUTHORIZED, "API key revoked");
                 }
                 Some(crate::auth::Verification::Expired { .. }) => {
+                    tracing::warn!(
+                        target: "routiium::auth",
+                        api = "responses",
+                        client = request_client_ip(&req),
+                        "API key expired"
+                    );
                     return error_response(http::StatusCode::UNAUTHORIZED, "API key expired");
                 }
                 Some(_) => {
+                    tracing::warn!(
+                        target: "routiium::auth",
+                        api = "responses",
+                        client = request_client_ip(&req),
+                        "Invalid API key"
+                    );
                     return error_response(http::StatusCode::UNAUTHORIZED, "Invalid API key");
                 }
                 None => {
+                    tracing::warn!(
+                        target: "routiium::auth",
+                        api = "responses",
+                        client = request_client_ip(&req),
+                        "Missing Authorization bearer"
+                    );
                     return error_response(
                         http::StatusCode::UNAUTHORIZED,
                         "Missing Authorization bearer",
@@ -722,6 +783,12 @@ async fn responses_passthrough(
         }
     } else {
         if client_bearer.is_none() {
+            tracing::warn!(
+                target: "routiium::auth",
+                api = "responses",
+                client = request_client_ip(&req),
+                "Missing Authorization bearer"
+            );
             return error_response(
                 http::StatusCode::UNAUTHORIZED,
                 "Missing Authorization bearer",
@@ -745,6 +812,9 @@ async fn responses_passthrough(
             );
         }
     };
+
+    let requested_model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
+    log_request_start("responses", &req, requested_model, &resolution, stream);
 
     let mut effective_body = body.clone();
     if let Some(obj) = effective_body.as_object_mut() {
@@ -991,9 +1061,11 @@ pub fn config_routes(cfg: &mut web::ServiceConfig) {
                 "/v1/chat/completions",
                 web::post().to(chat_completions_passthrough),
             )
+            .route("/v1/models", web::get().to(list_models))
             .route("/v1/responses", web::post().to(responses_passthrough))
             .route("/keys", web::get().to(list_keys))
             .route("/keys/generate", web::post().to(generate_key))
+            .route("/keys/generate_batch", web::post().to(generate_key_batch))
             .route("/keys/revoke", web::post().to(revoke_key))
             .route("/keys/set_expiration", web::post().to(set_key_expiration))
             .route("/reload/mcp", web::post().to(reload_mcp))
@@ -1036,9 +1108,11 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
         "/status",
         "/convert",
         "/v1/chat/completions",
+        "/v1/models",
         "/v1/responses",
         "/keys",
         "/keys/generate",
+        "/keys/generate_batch",
         "/keys/revoke",
         "/keys/set_expiration",
         "/reload/mcp",
@@ -1080,12 +1154,33 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
         None
     };
 
+    let managed_override = std::env::var("ROUTIIUM_MANAGED_MODE")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let managed_mode = managed_mode_from_env();
+    let openai_key_present = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .is_some();
+    let auth_mode = if managed_mode {
+        "managed"
+    } else {
+        "passthrough"
+    };
+
     web::Json(serde_json::json!({
         "name": "routiium",
         "version": env!("CARGO_PKG_VERSION"),
         "proxy_enabled": proxy_enabled,
         "routes": routes,
         "features": {
+            "auth": {
+                "mode": auth_mode,
+                "managed": managed_mode,
+                "managed_override": managed_override,
+                "openai_key_present": openai_key_present,
+                "key_store_available": state.api_keys.is_some()
+            },
             "mcp": {
                 "enabled": mcp_enabled,
                 "config_path": mcp_config_path,
@@ -1108,6 +1203,152 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
             }
         }
     }))
+}
+
+/// List available models in OpenAI-compatible format.
+async fn list_models(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
+    // Apply same authentication logic as other endpoints
+    let managed_mode = managed_mode_from_env();
+
+    // Extract client bearer token
+    let client_bearer = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| {
+            let s = s.trim();
+            if s.len() >= 7 && s[..6].eq_ignore_ascii_case("bearer") {
+                Some(s[6..].trim().to_string())
+            } else {
+                None
+            }
+        });
+
+    // Authentication check (same as other endpoints)
+    if managed_mode {
+        if let Some(manager) = &state.api_keys {
+            match client_bearer.as_deref().map(|tok| manager.verify(tok)) {
+                Some(crate::auth::Verification::Valid { .. }) => {
+                    // Valid token, continue
+                }
+                Some(crate::auth::Verification::Revoked { .. }) => {
+                    return error_response(http::StatusCode::UNAUTHORIZED, "API key revoked");
+                }
+                Some(crate::auth::Verification::Expired { .. }) => {
+                    return error_response(http::StatusCode::UNAUTHORIZED, "API key expired");
+                }
+                Some(_) => {
+                    return error_response(http::StatusCode::UNAUTHORIZED, "Invalid API key");
+                }
+                None => {
+                    return error_response(
+                        http::StatusCode::UNAUTHORIZED,
+                        "Missing Authorization bearer",
+                    );
+                }
+            }
+        }
+    } else if client_bearer.is_none() {
+        return error_response(
+            http::StatusCode::UNAUTHORIZED,
+            "Missing Authorization bearer",
+        );
+    }
+
+    // Try to get models from Router catalog if available
+    let models = if let Some(router_client) = &state.router_client {
+        match router_client.get_catalog().await {
+            Ok(catalog) => {
+                // Convert Router catalog models to OpenAI format
+                catalog
+                    .models
+                    .into_iter()
+                    .map(|catalog_model| Model {
+                        id: catalog_model.id.clone(),
+                        object: "model".to_string(),
+                        created: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        owned_by: catalog_model.provider,
+                    })
+                    .collect()
+            }
+            Err(_) => {
+                // Fallback to static model list
+                get_default_models()
+            }
+        }
+    } else {
+        // No Router client, use static model list
+        get_default_models()
+    };
+
+    let response = ModelsResponse {
+        object: "list".to_string(),
+        data: models,
+    };
+
+    HttpResponse::Ok().json(response)
+}
+
+/// Get default model list when Router catalog is unavailable
+fn get_default_models() -> Vec<Model> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    vec![
+        Model {
+            id: "gpt-4o".to_string(),
+            object: "model".to_string(),
+            created: now,
+            owned_by: "openai".to_string(),
+        },
+        Model {
+            id: "gpt-4o-2024-11-20".to_string(),
+            object: "model".to_string(),
+            created: now,
+            owned_by: "openai".to_string(),
+        },
+        Model {
+            id: "gpt-4o-mini".to_string(),
+            object: "model".to_string(),
+            created: now,
+            owned_by: "openai".to_string(),
+        },
+        Model {
+            id: "gpt-4o-mini-2024-07-18".to_string(),
+            object: "model".to_string(),
+            created: now,
+            owned_by: "openai".to_string(),
+        },
+        Model {
+            id: "gpt-4-turbo".to_string(),
+            object: "model".to_string(),
+            created: now,
+            owned_by: "openai".to_string(),
+        },
+        Model {
+            id: "gpt-4-turbo-2024-04-09".to_string(),
+            object: "model".to_string(),
+            created: now,
+            owned_by: "openai".to_string(),
+        },
+        Model {
+            id: "gpt-3.5-turbo".to_string(),
+            object: "model".to_string(),
+            created: now,
+            owned_by: "openai".to_string(),
+        },
+        Model {
+            id: "gpt-3.5-turbo-0125".to_string(),
+            object: "model".to_string(),
+            created: now,
+            owned_by: "openai".to_string(),
+        },
+    ]
 }
 
 /// Convert a Chat Completions request into a Responses API request payload (JSON).
@@ -1179,10 +1420,7 @@ async fn chat_completions_passthrough(
     }
 
     // Determine managed (internal upstream key) vs passthrough mode
-    let env_api_key = std::env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|s| !s.trim().is_empty());
-    let managed_mode = env_api_key.is_some();
+    let managed_mode = managed_mode_from_env();
 
     // Extract client bearer (could be internal access token or upstream key)
     let client_bearer = req
@@ -1204,15 +1442,39 @@ async fn chat_completions_passthrough(
             match client_bearer.as_deref().map(|tok| manager.verify(tok)) {
                 Some(crate::auth::Verification::Valid { .. }) => None,
                 Some(crate::auth::Verification::Revoked { .. }) => {
+                    tracing::warn!(
+                        target: "routiium::auth",
+                        api = "chat",
+                        client = request_client_ip(&req),
+                        "API key revoked"
+                    );
                     return error_response(http::StatusCode::UNAUTHORIZED, "API key revoked");
                 }
                 Some(crate::auth::Verification::Expired { .. }) => {
+                    tracing::warn!(
+                        target: "routiium::auth",
+                        api = "chat",
+                        client = request_client_ip(&req),
+                        "API key expired"
+                    );
                     return error_response(http::StatusCode::UNAUTHORIZED, "API key expired");
                 }
                 Some(_) => {
+                    tracing::warn!(
+                        target: "routiium::auth",
+                        api = "chat",
+                        client = request_client_ip(&req),
+                        "Invalid API key"
+                    );
                     return error_response(http::StatusCode::UNAUTHORIZED, "Invalid API key");
                 }
                 None => {
+                    tracing::warn!(
+                        target: "routiium::auth",
+                        api = "chat",
+                        client = request_client_ip(&req),
+                        "Missing Authorization bearer"
+                    );
                     return error_response(
                         http::StatusCode::UNAUTHORIZED,
                         "Missing Authorization bearer",
@@ -1225,6 +1487,12 @@ async fn chat_completions_passthrough(
         }
     } else {
         if client_bearer.is_none() {
+            tracing::warn!(
+                target: "routiium::auth",
+                api = "chat",
+                client = request_client_ip(&req),
+                "Missing Authorization bearer"
+            );
             return error_response(
                 http::StatusCode::UNAUTHORIZED,
                 "Missing Authorization bearer",
@@ -1249,6 +1517,13 @@ async fn chat_completions_passthrough(
             );
         }
     };
+
+    let requested_model = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    log_request_start("chat", &req, &requested_model, &resolution, stream);
 
     if let Some(obj) = body.as_object_mut() {
         obj.insert(
@@ -1303,31 +1578,88 @@ async fn chat_completions_passthrough(
         // Extract region from base_url or use default
         let region = resolution.base_url.split('.').nth(1).unwrap_or("us-east-1");
 
-        // Invoke Bedrock model (non-streaming for now)
-        match crate::bedrock::invoke_bedrock_model(&resolution.model_id, bedrock_body, region).await
-        {
-            Ok(bedrock_response) => {
-                // Convert Bedrock response to Chat Completions format
-                match crate::bedrock::bedrock_to_chat_response(
-                    bedrock_response,
-                    &resolution.model_id,
-                    None,
-                ) {
-                    Ok(chat_response) => {
-                        let mut builder = HttpResponse::Ok();
-                        if let Some(plan) = resolution.plan.as_ref() {
-                            insert_route_headers(&mut builder, plan, &resolution.model_id);
-                        }
-                        return builder.json(chat_response);
-                    }
-                    Err(e) => {
+        if stream {
+            use bytes::Bytes;
+            use futures_util::StreamExt;
+
+            let provider =
+                match crate::bedrock::BedrockProvider::from_model_id(&resolution.model_id) {
+                    Ok(provider) => provider,
+                    Err(err) => {
                         return error_response(
-                            http::StatusCode::INTERNAL_SERVER_ERROR,
-                            &format!("Failed to convert Bedrock response: {}", e),
+                            http::StatusCode::BAD_REQUEST,
+                            &format!("Failed to resolve Bedrock provider: {}", err),
                         );
                     }
+                };
+
+            match crate::bedrock::invoke_bedrock_model_streaming(
+                &resolution.model_id,
+                bedrock_body,
+                region,
+            )
+            .await
+            {
+                Ok(stream) => {
+                    let model_id = resolution.model_id.clone();
+                    let mapped = stream.map(move |event| match event {
+                        Ok(evt) => {
+                            if let Some(chunk) = evt.chunk {
+                                match crate::bedrock::bedrock_chunk_to_sse(
+                                    &chunk, &model_id, &provider,
+                                ) {
+                                    Ok(sse) => Ok(Bytes::from(sse)),
+                                    Err(err) => Err(std::io::Error::other(err.to_string())),
+                                }
+                            } else if evt.done {
+                                Ok(Bytes::from("data: [DONE]\n\n"))
+                            } else {
+                                Ok(Bytes::from(""))
+                            }
+                        }
+                        Err(err) => Err(std::io::Error::other(err.to_string())),
+                    });
+
+                    let mut response = HttpResponse::Ok();
+                    if let Some(plan) = resolution.plan.as_ref() {
+                        insert_route_headers(&mut response, plan, &resolution.model_id);
+                    }
+                    return response
+                        .insert_header(("content-type", "text/event-stream"))
+                        .insert_header(("cache-control", "no-cache"))
+                        .insert_header(("connection", "keep-alive"))
+                        .streaming(mapped);
+                }
+                Err(err) => {
+                    return error_response(
+                        http::StatusCode::BAD_GATEWAY,
+                        &format!("Bedrock streaming invocation failed: {}", err),
+                    );
                 }
             }
+        }
+
+        match crate::bedrock::invoke_bedrock_model(&resolution.model_id, bedrock_body, region).await
+        {
+            Ok(bedrock_response) => match crate::bedrock::bedrock_to_chat_response(
+                bedrock_response,
+                &resolution.model_id,
+                None,
+            ) {
+                Ok(chat_response) => {
+                    let mut builder = HttpResponse::Ok();
+                    if let Some(plan) = resolution.plan.as_ref() {
+                        insert_route_headers(&mut builder, plan, &resolution.model_id);
+                    }
+                    return builder.json(chat_response);
+                }
+                Err(e) => {
+                    return error_response(
+                        http::StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Failed to convert Bedrock response: {}", e),
+                    );
+                }
+            },
             Err(e) => {
                 return error_response(
                     http::StatusCode::BAD_GATEWAY,
@@ -1486,6 +1818,55 @@ async fn chat_completions_passthrough(
                         ),
                     }
                 }
+
+                // For Gemini models, parse thought tags from the response
+                if status.is_success()
+                    && !expects_responses
+                    && requested_model.starts_with("gemini-")
+                {
+                    if let Ok(mut chat_resp) = serde_json::from_slice::<
+                        crate::models::chat::ChatCompletionResponse,
+                    >(&bytes)
+                    {
+                        // Parse thought tags from each choice's message content
+                        for choice in &mut chat_resp.choices {
+                            if let Some(content) = choice.message.content.clone() {
+                                let (actual_content, reasoning) =
+                                    crate::conversion::parse_thought_tags(&content);
+                                choice.message.content = if actual_content.is_empty() {
+                                    None
+                                } else {
+                                    Some(actual_content)
+                                };
+                                choice.message.reasoning = reasoning;
+
+                                // Estimate reasoning tokens if we have reasoning content
+                                if choice.message.reasoning.is_some() && chat_resp.usage.is_some() {
+                                    if let Some(ref mut usage) = chat_resp.usage {
+                                        // Rough estimate: 1 token per 4 characters
+                                        let reasoning_text =
+                                            choice.message.reasoning.as_ref().unwrap();
+                                        let reasoning_tokens =
+                                            (reasoning_text.len() as u64).div_ceil(4);
+                                        usage.reasoning_tokens = Some(reasoning_tokens);
+                                    }
+                                }
+                            }
+                        }
+
+                        match serde_json::to_vec(&chat_resp) {
+                            Ok(body) => {
+                                builder.insert_header(("content-type", "application/json"));
+                                return builder.body(body);
+                            }
+                            Err(err) => tracing::debug!(
+                                "Failed to serialize Gemini thought-parsed payload: {}",
+                                err
+                            ),
+                        }
+                    }
+                }
+
                 builder.body(bytes)
             }
             Err(e) => router_error_response(
@@ -1506,12 +1887,26 @@ struct GenerateKeyRequest {
     scopes: Option<Vec<String>>,
 }
 
-async fn generate_key(
-    state: web::Data<AppState>,
-    body: web::Json<GenerateKeyRequest>,
-) -> impl Responder {
-    let payload = body.into_inner();
+#[derive(Debug, Deserialize)]
+struct GenerateKeyBatchRequest {
+    labels: Vec<String>,
+    label_prefix: Option<String>,
+    ttl_seconds: Option<u64>,
+    expires_at: Option<u64>,
+    scopes: Option<Vec<String>>,
+}
 
+#[derive(Debug, Deserialize, Default)]
+struct ListKeysQuery {
+    label: Option<String>,
+    label_prefix: Option<String>,
+    include_revoked: Option<bool>,
+}
+
+fn resolve_ttl_seconds(
+    expires_at: Option<u64>,
+    ttl_seconds: Option<u64>,
+) -> Result<Option<u64>, HttpResponse> {
     // Env flag to require expiration at creation
     let require_exp = std::env::var("ROUTIIUM_KEYS_REQUIRE_EXPIRATION")
         .map(|v| {
@@ -1525,34 +1920,45 @@ async fn generate_key(
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok());
 
-    // Compute effective ttl_seconds from either expires_at or ttl_seconds or default
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
     // Determine ttl based on precedence: expires_at > ttl_seconds > env default
-    let ttl_seconds = if let Some(exp) = payload.expires_at {
+    let ttl_seconds = if let Some(exp) = expires_at {
         if exp <= now {
-            return error_response(
+            return Err(error_response(
                 http::StatusCode::BAD_REQUEST,
                 "expires_at must be in the future",
-            );
+            ));
         }
         Some(exp.saturating_sub(now))
-    } else if let Some(ttl) = payload.ttl_seconds {
+    } else if let Some(ttl) = ttl_seconds {
         Some(ttl)
     } else {
         default_ttl_secs
     };
 
-    // If required, enforce at least some ttl
     if require_exp && ttl_seconds.is_none() {
-        return error_response(
+        return Err(error_response(
             http::StatusCode::BAD_REQUEST,
             "Expiration required: provide expires_at or ttl_seconds (or configure default TTL)",
-        );
+        ));
     }
+
+    Ok(ttl_seconds)
+}
+
+async fn generate_key(
+    state: web::Data<AppState>,
+    body: web::Json<GenerateKeyRequest>,
+) -> impl Responder {
+    let payload = body.into_inner();
+    let ttl_seconds = match resolve_ttl_seconds(payload.expires_at, payload.ttl_seconds) {
+        Ok(value) => value,
+        Err(resp) => return resp,
+    };
 
     match &state.api_keys {
         Some(mgr) => match mgr.generate_key(
@@ -1573,10 +1979,105 @@ async fn generate_key(
     }
 }
 
-async fn list_keys(state: web::Data<AppState>) -> impl Responder {
+async fn generate_key_batch(
+    state: web::Data<AppState>,
+    body: web::Json<GenerateKeyBatchRequest>,
+) -> impl Responder {
+    let payload = body.into_inner();
+
+    if payload.labels.is_empty() {
+        return error_response(
+            http::StatusCode::BAD_REQUEST,
+            "labels must include at least one entry",
+        );
+    }
+
+    let ttl_seconds = match resolve_ttl_seconds(payload.expires_at, payload.ttl_seconds) {
+        Ok(value) => value,
+        Err(resp) => return resp,
+    };
+
+    let prefix = payload.label_prefix.unwrap_or_default();
+    let labels: Vec<String> = payload
+        .labels
+        .into_iter()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .map(|l| format!("{}{}", prefix, l))
+        .collect();
+
+    if labels.is_empty() {
+        return error_response(
+            http::StatusCode::BAD_REQUEST,
+            "labels must include at least one non-empty entry",
+        );
+    }
+
+    match &state.api_keys {
+        Some(mgr) => {
+            let mut out = Vec::with_capacity(labels.len());
+            for label in labels {
+                match mgr.generate_key(
+                    Some(label),
+                    ttl_seconds.map(std::time::Duration::from_secs),
+                    payload.scopes.clone(),
+                ) {
+                    Ok(gen) => out.push(gen),
+                    Err(e) => {
+                        return error_response(
+                            http::StatusCode::INTERNAL_SERVER_ERROR,
+                            &format!("failed to generate key: {}", e),
+                        );
+                    }
+                }
+            }
+            HttpResponse::Ok().json(out)
+        }
+        None => error_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "API key manager unavailable",
+        ),
+    }
+}
+
+async fn list_keys(state: web::Data<AppState>, query: web::Query<ListKeysQuery>) -> impl Responder {
     match &state.api_keys {
         Some(mgr) => match mgr.list_keys() {
-            Ok(items) => HttpResponse::Ok().json(items),
+            Ok(items) => {
+                let label = query
+                    .label
+                    .as_ref()
+                    .map(|v| v.trim())
+                    .filter(|v| !v.is_empty());
+                let label_prefix = query
+                    .label_prefix
+                    .as_ref()
+                    .map(|v| v.trim())
+                    .filter(|v| !v.is_empty());
+                let include_revoked = query.include_revoked.unwrap_or(true);
+
+                let filtered: Vec<_> = items
+                    .into_iter()
+                    .filter(|item| {
+                        if !include_revoked && item.revoked_at.is_some() {
+                            return false;
+                        }
+                        if let Some(label) = label {
+                            return item.label.as_deref() == Some(label);
+                        }
+                        if let Some(prefix) = label_prefix {
+                            return item
+                                .label
+                                .as_ref()
+                                .map(|val| val.starts_with(prefix))
+                                .unwrap_or(false);
+                        }
+                        true
+                    })
+                    .collect();
+
+                HttpResponse::Ok().json(filtered)
+            }
             Err(e) => error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("failed to list keys: {}", e),

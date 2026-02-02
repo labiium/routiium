@@ -379,6 +379,41 @@ pub fn openai_base_url() -> String {
     }
 }
 
+/// Determine whether managed auth mode is enabled.
+///
+/// Priority:
+/// 1) ROUTIIUM_MANAGED_MODE overrides when set.
+///    - truthy: 1, true, yes, on, managed, force
+///    - falsy: 0, false, no, off, passthrough, disabled
+/// 2) Otherwise, enable managed mode if OPENAI_API_KEY is present.
+pub fn managed_mode_from_env() -> bool {
+    if let Ok(raw) = std::env::var("ROUTIIUM_MANAGED_MODE") {
+        let v = raw.trim().to_ascii_lowercase();
+        if v.is_empty() {
+            return std::env::var("OPENAI_API_KEY")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .is_some();
+        }
+        if matches!(
+            v.as_str(),
+            "1" | "true" | "yes" | "on" | "managed" | "force"
+        ) {
+            return true;
+        }
+        if matches!(
+            v.as_str(),
+            "0" | "false" | "no" | "off" | "passthrough" | "disabled"
+        ) {
+            return false;
+        }
+    }
+    std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_some()
+}
+
 /// Forward a request upstream with streaming enabled and return an SSE response.
 ///
 /// Behavior:
