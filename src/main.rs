@@ -247,6 +247,27 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
+    // Initialize chat history manager
+    let chat_history = {
+        let config = routiium::chat_history_manager::ChatHistoryConfig::from_env();
+        if config.enabled {
+            match routiium::chat_history_manager::ChatHistoryManager::new(config).await {
+                Ok(mgr) => {
+                    tracing::info!("Chat history initialized successfully");
+                    Some(Arc::new(mgr))
+                }
+                Err(e) => {
+                    tracing::warn!("Chat history initialization failed: {}", e);
+                    tracing::info!("Continuing without chat history");
+                    None
+                }
+            }
+        } else {
+            tracing::info!("Chat history is disabled");
+            None
+        }
+    };
+
     // Load pricing configuration
     let pricing = if let Ok(pricing_path) = env::var("ROUTIIUM_PRICING_CONFIG") {
         let path = pricing_path.trim();
@@ -277,6 +298,7 @@ async fn main() -> std::io::Result<()> {
         api_keys,
         system_prompt_config,
         analytics,
+        chat_history,
         pricing,
         mcp_config_path,
         system_prompt_config_path,

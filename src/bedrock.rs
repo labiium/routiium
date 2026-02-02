@@ -389,46 +389,16 @@ fn chat_to_mistral_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(St
                             }
                             "image_url" => {
                                 if let Some(image_url) = obj.get("image_url") {
-                                    if let Some(url) = image_url.get("url").and_then(|u| u.as_str())
-                                    {
-                                        // Parse base64 image data
-                                        if url.starts_with("data:") {
-                                            if let Some(comma_pos) = url.find(',') {
-                                                let header = &url[..comma_pos];
-                                                let data = &url[comma_pos + 1..];
-
-                                                // Extract media type
-                                                let media_type = if header.contains("image/jpeg") {
-                                                    "image/jpeg"
-                                                } else if header.contains("image/png") {
-                                                    "image/png"
-                                                } else if header.contains("image/gif") {
-                                                    "image/gif"
-                                                } else if header.contains("image/webp") {
-                                                    "image/webp"
-                                                } else {
-                                                    "image/jpeg" // default
-                                                };
-
-                                                content_parts.push(json!({
-                                                    "type": "image",
-                                                    "source": {
-                                                        "type": "base64",
-                                                        "media_type": media_type,
-                                                        "data": data
-                                                    }
-                                                }));
-                                            }
-                                        } else {
-                                            // URL image
-                                            content_parts.push(json!({
-                                                "type": "image",
-                                                "source": {
-                                                    "type": "url",
-                                                    "url": url
-                                                }
-                                            }));
-                                        }
+                                    let url = image_url
+                                        .get("url")
+                                        .and_then(|u| u.as_str())
+                                        .or_else(|| image_url.as_str());
+                                    if let Some(url) = url {
+                                        // Bedrock Mistral expects OpenAI-style image_url payloads.
+                                        content_parts.push(json!({
+                                            "type": "image_url",
+                                            "image_url": { "url": url }
+                                        }));
                                     }
                                 }
                             }
@@ -989,8 +959,98 @@ fn bedrock_mistral_to_chat(
     let mut tool_calls: Vec<chat::ToolCall> = Vec::new();
     let mut finish_reason = "stop";
 
-    // Check for Anthropic-style format
-    if let Some(content_array) = response.get("content").and_then(|c| c.as_array()) {
+    // Bedrock Mistral invoke-model returns OpenAI-style chat.completion payloads.
+    if let Some(choices) = response.get("choices").and_then(|c| c.as_array()) {
+        if let Some(first_choice) = choices.first().and_then(|c| c.as_object()) {
+            if let Some(message) = first_choice.get("message") {
+                if let Some(content) = message.get("content") {
+                    if let Some(text) = content.as_str() {
+                        content_text = text.to_string();
+                    } else if let Some(parts) = content.as_array() {
+                        for part in parts {
+                            if let Some(obj) = part.as_object() {
+                                if let Some(type_str) = obj.get("type").and_then(|t| t.as_str()) {
+                                    match type_str {
+                                        "text" => {
+                                            if let Some(text) =
+                                                obj.get("text").and_then(|t| t.as_str())
+                                            {
+                                                if !content_text.is_empty() {
+                                                    content_text.push('\n');
+                                                }
+                                                content_text.push_str(text);
+                                            }
+                                        }
+                                        "tool_use" => {
+                                            if let (Some(id), Some(name), Some(input)) = (
+                                                obj.get("id").and_then(|i| i.as_str()),
+                                                obj.get("name").and_then(|n| n.as_str()),
+                                                obj.get("input"),
+                                            ) {
+                                                tool_calls.push(chat::ToolCall {
+                                                    id: id.to_string(),
+                                                    call_type: "function".to_string(),
+                                                    function: chat::FunctionCall {
+                                                        name: name.to_string(),
+                                                        arguments: serde_json::to_string(input)?,
+                                                    },
+                                                });
+                                                finish_reason = "tool_calls";
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(tool_calls_json) = message.get("tool_calls").and_then(|t| t.as_array())
+                {
+                    for tool_call in tool_calls_json {
+                        if let Some(obj) = tool_call.as_object() {
+                            let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                            let func = obj.get("function");
+                            let name = func
+                                .and_then(|f| f.get("name"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let args = func
+                                .and_then(|f| f.get("arguments"))
+                                .cloned()
+                                .unwrap_or(json!({}));
+                            if !id.is_empty() && !name.is_empty() {
+                                tool_calls.push(chat::ToolCall {
+                                    id: id.to_string(),
+                                    call_type: "function".to_string(),
+                                    function: chat::FunctionCall {
+                                        name: name.to_string(),
+                                        arguments: if args.is_string() {
+                                            args.as_str().unwrap_or("").to_string()
+                                        } else {
+                                            serde_json::to_string(&args)?
+                                        },
+                                    },
+                                });
+                                finish_reason = "tool_calls";
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(stop_reason) = first_choice.get("finish_reason").and_then(|r| r.as_str()) {
+                finish_reason = match stop_reason {
+                    "stop" => "stop",
+                    "length" | "max_tokens" => "length",
+                    "tool_calls" => "tool_calls",
+                    _ => stop_reason,
+                };
+            }
+        }
+    // Check for new Ministral format (similar to Anthropic)
+    } else if let Some(content_array) = response.get("content").and_then(|c| c.as_array()) {
         for item in content_array {
             if let Some(obj) = item.as_object() {
                 if let Some(type_str) = obj.get("type").and_then(|t| t.as_str()) {

@@ -149,6 +149,8 @@ pub struct AppState {
         std::sync::Arc<tokio::sync::RwLock<crate::system_prompt_config::SystemPromptConfig>>,
     /// Analytics manager for tracking request metrics
     pub analytics: Option<std::sync::Arc<crate::analytics::AnalyticsManager>>,
+    /// Chat history manager for storing and retrieving conversations
+    pub chat_history: Option<std::sync::Arc<crate::chat_history_manager::ChatHistoryManager>>,
     /// Pricing configuration for cost calculation
     pub pricing: std::sync::Arc<crate::pricing::PricingConfig>,
     /// Path to MCP config file for reload operations
@@ -249,6 +251,7 @@ impl Default for AppState {
             analytics: crate::analytics::AnalyticsManager::from_env()
                 .ok()
                 .map(std::sync::Arc::new),
+            chat_history: None,
             pricing: std::sync::Arc::new(crate::pricing::PricingConfig::default()),
             mcp_config_path: None,
             system_prompt_config_path: None,
@@ -286,6 +289,7 @@ impl AppState {
             analytics: crate::analytics::AnalyticsManager::from_env()
                 .ok()
                 .map(std::sync::Arc::new),
+            chat_history: None,
             pricing: std::sync::Arc::new(crate::pricing::PricingConfig::default()),
             mcp_config_path: None,
             system_prompt_config_path: None,
@@ -324,6 +328,7 @@ impl AppState {
             analytics: crate::analytics::AnalyticsManager::from_env()
                 .ok()
                 .map(std::sync::Arc::new),
+            chat_history: None,
             pricing: std::sync::Arc::new(crate::pricing::PricingConfig::default()),
             mcp_config_path: None,
             system_prompt_config_path: None,

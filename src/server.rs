@@ -1007,7 +1007,25 @@ pub fn config_routes(cfg: &mut web::ServiceConfig) {
             .route("/analytics/events", web::get().to(analytics_events))
             .route("/analytics/aggregate", web::get().to(analytics_aggregate))
             .route("/analytics/export", web::get().to(analytics_export))
-            .route("/analytics/clear", web::post().to(analytics_clear)),
+            .route("/analytics/clear", web::post().to(analytics_clear))
+            .route("/chat_history/stats", web::get().to(chat_history_stats))
+            .route(
+                "/chat_history/conversations",
+                web::get().to(chat_history_conversations),
+            )
+            .route(
+                "/chat_history/conversations/{id}",
+                web::get().to(chat_history_conversation),
+            )
+            .route(
+                "/chat_history/messages",
+                web::get().to(chat_history_messages),
+            )
+            .route(
+                "/chat_history/conversations/{id}",
+                web::delete().to(chat_history_delete_conversation),
+            )
+            .route("/chat_history/clear", web::post().to(chat_history_clear)),
     );
 }
 
@@ -1032,6 +1050,11 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
         "/analytics/aggregate",
         "/analytics/export",
         "/analytics/clear",
+        "/chat_history/stats",
+        "/chat_history/conversations",
+        "/chat_history/conversations/{id}",
+        "/chat_history/messages",
+        "/chat_history/clear",
     ];
 
     // Get current configuration status
@@ -2181,6 +2204,191 @@ async fn analytics_clear(state: web::Data<AppState>) -> impl Responder {
         None => error_response(
             http::StatusCode::SERVICE_UNAVAILABLE,
             "Analytics not enabled",
+        ),
+    }
+}
+
+/// Query parameters for chat history endpoints
+#[derive(Debug, Deserialize)]
+struct ChatHistoryConversationsQuery {
+    /// Start timestamp (unix seconds)
+    start: Option<u64>,
+    /// End timestamp (unix seconds)
+    end: Option<u64>,
+    /// Maximum number of conversations to return
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatHistoryMessagesQuery {
+    /// Filter by conversation ID
+    conversation_id: Option<String>,
+    /// Maximum number of messages to return
+    limit: Option<usize>,
+}
+
+/// Get chat history stats
+async fn chat_history_stats(state: web::Data<AppState>) -> impl Responder {
+    match &state.chat_history {
+        Some(mgr) => match mgr.stats().await {
+            Ok(stats) => HttpResponse::Ok().json(serde_json::json!({
+                "total_conversations": stats.total_conversations,
+                "total_messages": stats.total_messages,
+                "backend_type": stats.backend_type,
+                "storage_path": stats.storage_path,
+            })),
+            Err(e) => error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to get chat history stats: {}", e),
+            ),
+        },
+        None => error_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "Chat history not enabled",
+        ),
+    }
+}
+
+/// Query chat conversations
+async fn chat_history_conversations(
+    state: web::Data<AppState>,
+    query: web::Query<ChatHistoryConversationsQuery>,
+) -> impl Responder {
+    use crate::chat_history::ConversationFilters;
+
+    match &state.chat_history {
+        Some(mgr) => {
+            let filters = ConversationFilters {
+                start_time: query.start,
+                end_time: query.end,
+                limit: query.limit,
+            };
+
+            match mgr.list_conversations(&filters).await {
+                Ok(conversations) => HttpResponse::Ok().json(serde_json::json!({
+                    "conversations": conversations,
+                    "count": conversations.len(),
+                })),
+                Err(e) => error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to query conversations: {}", e),
+                ),
+            }
+        }
+        None => error_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "Chat history not enabled",
+        ),
+    }
+}
+
+/// Get a specific conversation
+async fn chat_history_conversation(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let conversation_id = path.into_inner();
+
+    match &state.chat_history {
+        Some(mgr) => match mgr.get_conversation(&conversation_id).await {
+            Ok(conversation) => HttpResponse::Ok().json(conversation),
+            Err(e) => error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to get conversation: {}", e),
+            ),
+        },
+        None => error_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "Chat history not enabled",
+        ),
+    }
+}
+
+/// Query chat messages
+async fn chat_history_messages(
+    state: web::Data<AppState>,
+    query: web::Query<ChatHistoryMessagesQuery>,
+) -> impl Responder {
+    use crate::chat_history::MessageFilters;
+
+    match &state.chat_history {
+        Some(mgr) => match query.conversation_id.as_ref() {
+            Some(conv_id) => {
+                let filters = MessageFilters {
+                    conversation_id: Some(conv_id.clone()),
+                    limit: query.limit,
+                    ..Default::default()
+                };
+
+                match mgr.list_messages(&filters).await {
+                    Ok(messages) => {
+                        let message_count = messages.len();
+                        HttpResponse::Ok().json(serde_json::json!({
+                            "messages": messages,
+                            "count": message_count,
+                            "conversation_id": conv_id
+                        }))
+                    }
+                    Err(e) => error_response(
+                        http::StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Failed to query messages: {}", e),
+                    ),
+                }
+            }
+            None => error_response(
+                http::StatusCode::BAD_REQUEST,
+                "conversation_id parameter is required",
+            ),
+        },
+        None => error_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "Chat history not enabled",
+        ),
+    }
+}
+
+/// Delete a conversation
+async fn chat_history_delete_conversation(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let conversation_id = path.into_inner();
+
+    match &state.chat_history {
+        Some(mgr) => match mgr.delete_conversation(&conversation_id).await {
+            Ok(_) => HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "Conversation deleted",
+                "conversation_id": conversation_id
+            })),
+            Err(e) => error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to delete conversation: {}", e),
+            ),
+        },
+        None => error_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "Chat history not enabled",
+        ),
+    }
+}
+
+/// Clear all chat history
+async fn chat_history_clear(state: web::Data<AppState>) -> impl Responder {
+    match &state.chat_history {
+        Some(mgr) => match mgr.clear().await {
+            Ok(_) => HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "Chat history cleared"
+            })),
+            Err(e) => error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to clear chat history: {}", e),
+            ),
+        },
+        None => error_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "Chat history not enabled",
         ),
     }
 }
