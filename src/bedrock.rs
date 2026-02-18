@@ -1018,7 +1018,7 @@ fn bedrock_mistral_to_chat(
                             content,
                             tool_calls: None,
                             function_call: None,
-                            reasoning_content: None,
+                            reasoning: None,
                         },
                         finish_reason,
                         logprobs: None,

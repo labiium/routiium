@@ -120,6 +120,110 @@ fn router_strict_mode() -> bool {
     )
 }
 
+/// Record chat history for a conversation and messages
+async fn record_chat_history(
+    chat_history: &Option<std::sync::Arc<crate::chat_history_manager::ChatHistoryManager>>,
+    conversation_id: Option<String>,
+    request_body: &serde_json::Value,
+    response_body: &serde_json::Value,
+    resolution: &UpstreamResolution,
+    usage: Option<&crate::models::chat::ChatUsage>,
+) {
+    tracing::info!("record_chat_history called with conversation_id: {:?}", conversation_id);
+    if let Some(manager) = chat_history {
+        tracing::info!("Chat history manager available, recording conversation");
+        let conversation_id = conversation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        // Create or update conversation
+        let conversation = crate::chat_history::Conversation::new(conversation_id.clone());
+        if let Err(e) = manager.record_conversation(&conversation).await {
+            tracing::warn!("Failed to record conversation: {}", e);
+        }
+
+        // Extract user messages from request
+        let privacy_level = manager.privacy_level();
+        let mut messages_to_record = Vec::new();
+
+        // Record user messages from the request
+        if let Some(messages) = request_body.get("messages").and_then(|v| v.as_array()) {
+            for msg in messages {
+                if let Some(role) = msg.get("role").and_then(|v| v.as_str()) {
+                    if role == "user" || role == "system" {
+                        let content = msg
+                            .get("content")
+                            .cloned()
+                            .unwrap_or(serde_json::json!(null));
+                        let role_enum = match role {
+                            "system" => crate::chat_history::MessageRole::System,
+                            _ => crate::chat_history::MessageRole::User,
+                        };
+
+                        let mut message = crate::chat_history::Message::new(
+                            conversation_id.clone(),
+                            role_enum,
+                            content,
+                            privacy_level,
+                        );
+
+                        // Add routing info
+                        message.routing.requested_model = Some(resolution.model_id.clone());
+                        message.routing.backend = Some(mode_label(resolution.mode).to_string());
+
+                        messages_to_record.push(message);
+                    }
+                }
+            }
+        }
+
+        // Record assistant response from the response body
+        if let Some(choices) = response_body.get("choices").and_then(|v| v.as_array()) {
+            for choice in choices {
+                if let Some(msg) = choice.get("message") {
+                    let content = msg
+                        .get("content")
+                        .cloned()
+                        .unwrap_or(serde_json::json!(null));
+                    let mut message = crate::chat_history::Message::new(
+                        conversation_id.clone(),
+                        crate::chat_history::MessageRole::Assistant,
+                        content,
+                        privacy_level,
+                    );
+
+                    // Add routing info
+                    message.routing.requested_model = Some(resolution.model_id.clone());
+                    message.routing.backend = Some(mode_label(resolution.mode).to_string());
+
+                    // Add token usage
+                    if let Some(usage) = usage {
+                        message.tokens.input_tokens = Some(usage.prompt_tokens);
+                        message.tokens.output_tokens = Some(usage.completion_tokens);
+                    }
+
+                    messages_to_record.push(message);
+                }
+            }
+        }
+
+        // Record all messages
+        if !messages_to_record.is_empty() {
+            tracing::debug!("Attempting to record {} messages", messages_to_record.len());
+            if let Err(e) = manager.record_messages(&messages_to_record).await {
+                tracing::warn!("Failed to record messages: {}", e);
+            } else {
+                tracing::info!(
+                    "Successfully recorded {} messages to chat history",
+                    messages_to_record.len()
+                );
+            }
+        } else {
+            tracing::debug!("No messages to record");
+        }
+    } else {
+        tracing::debug!("Chat history manager not available");
+    }
+}
+
 async fn resolve_upstream(
     state: &AppState,
     api: &str,
@@ -1647,6 +1751,18 @@ async fn chat_completions_passthrough(
                 None,
             ) {
                 Ok(chat_response) => {
+                    // Record chat history for Bedrock responses
+                    let response_json = serde_json::to_value(&chat_response).unwrap_or_default();
+                    record_chat_history(
+                        &state.chat_history,
+                        conversation_hint.clone(),
+                        &body,
+                        &response_json,
+                        &resolution,
+                        chat_response.usage.as_ref(),
+                    )
+                    .await;
+
                     let mut builder = HttpResponse::Ok();
                     if let Some(plan) = resolution.plan.as_ref() {
                         insert_route_headers(&mut builder, plan, &resolution.model_id);
@@ -1791,6 +1907,26 @@ async fn chat_completions_passthrough(
             Ok(up) => {
                 let status = up.status();
                 let bytes = up.bytes().await.unwrap_or_default();
+                
+                // Record chat history for successful non-streaming responses
+                // This must happen BEFORE any early returns below
+                if status.is_success() {
+                    if let Ok(response_json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        let usage = response_json.get("usage").and_then(|u| {
+                            serde_json::from_value::<crate::models::chat::ChatUsage>(u.clone()).ok()
+                        });
+                        record_chat_history(
+                            &state.chat_history,
+                            conversation_hint.clone(),
+                            &body,
+                            &response_json,
+                            &resolution,
+                            usage.as_ref(),
+                        )
+                        .await;
+                    }
+                }
+                
                 let mut builder = HttpResponse::build(
                     actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap(),
                 );
