@@ -264,19 +264,32 @@ pub fn extract_token_usage(
 ) -> Option<crate::analytics::TokenUsage> {
     let usage = response_body.get("usage")?;
 
-    let prompt_tokens = usage.get("prompt_tokens")?.as_u64()?;
-    let completion_tokens = usage.get("completion_tokens")?.as_u64()?;
-    let total_tokens = usage.get("total_tokens")?.as_u64()?;
+    // Chat Completions schema: prompt_tokens/completion_tokens
+    // Responses schema: input_tokens/output_tokens
+    let prompt_tokens = usage
+        .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(|v| v.as_u64())?;
+    let completion_tokens = usage
+        .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(|v| v.as_u64())?;
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(prompt_tokens + completion_tokens);
 
     let cached_tokens = usage
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
-        .and_then(|v| v.as_u64());
+        .and_then(|v| v.as_u64())
+        .or_else(|| usage.get("cached_tokens").and_then(|v| v.as_u64()));
 
     let reasoning_tokens = usage
         .get("completion_tokens_details")
         .and_then(|d| d.get("reasoning_tokens"))
-        .and_then(|v| v.as_u64());
+        .and_then(|v| v.as_u64())
+        .or_else(|| usage.get("reasoning_tokens").and_then(|v| v.as_u64()));
 
     Some(crate::analytics::TokenUsage {
         prompt_tokens,
@@ -285,4 +298,49 @@ pub fn extract_token_usage(
         cached_tokens,
         reasoning_tokens,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_token_usage;
+    use serde_json::json;
+
+    #[test]
+    fn extract_usage_chat_schema() {
+        let payload = json!({
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 8,
+                "total_tokens": 20,
+                "prompt_tokens_details": { "cached_tokens": 4 },
+                "completion_tokens_details": { "reasoning_tokens": 2 }
+            }
+        });
+
+        let usage = extract_token_usage(&payload).expect("usage");
+        assert_eq!(usage.prompt_tokens, 12);
+        assert_eq!(usage.completion_tokens, 8);
+        assert_eq!(usage.total_tokens, 20);
+        assert_eq!(usage.cached_tokens, Some(4));
+        assert_eq!(usage.reasoning_tokens, Some(2));
+    }
+
+    #[test]
+    fn extract_usage_responses_schema() {
+        let payload = json!({
+            "usage": {
+                "input_tokens": 30,
+                "output_tokens": 10,
+                "cached_tokens": 6,
+                "reasoning_tokens": 1
+            }
+        });
+
+        let usage = extract_token_usage(&payload).expect("usage");
+        assert_eq!(usage.prompt_tokens, 30);
+        assert_eq!(usage.completion_tokens, 10);
+        assert_eq!(usage.total_tokens, 40);
+        assert_eq!(usage.cached_tokens, Some(6));
+        assert_eq!(usage.reasoning_tokens, Some(1));
+    }
 }

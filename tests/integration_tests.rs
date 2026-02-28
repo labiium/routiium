@@ -182,6 +182,7 @@ async fn test_real_chat_completions_simple() {
         tool_choice: None,
         response_format: None,
         stream: Some(false),
+        extra_body: None,
     };
 
     let response = client
@@ -261,6 +262,7 @@ async fn test_real_conversion_chat_to_responses() {
         tool_choice: None,
         response_format: None,
         stream: Some(false),
+        extra_body: None,
     };
 
     // Convert to Responses format
@@ -359,6 +361,7 @@ async fn test_real_tool_calling() {
         tool_choice: Some(json!("auto")),
         response_format: None,
         stream: Some(false),
+        extra_body: None,
     };
 
     let response = client
@@ -449,7 +452,7 @@ async fn test_real_reasoning_model_o1_mini() {
         tool_choice: None,
         response_format: None,
         stream: Some(false),
-    };
+        extra_body: None,    };
 
     let response = client
         .post(format!("{}/chat/completions", base_url))
@@ -538,6 +541,7 @@ async fn test_real_reasoning_model_o1_preview() {
         tool_choice: None,
         response_format: None,
         stream: Some(false),
+        extra_body: None,
     };
 
     let response = client
@@ -609,6 +613,7 @@ async fn test_real_streaming_response() {
         tool_choice: None,
         response_format: None,
         stream: Some(true), // Enable streaming
+        extra_body: None,
     };
 
     let response = client
@@ -708,6 +713,7 @@ async fn test_real_round_trip_conversion() {
         tool_choice: None,
         response_format: None,
         stream: Some(false),
+        extra_body: None,
     };
 
     // Step 2: Convert to Responses format
@@ -795,6 +801,7 @@ async fn test_real_invalid_model_error() {
         tool_choice: None,
         response_format: None,
         stream: Some(false),
+        extra_body: None,
     };
 
     let response = client

@@ -48,6 +48,7 @@ mod request_conversion {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -95,6 +96,7 @@ mod request_conversion {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -135,6 +137,7 @@ mod request_conversion {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -177,6 +180,7 @@ mod request_conversion {
                 tool_choice: None,
                 response_format: None,
                 stream: input_stream,
+                extra_body: None,
             };
 
             let out = to_responses_request(&req, None);
@@ -212,6 +216,7 @@ mod request_conversion {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -245,6 +250,7 @@ mod request_conversion {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out1 = to_responses_request(&req1, None);
@@ -274,6 +280,7 @@ mod request_conversion {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out2 = to_responses_request(&req2, None);
@@ -305,6 +312,7 @@ mod request_conversion {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -336,6 +344,7 @@ mod request_conversion {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -367,6 +376,7 @@ mod request_conversion {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -403,6 +413,7 @@ mod request_conversion {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -451,6 +462,7 @@ mod role_mapping {
                 tool_choice: None,
                 response_format: None,
                 stream: None,
+                extra_body: None,
             };
 
             let out = to_responses_request(&req, None);
@@ -487,6 +499,7 @@ mod role_mapping {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -520,6 +533,7 @@ mod role_mapping {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -575,6 +589,7 @@ mod tool_conversion {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -647,6 +662,7 @@ mod tool_conversion {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -702,6 +718,7 @@ mod tool_conversion {
                 tool_choice: Some(tool_choice.clone()),
                 response_format: None,
                 stream: None,
+                extra_body: None,
             };
 
             let out = to_responses_request(&req, None);
@@ -791,6 +808,7 @@ mod tool_conversion {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -855,6 +873,7 @@ mod tool_conversion {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -915,6 +934,7 @@ mod response_format {
                 extra,
             }),
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -959,6 +979,7 @@ mod response_format {
                 extra,
             }),
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -998,6 +1019,7 @@ mod response_format {
                 extra: HashMap::new(),
             }),
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -1041,6 +1063,7 @@ mod multimodal_content {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -1086,6 +1109,7 @@ mod multimodal_content {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -1142,6 +1166,7 @@ mod multimodal_content {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -1193,6 +1218,7 @@ mod multimodal_content {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -1243,6 +1269,7 @@ mod multimodal_content {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -1278,6 +1305,7 @@ mod edge_cases {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -1309,6 +1337,7 @@ mod edge_cases {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -1340,6 +1369,7 @@ mod edge_cases {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out1 = to_responses_request(&req, None);
@@ -1374,6 +1404,7 @@ mod edge_cases {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -1418,6 +1449,7 @@ mod edge_cases {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -1463,6 +1495,7 @@ mod edge_cases {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -1516,6 +1549,7 @@ mod serialization {
             tool_choice: None,
             response_format: None,
             stream: Some(false),
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -1558,6 +1592,7 @@ mod serialization {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -1604,6 +1639,7 @@ mod serialization {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -1853,6 +1889,7 @@ mod round_trip {
             tool_choice: None,
             response_format: None,
             stream: Some(false),
+            extra_body: None,
         };
 
         // Convert to Responses
@@ -1907,6 +1944,7 @@ mod round_trip {
             tool_choice: Some(json!("auto")),
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let responses_req = to_responses_request(&original, None);
@@ -1958,6 +1996,7 @@ mod round_trip {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let responses_req = to_responses_request(&original, None);
@@ -2016,6 +2055,7 @@ mod reasoning_models {
                 tool_choice: None,
                 response_format: None,
                 stream: None,
+                extra_body: None,
             };
 
             let out = to_responses_request(&req, None);
@@ -2063,6 +2103,7 @@ mod reasoning_models {
             tool_choice: None,
             response_format: None,
             stream: Some(false),
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -2130,6 +2171,7 @@ mod specification_compliance {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -2170,6 +2212,7 @@ mod specification_compliance {
             tool_choice: None,
             response_format: None,
             stream: Some(true),
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -2240,6 +2283,7 @@ mod specification_compliance {
                 extra,
             }),
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -2275,6 +2319,7 @@ mod specification_compliance {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, Some("conv-abc-123".into()));
@@ -2339,6 +2384,7 @@ mod vision_comprehensive {
             tool_choice: Some(json!("auto")),
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -2386,6 +2432,7 @@ mod vision_comprehensive {
             tool_choice: None,
             response_format: None,
             stream: Some(true), // Enable streaming
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -2428,6 +2475,7 @@ mod vision_comprehensive {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -2471,6 +2519,7 @@ mod vision_comprehensive {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -2524,6 +2573,7 @@ mod vision_comprehensive {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -2609,6 +2659,7 @@ mod real_world_scenarios {
             tool_choice: Some(json!("auto")),
             response_format: None,
             stream: Some(false),
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -2656,6 +2707,7 @@ mod real_world_scenarios {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -2712,6 +2764,7 @@ mod real_world_scenarios {
                 extra,
             }),
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);
@@ -2769,6 +2822,7 @@ mod real_world_scenarios {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let out = to_responses_request(&req, None);

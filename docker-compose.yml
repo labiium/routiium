@@ -1,27 +1,33 @@
-version: "3.9"
-
 services:
-  routiium:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: routiium:local
-    env_file:
-      - .env
-    environment:
-      BIND_ADDR: "0.0.0.0:8088"
-      ROUTIIUM_SLED_PATH: "/data/keys.db"
-      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
-      OPENAI_API_KEY: "${OPENAI_API_KEY}"
-      ROUTIIUM_BACKENDS: "${ROUTIIUM_BACKENDS:-}"
-      ROUTIIUM_ROUTER_URL: "${ROUTIIUM_ROUTER_URL:-}"
-    command: ["--system-prompt-config=/app/system_prompt.json"]
-    ports:
-      - "${ROUTIIUM_PORT:-8088}:8088"
-    volumes:
-      - routiium-data:/data
-      - ./system_prompt.json:/app/system_prompt.json:ro
-    restart: unless-stopped
+    routiium:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        image: routiium:local
+        environment:
+            BIND_ADDR: "0.0.0.0:8088"
+            ROUTIIUM_SLED_PATH: "/data/keys.db"
+            ROUTIIUM_ANALYTICS_JSONL_PATH: "/data/analytics.jsonl"
+            ROUTIIUM_ADMIN_TOKEN: "${ROUTIIUM_ADMIN_TOKEN:-}"
+            ROUTIIUM_CHAT_HISTORY_ENABLED: "${ROUTIIUM_CHAT_HISTORY_ENABLED:-false}"
+            ROUTIIUM_CHAT_HISTORY_PRIMARY: "${ROUTIIUM_CHAT_HISTORY_PRIMARY:-jsonl}"
+            ROUTIIUM_CHAT_HISTORY_JSONL_PATH: "/data/chat_history.jsonl"
+            OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+            OPENAI_API_KEY: "${OPENAI_API_KEY}"
+            ROUTIIUM_BACKENDS: "${ROUTIIUM_BACKENDS:-}"
+            ROUTIIUM_ROUTER_URL: "${ROUTIIUM_ROUTER_URL:-}"
+        ports:
+            - "${ROUTIIUM_PORT:-8088}:8088"
+        volumes:
+            - routiium-data:/data
+        read_only: true
+        tmpfs:
+            - /tmp:rw,noexec,nosuid,size=64m
+        cap_drop:
+            - ALL
+        security_opt:
+            - no-new-privileges:true
+        restart: unless-stopped
 
 volumes:
-  routiium-data:
+    routiium-data:

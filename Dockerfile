@@ -46,7 +46,9 @@ USER app
 # Sensible defaults (override via `docker run -e KEY=VAL ...`)
 ENV RUST_LOG=info \
     BIND_ADDR=0.0.0.0:8088 \
-    ROUTIIUM_SLED_PATH=/data/keys.db
+    ROUTIIUM_SLED_PATH=/data/keys.db \
+    ROUTIIUM_ANALYTICS_JSONL_PATH=/data/analytics.jsonl \
+    ROUTIIUM_CHAT_HISTORY_JSONL_PATH=/data/chat_history.jsonl
 
 # Persist sled data outside the container
 VOLUME ["/data"]

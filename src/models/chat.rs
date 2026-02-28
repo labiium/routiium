@@ -82,7 +82,7 @@ pub struct ResponseFormat {
 ///
 /// This model intentionally uses flexible types (e.g., `serde_json::Value` for `stop`)
 /// to accept both strings and arrays where the API allows it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
@@ -147,8 +147,19 @@ pub struct ToolCall {
     pub extra_content: Option<serde_json::Value>,
 }
 
+impl Default for ToolCall {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            call_type: "function".to_string(),
+            function: FunctionCall::default(),
+            extra_content: None,
+        }
+    }
+}
+
 /// Function call details
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[skip_serializing_none]
 pub struct FunctionCall {
     pub name: String,

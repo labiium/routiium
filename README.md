@@ -2,13 +2,13 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Routiium is an Actix-web service and Rust crate that exposes OpenAI-compatible `/v1/chat/completions` and `/v1/responses` endpoints while transparently translating payloads, streaming events, tools, routing decisions, and analytics on the fly. It lets existing Chat Completions clients tap into the modern Responses API (or any compatible upstream) without rewriting application code, while still benefiting from policy-aware multi-backend routing (documented in [`ROUTER_API_SPEC.md`](ROUTER_API_SPEC.md)) and full-stack observability via the analytics pipeline described in [`ANALYTICS.md`](ANALYTICS.md).
+Routiium is an Actix-web service and Rust crate that exposes OpenAI-compatible `/v1/chat/completions` and `/v1/responses` endpoints while transparently translating payloads, streaming events, tools, routing decisions, and analytics on the fly. It lets existing Chat Completions clients tap into the modern Responses API (or any compatible upstream) without rewriting application code, while still benefiting from policy-aware multi-backend routing (documented in [`docs/ROUTER_API_SPEC.md`](docs/ROUTER_API_SPEC.md)) and full-stack observability via the analytics pipeline described in [`docs/ANALYTICS.md`](docs/ANALYTICS.md).
 
 ## What It Does
 
 - Converts legacy Chat Completions requests, responses, and SSE chunks into the Responses API format (and back) while preserving tools, multimodal parts, logprobs, and token usage.
 - Proxies `/v1/chat/completions` and `/v1/responses` to multiple upstream providers with per-model base URLs, custom headers, managed or passthrough auth, and automatic system prompt injection.
-- **AWS Bedrock Support** - Full integration with AWS Bedrock including Claude 3, Llama 3, Titan, and other models with complete tool calling and multimodal support (see [AWS_BEDROCK.md](AWS_BEDROCK.md)).
+- **AWS Bedrock Support** - Full integration with AWS Bedrock including Claude 3, Llama 3, Titan, and other models with complete tool calling and multimodal support (see [docs/AWS_BEDROCK.md](docs/AWS_BEDROCK.md)).
 - Integrates with Router services (remote HTTP or local alias files) for policy-aware routing and falls back to legacy prefix rules defined via `ROUTIIUM_BACKENDS`.
 - Issues, verifies, revokes, and expires first-party API keys (Redis, sled, or in-memory backends) so clients never see provider secrets.
 - Pulls Model Context Protocol (MCP) tools into each request so clients automatically see the union of their declared tools plus any connected MCP servers.
@@ -51,7 +51,7 @@ docker run --rm -p 8088:8088 \
 
 ### Docker Compose
 
-The repository now ships with a `docker-compose.yml` that builds the local image, maps `8088`, and persists the sled database volume. Provide your upstream credentials in `.env` (Compose reads it automatically):
+The repository now ships with a hardened `docker-compose.yml` that builds the local image, maps `8088`, persists data at `/data`, runs with `read_only`, drops Linux capabilities, and enables `no-new-privileges`. Provide your upstream credentials in `.env` (Compose reads it for variable substitution):
 
 ```bash
 cp .env.example .env
@@ -69,7 +69,7 @@ Override the public port by exporting `ROUTIIUM_PORT`, and pass additional routi
 | `--mcp-config=PATH` | Load Model Context Protocol server definitions (see `mcp.json.example`). |
 | `--system-prompt-config=PATH` | Load system prompt injection rules (see `system_prompt.json.example`). |
 | `--router-config=PATH` | Load a local alias/policy file consumed by the `LocalPolicyRouter` (`router_aliases.json.example`). |
-| `--routing-config=PATH` | Load an experimental routing JSON that is surfaced in `/status` and reload endpoints (routing decisions still come from the Router client + `ROUTIIUM_BACKENDS`). |
+| `--routing-config=PATH` | Load routing JSON aliases/rules/transforms with runtime reload support. |
 
 ## Environment Reference
 
@@ -98,7 +98,7 @@ Routiium loads `.env`, `.envfile`, or any path referenced via `ENV_FILE`, `ENVFI
   export AWS_ACCESS_KEY_ID=your-access-key
   export AWS_SECRET_ACCESS_KEY=your-secret-key
   export AWS_REGION=us-east-1
-  export ROUTIIUM_BACKENDS="prefix=gpt-;base=https://api.openai.com/v1;key_env=OPENAI_API_KEY;mode=responses; prefix=claude-;base=https://api.anthropic.com/v1;key_env=ANTHROPIC_API_KEY;mode=responses; prefix=anthropic.;base=https://bedrock-runtime.us-east-1.amazonaws.com;mode=bedrock; prefix=llama;base=http://localhost:11434/v1;mode=chat"
+  export ROUTIIUM_BACKENDS="prefix=gpt-,base=https://api.openai.com/v1,key_env=OPENAI_API_KEY,mode=responses; prefix=claude-,base=https://api.anthropic.com/v1,key_env=ANTHROPIC_API_KEY,mode=responses; prefix=anthropic.,base=https://bedrock-runtime.us-east-1.amazonaws.com,mode=bedrock; prefix=llama,base=http://localhost:11434/v1,mode=chat"
   ```
 
 - `ROUTIIUM_ROUTER_URL` – enable the HTTP Router client (Schema 1.1). Helper env vars:
@@ -115,6 +115,7 @@ Routiium loads `.env`, `.envfile`, or any path referenced via `ENV_FILE`, `ENVFI
 - `ROUTIIUM_SLED_PATH` – path for the embedded sled database (default `./data/keys.db` when the `sled` feature is enabled).
 - `ROUTIIUM_KEYS_REQUIRE_EXPIRATION`, `ROUTIIUM_KEYS_ALLOW_NO_EXPIRATION`, `ROUTIIUM_KEYS_DEFAULT_TTL_SECONDS` – key issuance policy toggles.
 - `ROUTIIUM_KEYS_DISABLE_CACHE` – set to `1/true` to skip the in-memory API key cache. By default Routiium eagerly loads and maintains every key in-process so sled-backed verification never blocks on disk I/O; disable the cache when multiple Routiium instances share the same external store and you prefer every verification to hit that backend directly.
+- `ROUTIIUM_ADMIN_TOKEN` – optional admin bearer token. When set, admin/internal endpoints require `Authorization: Bearer <token>` (keys, reload, analytics, chat_history).
 
 ### Analytics & Pricing
 
@@ -127,24 +128,27 @@ Routiium loads `.env`, `.envfile`, or any path referenced via `ENV_FILE`, `ENVFI
 
 | Route | Description | Auth |
 | ----- | ----------- | ---- |
+| `GET /health` | Lightweight liveness probe endpoint. | None |
 | `GET /status` | Feature flags, config file paths, routing stats, analytics status. | None |
+| `GET /models` | OpenAI-compatibility alias for `GET /v1/models`. | Managed or passthrough bearer |
+| `GET /v1/models` | List available models in OpenAI format. | Managed or passthrough bearer |
 | `POST /convert` | Convert a Chat Completions payload into a Responses payload (applies system prompts, merges MCP tools, supports `conversation_id`). | None |
 | `POST /v1/responses` | Native Responses proxy (handles system prompts, legacy tool formats, routing, analytics, streaming). | Managed or passthrough bearer |
 | `POST /v1/chat/completions` | Native Chat Completions proxy with prompt injection and optional conversion of Responses-shaped upstream bodies. | Managed or passthrough bearer |
-| `GET /keys` | List issued API keys (id, label, timestamps, scopes). Supports `label`, `label_prefix`, `include_revoked=false`. | Protect via network ACLs |
-| `POST /keys/generate` | Issue a new `sk_<id>.<secret>` token; body supports `label`, `ttl_seconds`, `expires_at`, `scopes`. | Protect via network ACLs |
-| `POST /keys/generate_batch` | Issue multiple keys in one call (`labels` array, optional `label_prefix`, `ttl_seconds`, `expires_at`, `scopes`). | Protect via network ACLs |
-| `POST /keys/revoke` | Revoke a key by id. | Protect via network ACLs |
-| `POST /keys/set_expiration` | Set or clear expiration on an existing key. | Protect via network ACLs |
-| `POST /reload/mcp` | Reload the MCP config and reconnect servers. | Typically internal |
-| `POST /reload/system_prompt` | Reload the system prompt config. | Typically internal |
-| `POST /reload/routing` | Reload the optional routing JSON (currently surfaces metadata only). | Typically internal |
-| `POST /reload/all` | Reload MCP + system prompt configs. | Typically internal |
-| `GET /analytics/stats` | Analytics backend stats (requires analytics enabled). | Internal |
-| `GET /analytics/events` | Query raw analytics events (`start`, `end`, `limit`). | Internal |
-| `GET /analytics/aggregate` | Aggregate metrics for a time window. | Internal |
-| `GET /analytics/export` | Export events as JSON (`format=json`) or CSV (`format=csv`). | Internal |
-| `POST /analytics/clear` | Wipe analytics storage. | Internal |
+| `GET /keys` | List issued API keys (id, label, timestamps, scopes). Supports `label`, `label_prefix`, `include_revoked=false`. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise protect via network ACLs |
+| `POST /keys/generate` | Issue a new `sk_<id>.<secret>` token; body supports `label`, `ttl_seconds`, `expires_at`, `scopes`. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise protect via network ACLs |
+| `POST /keys/generate_batch` | Issue multiple keys in one call (`labels` array, optional `label_prefix`, `ttl_seconds`, `expires_at`, `scopes`). | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise protect via network ACLs |
+| `POST /keys/revoke` | Revoke a key by id. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise protect via network ACLs |
+| `POST /keys/set_expiration` | Set or clear expiration on an existing key. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise protect via network ACLs |
+| `POST /reload/mcp` | Reload the MCP config and reconnect servers. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
+| `POST /reload/system_prompt` | Reload the system prompt config. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
+| `POST /reload/routing` | Reload the optional routing JSON (currently surfaces metadata only). | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
+| `POST /reload/all` | Reload MCP + system prompt configs. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
+| `GET /analytics/stats` | Analytics backend stats (requires analytics enabled). | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
+| `GET /analytics/events` | Query raw analytics events (`start`, `end`, `limit`). | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
+| `GET /analytics/aggregate` | Aggregate metrics for a time window. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
+| `GET /analytics/export` | Export events as JSON (`format=json`) or CSV (`format=csv`). | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
+| `POST /analytics/clear` | Wipe analytics storage. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
 
 ## Authentication Modes
 
@@ -157,15 +161,15 @@ Managed mode keeps a hot, in-process cache of every issued API key so sled-backe
 
 When resolving an upstream:
 
-1. If `--router-config` or `ROUTIIUM_ROUTER_URL` is configured, Routiium asks the Router for a plan (Schema 1.1, see [`ROUTER_API_SPEC.md`](ROUTER_API_SPEC.md)). Plans return the upstream base URL, API mode (`responses` or `chat`), optional auth env var, stickiness tokens, headers, and policy metadata. Successful plans are cached for `ROUTIIUM_CACHE_TTL_MS` and surfaced to clients via headers like `x-route-id`, `x-resolved-model`, `router-schema`, and `x-policy-rev`.
+1. If `--router-config` or `ROUTIIUM_ROUTER_URL` is configured, Routiium asks the Router for a plan (Schema 1.1, see [`docs/ROUTER_API_SPEC.md`](docs/ROUTER_API_SPEC.md)). Plans return the upstream base URL, API mode (`responses` or `chat`), optional auth env var, stickiness tokens, headers, and policy metadata. Successful plans are cached for `ROUTIIUM_CACHE_TTL_MS` and surfaced to clients via headers like `x-route-id`, `x-resolved-model`, `router-schema`, and `x-policy-rev`.
 2. If the Router rejects the alias (or is unavailable and `ROUTIIUM_ROUTER_STRICT` is not set), Routiium falls back to `ROUTIIUM_BACKENDS`, selecting the first rule whose `prefix` matches the requested model. `mode=chat` rewrites the upstream URL to `/v1/chat/completions` and converts payloads so you can front services such as vLLM or Ollama with a Responses surface.
 3. If neither mechanism matches, the proxy uses `OPENAI_BASE_URL` and whichever `model` the client supplied (or the `MODEL` env fallback).
 
-The optional `routing.json` loader (see `routing.json.example`) tracks richer policies for observability and `/status` output. Routing decisions today still use the Router client + `ROUTIIUM_BACKENDS`; the JSON file exists so you can version policies and inspect rule stats even before the full engine lands.
+The optional `routing.json` loader (see `routing.json.example`) supports aliases, rule matching, backend selection, and request transforms in-process. Router plans (`--router-config` / `ROUTIIUM_ROUTER_URL`) still take precedence; when no router plan is available, Routiium applies `routing.json`, then `ROUTIIUM_BACKENDS`, then `OPENAI_BASE_URL`.
 
 ### Router Contract (Schema 1.1)
 
-The Router integration follows the full Schema 1.1 contract captured in [`ROUTER_API_SPEC.md`](ROUTER_API_SPEC.md). Highlights:
+The Router integration follows the full Schema 1.1 contract captured in [`docs/ROUTER_API_SPEC.md`](docs/ROUTER_API_SPEC.md). Highlights:
 
 - Every `RouteRequest`/`RoutePlan` exchanges `schema_version`, `request_id`, cache hints, and typed error metadata so upgrades remain safe.
 - Budgets, estimates, and cost hints use **micro** units; routers can emit tokenizer hints, latency/cost targets, stickiness tokens, and prompt overlay metadata.
@@ -187,19 +191,21 @@ If you are implementing a Router, start with that document—the server expects 
 - Backends are auto-detected at runtime (`ROUTIIUM_REDIS_URL` → Redis, else sled through the default `sled` feature, else memory). Override with `--keys-backend`.
 - Redis pool size is controlled through `ROUTIIUM_REDIS_POOL_MAX`.
 - Expiration policy is governed by `ROUTIIUM_KEYS_REQUIRE_EXPIRATION`, `ROUTIIUM_KEYS_ALLOW_NO_EXPIRATION`, and `ROUTIIUM_KEYS_DEFAULT_TTL_SECONDS`.
-- `/keys`, `/keys/generate`, `/keys/revoke`, and `/keys/set_expiration` cover the full key lifecycle. Secure these endpoints via network ACLs, sidecars, or service mesh policy; Routiium does not implement a separate admin role.
+- `/keys`, `/keys/generate`, `/keys/revoke`, and `/keys/set_expiration` cover the full key lifecycle. Set `ROUTIIUM_ADMIN_TOKEN` so these endpoints require `Authorization: Bearer <token>` in production.
 
 Managed mode validates tokens on every call; passthrough mode skips the manager and forwards whatever bearer the client sent.
 
 ## Analytics & Pricing
 
-Every request flows through `analytics_middleware`, which captures:
+Analytics events are recorded in the request handlers for `/v1/chat/completions` and `/v1/responses` using shared extraction helpers:
 
 - Request metadata (endpoint, method, model, payload size, streaming flag, user agent, client IP).
 - Response metadata (status, body size, error message, streaming duration).
 - Auth metadata (key id + label when present, auth method).
 - Routing metadata (backend string, upstream mode, whether MCP/system prompts were used).
 - Token usage (prompt/completion/cached/reasoning tokens) and computed cost via `PricingConfig`.
+
+Token usage extraction supports both OpenAI Chat usage fields (`prompt_tokens`, `completion_tokens`) and Responses usage fields (`input_tokens`, `output_tokens`).
 
 Storage backends:
 
@@ -208,7 +214,7 @@ Storage backends:
 - Sled (`ROUTIIUM_ANALYTICS_SLED_PATH`, compiled in by default).
 - Memory (`ROUTIIUM_ANALYTICS_FORCE_MEMORY=1`, optional `ROUTIIUM_ANALYTICS_MAX_EVENTS`).
 
-Operators can inspect and manage analytics through `/analytics/stats`, `/analytics/events`, `/analytics/aggregate`, `/analytics/export?format=csv`, and `/analytics/clear`. Costs come from the built-in OpenAI price cards unless you point `ROUTIIUM_PRICING_CONFIG` at your own JSON (prefix matching is supported). See [ANALYTICS.md](ANALYTICS.md) for the complete data model.
+Operators can inspect and manage analytics through `/analytics/stats`, `/analytics/events`, `/analytics/aggregate`, `/analytics/export?format=csv`, and `/analytics/clear`. Costs come from the built-in OpenAI price cards unless you point `ROUTIIUM_PRICING_CONFIG` at your own JSON (prefix matching is supported). See [docs/ANALYTICS.md](docs/ANALYTICS.md) for the complete data model.
 
 ## Operations & Observability
 
@@ -220,9 +226,11 @@ Operators can inspect and manage analytics through `/analytics/stats`, `/analyti
 
 ## Additional Documentation & Examples
 
-- [API_REFERENCE.md](API_REFERENCE.md) – exhaustive request/response documentation with curl snippets.
-- [ANALYTICS.md](ANALYTICS.md) – analytics architecture, storage backends, API responses.
-- [ROUTER_API_SPEC.md](ROUTER_API_SPEC.md) – Router schema 1.1 and implementation guide (see `examples/router_service.rs` for a runnable Router).
+- [docs/README.md](docs/README.md) – documentation index.
+- [docs/API_REFERENCE.md](docs/API_REFERENCE.md) – exhaustive request/response documentation with curl snippets.
+- [docs/ANALYTICS.md](docs/ANALYTICS.md) – analytics architecture, storage backends, API responses.
+- [docs/PRODUCTION_HARDENING.md](docs/PRODUCTION_HARDENING.md) – deployment hardening checklist (secrets, admin routes, container security).
+- [docs/ROUTER_API_SPEC.md](docs/ROUTER_API_SPEC.md) – Router schema 1.1 and implementation guide (see `examples/router_service.rs` for a runnable Router).
 - `mcp.json.example`, `system_prompt.json.example`, `router_aliases.json.example` – starter configs for MCP servers, system prompts, and local router aliases.
 - `routing.json.example` – example of the experimental routing metadata file surfaced via `/status`.
 

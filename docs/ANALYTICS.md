@@ -13,10 +13,10 @@ The analytics system provides comprehensive tracking and analysis capabilities f
    - Support for Redis, Sled, and in-memory storage
    - Event recording, querying, and aggregation
 
-2. **Analytics Middleware** (`src/analytics_middleware.rs`)
-   - Request/response capture framework
-   - Context propagation through request lifecycle
-   - Automatic metric collection
+2. **Analytics Extraction Helpers** (`src/analytics_middleware.rs`)
+   - Token usage extraction for both Chat and Responses usage schemas
+   - Shared context/outcome structures used by handlers
+   - Common analytics helper functions reused across endpoints
 
 3. **Analytics Endpoints** (`src/server.rs`)
    - REST API for querying and exporting analytics
@@ -199,10 +199,11 @@ export ROUTIIUM_PRICING_CONFIG=/path/to/pricing.json
 ### Cost Calculation
 
 When pricing is configured:
-1. Analytics middleware extracts token usage from provider responses
-2. Costs are calculated using the formula: `(tokens / 1,000,000) × price_per_million`
-3. All costs are tracked in USD (or configured currency)
-4. Costs are aggregated by model, user, and time period
+1. Handlers extract token usage from provider responses (supports both Chat and Responses usage fields)
+2. Costs are calculated from token counts using per-model rates (`per_million` pricing)
+3. Cached tokens are treated as a subset of input tokens: uncached input uses `input_per_million`, cached input uses `cached_per_million` when configured
+4. All costs are tracked in USD (or configured currency)
+5. Costs are aggregated by model, user, and time period
 
 **Supported token types:**
 - **Input tokens**: Standard prompt/input tokens

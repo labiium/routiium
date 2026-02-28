@@ -571,23 +571,26 @@ impl AnalyticsManager {
                     agg.failed_requests += 1;
                 }
 
-                if let Some(tokens) = response.output_tokens {
-                    agg.total_output_tokens += tokens;
+                // Prefer detailed token_usage when present to avoid inconsistencies.
+                if event.token_usage.is_none() {
+                    if let Some(tokens) = response.output_tokens {
+                        agg.total_output_tokens += tokens;
+                    }
                 }
-            }
-
-            if let Some(tokens) = event.request.input_tokens {
-                agg.total_input_tokens += tokens;
             }
 
             // Aggregate token usage details
             if let Some(ref usage) = event.token_usage {
+                agg.total_input_tokens += usage.prompt_tokens;
+                agg.total_output_tokens += usage.completion_tokens;
                 if let Some(cached) = usage.cached_tokens {
                     agg.total_cached_tokens += cached;
                 }
                 if let Some(reasoning) = usage.reasoning_tokens {
                     agg.total_reasoning_tokens += reasoning;
                 }
+            } else if let Some(tokens) = event.request.input_tokens {
+                agg.total_input_tokens += tokens;
             }
 
             // Aggregate cost
@@ -770,4 +773,109 @@ pub fn current_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0))
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_event(
+        id: &str,
+        request_input_tokens: Option<u64>,
+        response_output_tokens: Option<u64>,
+        token_usage: Option<TokenUsage>,
+    ) -> AnalyticsEvent {
+        AnalyticsEvent {
+            id: id.to_string(),
+            timestamp: current_timestamp(),
+            request: RequestMetadata {
+                endpoint: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+                model: Some("alias-x".to_string()),
+                stream: false,
+                size_bytes: 123,
+                message_count: Some(1),
+                input_tokens: request_input_tokens,
+                user_agent: None,
+                client_ip: None,
+            },
+            response: Some(ResponseMetadata {
+                status_code: 200,
+                size_bytes: 456,
+                output_tokens: response_output_tokens,
+                success: true,
+                error_message: None,
+            }),
+            performance: PerformanceMetrics {
+                duration_ms: 10,
+                ttfb_ms: None,
+                upstream_duration_ms: None,
+                tokens_per_second: None,
+            },
+            auth: AuthMetadata {
+                authenticated: true,
+                api_key_id: Some("key_1".to_string()),
+                api_key_label: Some("test".to_string()),
+                auth_method: Some("bearer".to_string()),
+            },
+            routing: RoutingMetadata {
+                backend: "routing_config".to_string(),
+                upstream_mode: "responses".to_string(),
+                mcp_enabled: false,
+                mcp_servers: Vec::new(),
+                system_prompt_applied: false,
+            },
+            token_usage,
+            cost: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn aggregate_prefers_token_usage_when_present() {
+        let manager = AnalyticsManager::new_memory(10);
+        manager
+            .record(sample_event(
+                "evt_1",
+                Some(999),
+                Some(888),
+                Some(TokenUsage {
+                    prompt_tokens: 42,
+                    completion_tokens: 17,
+                    total_tokens: 59,
+                    cached_tokens: Some(10),
+                    reasoning_tokens: Some(2),
+                }),
+            ))
+            .await
+            .expect("record event");
+
+        let agg = manager
+            .aggregate(0, current_timestamp() + 60)
+            .await
+            .expect("aggregate");
+
+        assert_eq!(agg.total_input_tokens, 42);
+        assert_eq!(agg.total_output_tokens, 17);
+        assert_eq!(agg.total_cached_tokens, 10);
+        assert_eq!(agg.total_reasoning_tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn aggregate_falls_back_without_token_usage() {
+        let manager = AnalyticsManager::new_memory(10);
+        manager
+            .record(sample_event("evt_2", Some(70), Some(30), None))
+            .await
+            .expect("record event");
+
+        let agg = manager
+            .aggregate(0, current_timestamp() + 60)
+            .await
+            .expect("aggregate");
+
+        assert_eq!(agg.total_input_tokens, 70);
+        assert_eq!(agg.total_output_tokens, 30);
+        assert_eq!(agg.total_cached_tokens, 0);
+        assert_eq!(agg.total_reasoning_tokens, 0);
+    }
 }

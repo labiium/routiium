@@ -2110,6 +2110,7 @@ mod tests {
             tool_choice: None,
             response_format: None,
             stream: None,
+            extra_body: None,
         };
 
         let result = chat_to_bedrock_request(&req);

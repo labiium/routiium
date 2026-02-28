@@ -1,0 +1,15 @@
+.git
+.github
+target
+data
+tmp
+*.log
+
+# Local secrets/config
+.env
+.env.*
+!.env.example
+
+# Development artifacts
+*.bak
+coverage

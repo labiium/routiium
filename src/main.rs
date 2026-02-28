@@ -182,12 +182,15 @@ async fn main() -> std::io::Result<()> {
         };
 
     // Load router configuration if provided
+    let mut router_config_path_state: Option<String> = None;
+    let mut router_url_state: Option<String> = None;
     let router_client: Option<Arc<dyn routiium::router_client::RouterClient>> =
         if let Some(router_path) = router_config_arg.clone() {
             tracing::info!("Loading router configuration from: {}", router_path);
             match routiium::router_client::LocalPolicyRouter::from_file(&router_path) {
                 Ok(router) => {
                     tracing::info!("Router configuration loaded (local policy)");
+                    router_config_path_state = Some(router_path);
                     Some(Arc::new(router))
                 }
                 Err(e) => {
@@ -204,7 +207,7 @@ async fn main() -> std::io::Result<()> {
                 .unwrap_or(15);
 
             let config = routiium::router_client::HttpRouterConfig {
-                url: router_url,
+                url: router_url.clone(),
                 timeout_ms,
                 mtls: env::var("ROUTIIUM_ROUTER_MTLS").is_ok(),
                 client: None,
@@ -213,6 +216,7 @@ async fn main() -> std::io::Result<()> {
             match routiium::router_client::HttpRouterClient::new(config) {
                 Ok(client) => {
                     tracing::info!("Connected to remote router");
+                    router_url_state = Some(router_url);
                     // Wrap with cache
                     let cache_ttl = env::var("ROUTIIUM_CACHE_TTL_MS")
                         .ok()
@@ -305,6 +309,8 @@ async fn main() -> std::io::Result<()> {
         routing_config,
         routing_config_path,
         router_client,
+        router_config_path: router_config_path_state,
+        router_url: router_url_state,
     };
 
     // Startup mode announcement (managed vs passthrough)

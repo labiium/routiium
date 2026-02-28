@@ -247,7 +247,44 @@ async fn test_status_endpoint_includes_new_routes() {
         .collect();
 
     // Verify reload routes are present
+    assert!(route_strings.contains(&"/health".to_string()));
+    assert!(route_strings.contains(&"/models".to_string()));
     assert!(route_strings.contains(&"/reload/mcp".to_string()));
     assert!(route_strings.contains(&"/reload/system_prompt".to_string()));
     assert!(route_strings.contains(&"/reload/all".to_string()));
+}
+
+#[actix_web::test]
+async fn test_health_endpoint() {
+    let app_state = AppState::default();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(app_state))
+            .configure(config_routes),
+    )
+    .await;
+
+    let req = test::TestRequest::get().uri("/health").to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(resp.status(), 200);
+
+    let body = test::read_body(resp).await;
+    let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body_json["status"], "ok");
+}
+
+#[actix_web::test]
+async fn test_models_alias_endpoint_is_registered() {
+    let app_state = AppState::default();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(app_state))
+            .configure(config_routes),
+    )
+    .await;
+
+    let req = test::TestRequest::get().uri("/models").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_ne!(resp.status(), 404);
 }

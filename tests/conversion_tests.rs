@@ -61,6 +61,7 @@ fn basic_role_and_message_mapping() {
         tool_choice: None,
         response_format: None,
         stream: None,
+        extra_body: None,
     };
 
     let out = to_responses_request(&req, None);
@@ -110,6 +111,7 @@ fn sampling_limits_and_stopping_map_correctly() {
         tool_choice: None,
         response_format: None,
         stream: Some(false),
+        extra_body: None,
     };
 
     let out = to_responses_request(&req, Some("conv-abc".into()));
@@ -153,6 +155,7 @@ fn stop_array_supported_and_preserved() {
         tool_choice: None,
         response_format: None,
         stream: None,
+        extra_body: None,
     };
 
     let out = to_responses_request(&req, None);
@@ -195,6 +198,7 @@ fn tools_and_tool_choice_are_forwarded() {
         tool_choice: Some(json!({"type":"function","function":{"name":"lookup"}})),
         response_format: None,
         stream: Some(true),
+        extra_body: None,
     };
 
     let out = to_responses_request(&req, None);
@@ -260,6 +264,7 @@ fn response_format_forwarding_and_type_override_protection() {
             extra: extras,
         }),
         stream: None,
+        extra_body: None,
     };
 
     let out = to_responses_request(&req, None);
@@ -303,6 +308,7 @@ fn content_array_is_preserved_for_multimodal_shape() {
         tool_choice: None,
         response_format: None,
         stream: None,
+        extra_body: None,
     };
 
     let out = to_responses_request(&req, Some("conv-42".into()));

@@ -119,7 +119,7 @@ async fn passthrough_proxy_allows_missing_bearer() {
         tool_choice: None,
         response_format: None,
         stream: Some(false),
-    };
+        extra_body: None,    };
 
     let resp = srv
         .post_json("/proxy", &chat_req, None)
@@ -158,7 +158,7 @@ async fn managed_proxy_invalid_token_401() {
         tool_choice: None,
         response_format: None,
         stream: Some(false),
-    };
+        extra_body: None,    };
 
     let resp = srv
         .post_json("/proxy", &chat_req, Some("sk_nope.bad"))
@@ -194,7 +194,7 @@ async fn managed_proxy_valid_token_not_unauthorized() {
         tool_choice: None,
         response_format: None,
         stream: Some(false),
-    };
+        extra_body: None,    };
 
     let resp = srv
         .post_json("/proxy", &chat_req, Some(&token))

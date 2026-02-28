@@ -51,4 +51,4 @@ Each section above can be implemented independently. When contributing, please:
 2. Include new unit/integration tests that prove the gap is closed.
 3. Update `API_REFERENCE.md` and relevant examples if you surface new request parameters or behaviors.
 
-Once the outstanding bullets are addressed, Routiium will provide a truly seamless Responses experience to any Chat Completions client with zero application-side changes.***
+Once the outstanding bullets are addressed, Routiium will provide a truly seamless Responses experience to any Chat Completions client with zero application-side changes.

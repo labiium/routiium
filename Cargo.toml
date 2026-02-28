@@ -1,6 +1,6 @@
 [package]
 name = "routiium"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "Translate and proxy OpenAI Chat Completions requests to the Responses API."
 license = "Apache-2.0"

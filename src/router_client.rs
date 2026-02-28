@@ -1054,6 +1054,22 @@ impl LocalPolicyRouter {
     pub fn empty() -> Self {
         Self::new(HashMap::new())
     }
+
+    fn provider_from_base_url(base_url: &str) -> String {
+        if base_url.contains("openai.com") {
+            "openai".to_string()
+        } else if base_url.contains("anthropic.com") {
+            "anthropic".to_string()
+        } else if base_url.contains("groq.com") {
+            "groq".to_string()
+        } else if base_url.contains("bedrock") || base_url.contains("amazonaws.com") {
+            "bedrock".to_string()
+        } else if base_url.contains("localhost") || base_url.contains("127.0.0.1") {
+            "local".to_string()
+        } else {
+            "custom".to_string()
+        }
+    }
 }
 
 impl LocalRouter for LocalPolicyRouter {
@@ -1117,6 +1133,34 @@ impl LocalRouter for LocalPolicyRouter {
 impl RouterClient for LocalPolicyRouter {
     async fn plan(&self, req: &RouteRequest) -> Result<RoutePlan, RouteError> {
         self.plan_local(req)
+    }
+
+    async fn get_catalog(&self) -> Result<ModelCatalog, RouteError> {
+        let mut models = Vec::with_capacity(self.aliases.len());
+        for (alias, upstream) in &self.aliases {
+            models.push(CatalogModel {
+                id: alias.clone(),
+                provider: Self::provider_from_base_url(&upstream.base_url),
+                region: None,
+                aliases: vec![upstream.model_id.clone()],
+                capabilities: Capabilities::default(),
+                usage_notes: Some("Resolved via local alias map".to_string()),
+                cost: CostCard::default(),
+                slos: SLOs::default(),
+                limits: None,
+                policy_tags: vec!["local".to_string()],
+                status: "healthy".to_string(),
+                status_reason: None,
+                deprecates_at: None,
+                rl_policy: None,
+                deprecated: None,
+            });
+        }
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(ModelCatalog {
+            revision: "local_v1".to_string(),
+            models,
+        })
     }
 }
 
@@ -1696,6 +1740,27 @@ mod tests {
             Some("local_alias_policy")
         );
         assert_eq!(plan.content_used.as_deref(), Some("none"));
+    }
+
+    #[tokio::test]
+    async fn test_local_router_catalog_lists_aliases() {
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "edu-fast".to_string(),
+            UpstreamConfig {
+                base_url: "https://api.openai.com/v1".to_string(),
+                mode: UpstreamMode::Responses,
+                model_id: "gpt-4o-mini".to_string(),
+                auth_env: Some("OPENAI_API_KEY".to_string()),
+                headers: None,
+            },
+        );
+        let router = LocalPolicyRouter::new(aliases);
+        let catalog = router.get_catalog().await.expect("catalog");
+        assert_eq!(catalog.revision, "local_v1");
+        assert_eq!(catalog.models.len(), 1);
+        assert_eq!(catalog.models[0].id, "edu-fast");
+        assert_eq!(catalog.models[0].aliases, vec!["gpt-4o-mini".to_string()]);
     }
 
     #[tokio::test]

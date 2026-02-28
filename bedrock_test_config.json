@@ -1,43 +1,144 @@
 {
-  "rules": [
-    {
-      "condition": {
-        "field": "model",
-        "operator": "prefix",
-        "value": "anthropic."
-      },
-      "route": "bedrock_claude"
-    },
-    {
-      "condition": {
-        "field": "model",
-        "operator": "prefix",
-        "value": "amazon."
-      },
-      "route": "bedrock_titan"
-    },
-    {
-      "condition": {
-        "field": "model",
-        "operator": "prefix",
-        "value": "meta."
-      },
-      "route": "bedrock_llama"
-    }
-  ],
-  "backends": {
-    "bedrock_claude": {
-      "url": "https://bedrock-runtime.us-east-1.amazonaws.com",
-      "mode": "bedrock"
-    },
-    "bedrock_titan": {
-      "url": "https://bedrock-runtime.us-east-1.amazonaws.com",
-      "mode": "bedrock"
-    },
-    "bedrock_llama": {
-      "url": "https://bedrock-runtime.us-east-1.amazonaws.com",
-      "mode": "bedrock"
-    }
-  }
+    "aliases": [
+        {
+            "alias": "default",
+            "target": "anthropic.claude-3-haiku-20240307-v1:0",
+            "description": "Default fast model via Bedrock",
+            "enabled": true
+        },
+        {
+            "alias": "labiium",
+            "target": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "description": "Labiium preferred model",
+            "enabled": true
+        },
+        {
+            "alias": "routiium-main",
+            "target": "anthropic.claude-3-haiku-20240307-v1:0",
+            "description": "Routiium main testing model",
+            "enabled": true
+        },
+        {
+            "alias": "mistral-fast",
+            "target": "mistral.ministral-3-3b-instruct",
+            "description": "Fast Mistral Ministral 3B model via Bedrock",
+            "enabled": true
+        },
+        {
+            "alias": "mistral-medium",
+            "target": "mistral.ministral-3-8b-instruct",
+            "description": "Medium Mistral Ministral 8B model via Bedrock",
+            "enabled": true
+        },
+        {
+            "alias": "mistral-smart",
+            "target": "mistral.ministral-3-14b-instruct",
+            "description": "Smart Mistral Ministral 14B model via Bedrock",
+            "enabled": true
+        },
+        {
+            "alias": "openai-default",
+            "target": "gpt-4o-mini",
+            "description": "Default OpenAI model",
+            "enabled": true
+        }
+    ],
+    "rules": [
+        {
+            "id": "bedrock-anthropic",
+            "description": "Route Anthropic models to AWS Bedrock",
+            "match_strategy": {
+                "prefix": {
+                    "prefix": "anthropic."
+                }
+            },
+            "backends": [
+                {
+                    "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+                    "mode": "bedrock",
+                    "weight": 1
+                }
+            ],
+            "load_balance": "first",
+            "priority": 100,
+            "enabled": true
+        },
+        {
+            "id": "bedrock-amazon",
+            "description": "Route Amazon Titan models to AWS Bedrock",
+            "match_strategy": {
+                "prefix": {
+                    "prefix": "amazon."
+                }
+            },
+            "backends": [
+                {
+                    "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+                    "mode": "bedrock",
+                    "weight": 1
+                }
+            ],
+            "load_balance": "first",
+            "priority": 100,
+            "enabled": true
+        },
+        {
+            "id": "bedrock-meta",
+            "description": "Route Meta Llama models to AWS Bedrock",
+            "match_strategy": {
+                "prefix": {
+                    "prefix": "meta."
+                }
+            },
+            "backends": [
+                {
+                    "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+                    "mode": "bedrock",
+                    "weight": 1
+                }
+            ],
+            "load_balance": "first",
+            "priority": 100,
+            "enabled": true
+        },
+        {
+            "id": "bedrock-mistral",
+            "description": "Route Mistral models to AWS Bedrock",
+            "match_strategy": {
+                "prefix": {
+                    "prefix": "mistral."
+                }
+            },
+            "backends": [
+                {
+                    "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+                    "mode": "bedrock",
+                    "weight": 1
+                }
+            ],
+            "load_balance": "first",
+            "priority": 100,
+            "enabled": true
+        },
+        {
+            "id": "openai-gpt",
+            "description": "Route OpenAI GPT models to OpenAI API",
+            "match_strategy": {
+                "prefix": {
+                    "prefix": "gpt-"
+                }
+            },
+            "backends": [
+                {
+                    "base_url": "https://api.openai.com/v1",
+                    "key_env": "OPENAI_API_KEY",
+                    "mode": "chat",
+                    "weight": 1
+                }
+            ],
+            "load_balance": "first",
+            "priority": 90,
+            "enabled": true
+        }
+    ]
 }
-

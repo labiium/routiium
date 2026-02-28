@@ -83,7 +83,7 @@ Route by model prefix with static configuration:
 
 Example:
 ```bash
-ROUTIIUM_BACKENDS="gpt-4o,base=https://api.openai.com/v1,mode=responses;local-,base=http://localhost:8000/v1,key_env=LOCAL_API_KEY,mode=chat"
+ROUTIIUM_BACKENDS="prefix=gpt-4o,base=https://api.openai.com/v1,mode=responses;prefix=local-,base=http://localhost:8000/v1,key_env=LOCAL_API_KEY,mode=chat"
 ```
 
 Fallback: When Router is unavailable and ROUTIIUM_ROUTER_STRICT is not set, the system falls back to legacy routing.
@@ -108,6 +108,7 @@ Configuration is hot-reloadable (see Reload endpoints).
 When ROUTIIUM_PRICING_CONFIG is set, Routiium tracks costs for all requests:
 - Calculates costs based on token usage and model pricing
 - Supports input, output, cached, and reasoning tokens
+- Treats cached tokens as a subset of input tokens to avoid double billing
 - Tracks costs per model, per user, and per time period
 - Integrates with analytics for cost reports
 
@@ -130,12 +131,16 @@ Pricing config format:
 
 The service registers these routes:
 
+- GET /health
 - GET /status
+- GET /models
+- GET /v1/models
 - POST /convert
 - POST /v1/chat/completions
 - POST /v1/responses
 - GET /keys
 - POST /keys/generate
+- POST /keys/generate_batch
 - POST /keys/revoke
 - POST /keys/set_expiration
 - POST /reload/mcp
@@ -147,8 +152,39 @@ The service registers these routes:
 - GET /analytics/aggregate
 - GET /analytics/export
 - POST /analytics/clear
-- GET /chat_history/:conversation_id
-- DELETE /chat_history/:conversation_id
+- GET /chat_history/stats
+- GET /chat_history/conversations
+- GET /chat_history/conversations/{id}
+- GET /chat_history/messages
+- DELETE /chat_history/conversations/{id}
+- POST /chat_history/clear
+
+Admin/internal routes:
+- `/keys*`
+- `/reload/*`
+- `/analytics/*`
+- `/chat_history/*`
+
+If `ROUTIIUM_ADMIN_TOKEN` is set, these routes require `Authorization: Bearer <ROUTIIUM_ADMIN_TOKEN>`.
+
+
+## GET /health
+
+Returns a lightweight liveness response for orchestrator probes.
+
+Auth: None
+
+Example:
+```
+curl -s http://localhost:PORT/health | jq
+```
+
+Example response:
+```json
+{
+  "status": "ok"
+}
+```
 
 
 ## GET /status
@@ -203,6 +239,21 @@ Example response:
     }
   }
 }
+```
+
+
+## GET /models
+
+OpenAI compatibility alias for `GET /v1/models` (both endpoints share the same behavior).
+
+Auth:
+- Managed mode: Authorization: Bearer sk_<id>.<secret> (validated; upstream API key supplied by server).
+- Passthrough mode: Authorization: Bearer <provider_api_key> (forwarded upstream).
+
+Example:
+```
+curl -s http://localhost:PORT/models \
+  -H "Authorization: Bearer $OPENAI_API_KEY" | jq
 ```
 
 
@@ -346,7 +397,7 @@ Environment variables:
 
 Lists known keys (no tokens/secrets, only metadata).
 
-Auth: None (protect via network ACL)
+Auth: Admin bearer when `ROUTIIUM_ADMIN_TOKEN` is configured; otherwise protect via network ACLs.
 
 Response: Array<ApiKeyInfo>
 
@@ -359,7 +410,7 @@ curl -s http://localhost:PORT/keys | jq
 
 Creates a new client access key.
 
-Auth: None (protect via network ACL)
+Auth: Admin bearer when `ROUTIIUM_ADMIN_TOKEN` is configured; otherwise protect via network ACLs.
 
 Body:
 - label (string, optional)
@@ -386,7 +437,7 @@ curl -s -X POST http://localhost:PORT/keys/generate \
 
 Revokes a key by id.
 
-Auth: None (protect via network ACL)
+Auth: Admin bearer when `ROUTIIUM_ADMIN_TOKEN` is configured; otherwise protect via network ACLs.
 
 Body:
 - id (string) – the key id to revoke
@@ -405,7 +456,7 @@ curl -s -X POST http://localhost:PORT/keys/revoke \
 
 Sets or clears expiration for a key.
 
-Auth: None (protect via network ACL)
+Auth: Admin bearer when `ROUTIIUM_ADMIN_TOKEN` is configured; otherwise protect via network ACLs.
 
 Body:
 - id (string)
@@ -430,7 +481,7 @@ curl -s -X POST http://localhost:PORT/keys/set_expiration \
 
 Reloads the MCP configuration file and reconnects servers.
 
-Auth: None (protect via network ACL)
+Auth: Admin bearer when `ROUTIIUM_ADMIN_TOKEN` is configured; otherwise protect via network ACLs.
 
 Prerequisite: The server must have been started with an MCP config path.
 
@@ -467,7 +518,7 @@ Response (success):
 
 ### POST /reload/routing
 
-Reloads routing configuration (local alias map or ROUTIIUM_BACKENDS).
+Reloads `routing.json` configuration.
 
 Auth: None (protect via network ACL)
 
@@ -476,7 +527,11 @@ Response (success):
 {
   "success": true,
   "message": "Routing configuration reloaded",
-  "backends_count": 3
+  "stats": {
+    "total_rules": 3,
+    "enabled_rules": 3,
+    "total_aliases": 2
+  }
 }
 ```
 
@@ -828,6 +883,7 @@ X-Policy-Rev: 42
 - ROUTIIUM_ANALYTICS_TTL_SECONDS – TTL for analytics events in Redis/Sled.
 - ROUTIIUM_ANALYTICS_FORCE_MEMORY – Use in-memory analytics (dev only).
 - ROUTIIUM_ANALYTICS_MAX_EVENTS – Max events in memory mode.
+- ROUTIIUM_ADMIN_TOKEN – Optional admin bearer token for key/reload/analytics/chat history routes.
 
 Notes:
 - In managed mode, an Authorization bearer is mandatory and is validated; the upstream provider key is selected by routing (key_env if configured, else OPENAI_API_KEY).
@@ -842,4 +898,4 @@ Notes:
 
 # Change Log
 
-See README.md and release notes for additions to endpoints and behavior.
+See [`../README.md`](../README.md) and release notes for additions to endpoints and behavior.

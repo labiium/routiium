@@ -22,15 +22,18 @@ impl ModelPricing {
         cached_tokens: Option<u64>,
         reasoning_tokens: Option<u64>,
     ) -> (f64, f64, Option<f64>, f64) {
-        let input_cost = (input_tokens as f64 / 1_000_000.0) * self.input_per_million;
+        // `cached_tokens` are a subset of input tokens in OpenAI-compatible usage payloads.
+        // Charge uncached input at normal input price and cached input at cached price
+        // (when configured) to avoid double billing.
+        let cached_token_count = cached_tokens.unwrap_or(0);
+        let uncached_input_tokens = input_tokens.saturating_sub(cached_token_count);
+
+        let input_cost = (uncached_input_tokens as f64 / 1_000_000.0) * self.input_per_million;
         let output_cost = (output_tokens as f64 / 1_000_000.0) * self.output_per_million;
 
-        let cached_cost =
-            if let (Some(tokens), Some(price)) = (cached_tokens, self.cached_per_million) {
-                Some((tokens as f64 / 1_000_000.0) * price)
-            } else {
-                None
-            };
+        let cached_cost = self
+            .cached_per_million
+            .map(|price| (cached_token_count as f64 / 1_000_000.0) * price);
 
         let reasoning_cost =
             if let (Some(tokens), Some(price)) = (reasoning_tokens, self.reasoning_per_million) {
@@ -261,10 +264,26 @@ mod tests {
             .calculate_cost("gpt-4o", 1_000_000, 1_000_000, Some(1_000_000), None)
             .unwrap();
 
-        assert_eq!(cost.input_cost, 2.50);
+        // Input tokens are fully cached, so base input cost should be 0 and
+        // cost is charged via cached pricing only.
+        assert_eq!(cost.input_cost, 0.0);
         assert_eq!(cost.output_cost, 10.00);
         assert_eq!(cost.cached_cost, Some(1.25));
-        assert_eq!(cost.total_cost, 13.75);
+        assert_eq!(cost.total_cost, 11.25);
+    }
+
+    #[test]
+    fn test_partially_cached_tokens() {
+        let config = PricingConfig::openai_defaults();
+        let cost = config
+            .calculate_cost("gpt-4o", 1_000_000, 0, Some(400_000), None)
+            .unwrap();
+
+        // 600k uncached @ $2.50/M = $1.50
+        assert!((cost.input_cost - 1.5).abs() < 1e-9);
+        // 400k cached @ $1.25/M = $0.50
+        assert_eq!(cost.cached_cost, Some(0.5));
+        assert!((cost.total_cost - 2.0).abs() < 1e-9);
     }
 
     #[test]

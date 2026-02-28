@@ -29,7 +29,7 @@ The router layer lets Routiium resolve human-friendly model aliases into concret
 4. Routiium forwards the request upstream using that plan, adds observability headers (e.g. `x-route-id`, `x-resolved-model`, `router-schema`), and submits router feedback when supported.
 5. If the router rejects the alias or is unreachable and `ROUTIIUM_ROUTER_STRICT` is **not** set, Routiium falls back to the legacy `ROUTIIUM_BACKENDS` prefix rules or the global `OPENAI_BASE_URL`.
 
-The Router contract is documented in detail in [`ROUTER_API_SPEC.md`](ROUTER_API_SPEC.md); `examples/router_service.rs` is a runnable reference implementation.
+The Router contract is documented in detail in [`ROUTER_API_SPEC.md`](ROUTER_API_SPEC.md); `../examples/router_service.rs` is a runnable reference implementation.
 
 ---
 

@@ -184,6 +184,7 @@ fn test_inject_system_prompt_chat_prepend() {
         tool_choice: None,
         response_format: None,
         stream: None,
+        extra_body: None,
     };
 
     inject_system_prompt_chat(&mut req, "You are helpful", "prepend");
@@ -235,6 +236,7 @@ fn test_inject_system_prompt_chat_replace() {
         tool_choice: None,
         response_format: None,
         stream: None,
+        extra_body: None,
     };
 
     inject_system_prompt_chat(&mut req, "New system message", "replace");
@@ -279,6 +281,7 @@ fn test_inject_system_prompt_chat_append() {
         tool_choice: None,
         response_format: None,
         stream: None,
+        extra_body: None,
     };
 
     inject_system_prompt_chat(&mut req, "Additional system", "append");

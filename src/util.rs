@@ -163,6 +163,10 @@ pub struct AppState {
     pub routing_config_path: Option<String>,
     /// Router client for model routing decisions
     pub router_client: Option<std::sync::Arc<dyn crate::router_client::RouterClient>>,
+    /// Path to local router alias map configured via --router-config
+    pub router_config_path: Option<String>,
+    /// Remote router URL configured via ROUTIIUM_ROUTER_URL
+    pub router_url: Option<String>,
 }
 
 /// Build an HTTP client honoring proxy and timeout environment variables.
@@ -260,6 +264,8 @@ impl Default for AppState {
             )),
             routing_config_path: None,
             router_client: None,
+            router_config_path: None,
+            router_url: None,
         }
     }
 }
@@ -298,6 +304,8 @@ impl AppState {
             )),
             routing_config_path: None,
             router_client: None,
+            router_config_path: None,
+            router_url: None,
         }
     }
 
@@ -337,6 +345,8 @@ impl AppState {
             )),
             routing_config_path: None,
             router_client: None,
+            router_config_path: None,
+            router_url: None,
         }
     }
     /// Read the OpenAI API key from environment if present. Optional for /proxy.
@@ -530,63 +540,84 @@ fn backends_from_env() -> Vec<BackendRule> {
         Ok(s) => s,
         Err(_) => return out,
     };
-    for rule_raw in raw.split(';') {
-        let r = rule_raw.trim();
-        if r.is_empty() {
-            continue;
-        }
-        // Support both "k=v,k=v" and "k=v; k=v" styles by normalizing separators to commas first.
-        let parts = r
-            .split([',', ';'])
-            .map(|p| p.trim())
-            .filter(|p| !p.is_empty());
-        let mut prefix: Option<String> = None;
-        let mut base: Option<String> = None;
-        let mut key_env: Option<String> = None;
-        let mut mode: Option<UpstreamMode> = None;
+    let mut prefix: Option<String> = None;
+    let mut base: Option<String> = None;
+    let mut key_env: Option<String> = None;
+    let mut mode: Option<UpstreamMode> = None;
 
-        for kv in parts {
-            let mut it = kv.splitn(2, '=');
-            let k = it.next().unwrap_or("").trim().to_ascii_lowercase();
-            let v = it.next().unwrap_or("").trim().to_string();
-            if v.is_empty() {
-                continue;
-            }
-            match k.as_str() {
-                "prefix" => prefix = Some(v),
-                "base" | "base_url" => base = Some(v),
-                "key_env" | "api_key_env" => key_env = Some(v),
-                "mode" => mode = parse_mode(&v),
-                _ => {}
-            }
-        }
-
-        if let (Some(pfx), Some(bu)) = (prefix, base) {
+    let flush_rule = |out: &mut Vec<BackendRule>,
+                      prefix: &mut Option<String>,
+                      base: &mut Option<String>,
+                      key_env: &mut Option<String>,
+                      mode: &mut Option<UpstreamMode>| {
+        if let (Some(pfx), Some(bu)) = (prefix.take(), base.take()) {
             out.push(BackendRule {
                 prefix: pfx,
                 base_url: bu,
-                key_env,
-                mode,
+                key_env: key_env.take(),
+                mode: mode.take(),
             });
+        } else {
+            // Drop partial fragments and reset.
+            *prefix = None;
+            *base = None;
+            *key_env = None;
+            *mode = None;
+        }
+    };
+
+    // Accept both styles:
+    // 1) "prefix=a,base=...,mode=...;prefix=b,base=...,mode=..."
+    // 2) "prefix=a;base=...;mode=...; prefix=b;base=...;mode=..."
+    for token in raw
+        .split([',', ';'])
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+    {
+        let mut it = token.splitn(2, '=');
+        let k = it.next().unwrap_or("").trim().to_ascii_lowercase();
+        let v = it.next().unwrap_or("").trim().to_string();
+        if v.is_empty() {
+            continue;
+        }
+
+        if k == "prefix" && prefix.is_some() && base.is_some() {
+            flush_rule(&mut out, &mut prefix, &mut base, &mut key_env, &mut mode);
+        }
+
+        match k.as_str() {
+            "prefix" => prefix = Some(v),
+            "base" | "base_url" => base = Some(v),
+            "key_env" | "api_key_env" => key_env = Some(v),
+            "mode" => mode = parse_mode(&v),
+            _ => {}
         }
     }
+    flush_rule(&mut out, &mut prefix, &mut base, &mut key_env, &mut mode);
     out
 }
 
-fn resolve_backend_for_model(model: Option<&str>) -> Option<ResolvedBackend> {
-    let model = model?;
+pub(crate) fn resolve_backend_for_model_name(
+    model: &str,
+) -> Option<(String, Option<String>, UpstreamMode)> {
     let rules = backends_from_env();
     for rule in rules {
         if model.starts_with(rule.prefix.as_str()) {
             let mode = rule.mode.unwrap_or_else(upstream_mode_from_env);
-            return Some(ResolvedBackend {
-                base_url: rule.base_url,
-                key_env: rule.key_env,
-                mode,
-            });
+            return Some((rule.base_url, rule.key_env, mode));
         }
     }
     None
+}
+
+fn resolve_backend_for_model(model: Option<&str>) -> Option<ResolvedBackend> {
+    let model = model?;
+    let (base_url, key_env, mode) = resolve_backend_for_model_name(model)?;
+    Some(ResolvedBackend {
+        base_url,
+        key_env,
+        mode,
+    })
 }
 
 /// Streaming helper that auto-resolves backend based on model from payload.

@@ -4,7 +4,7 @@ use bytes::Bytes;
 #[allow(unused_imports)]
 use futures_util::TryStreamExt;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -47,6 +47,15 @@ struct UpstreamResolution {
     headers: Option<HashMap<String, String>>,
     model_id: String,
     plan: Option<RoutePlan>,
+    source: UpstreamSource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpstreamSource {
+    RouterPlan,
+    RoutingConfig,
+    BackendsEnv,
+    Default,
 }
 
 fn mode_label(mode: crate::util::UpstreamMode) -> &'static str {
@@ -57,11 +66,63 @@ fn mode_label(mode: crate::util::UpstreamMode) -> &'static str {
     }
 }
 
+fn source_label(source: UpstreamSource) -> &'static str {
+    match source {
+        UpstreamSource::RouterPlan => "router",
+        UpstreamSource::RoutingConfig => "routing_config",
+        UpstreamSource::BackendsEnv => "backends_env",
+        UpstreamSource::Default => "default",
+    }
+}
+
 fn request_client_ip(req: &HttpRequest) -> String {
     req.connection_info()
         .realip_remote_addr()
         .unwrap_or("-")
         .to_string()
+}
+
+fn bearer_from_request(req: &HttpRequest) -> Option<String> {
+    req.headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| {
+            let s = s.trim();
+            if s.len() >= 7 && s[..6].eq_ignore_ascii_case("bearer") {
+                Some(s[6..].trim().to_string())
+            } else {
+                None
+            }
+        })
+}
+
+fn authorize_admin_request(
+    req: &HttpRequest,
+    expected_token: Option<&str>,
+) -> Result<(), HttpResponse> {
+    let Some(expected_token) = expected_token.map(str::trim).filter(|v| !v.is_empty()) else {
+        // Backwards-compatible default: if no admin token is configured, keep admin endpoints open.
+        return Ok(());
+    };
+
+    let provided = bearer_from_request(req);
+    if provided.as_deref() == Some(expected_token) {
+        return Ok(());
+    }
+
+    Err(HttpResponse::Unauthorized()
+        .insert_header(("www-authenticate", "Bearer"))
+        .json(serde_json::json!({
+            "error": {
+                "message": "Unauthorized admin request",
+                "type": "invalid_request_error"
+            }
+        })))
+}
+
+fn require_admin(req: &HttpRequest) -> Result<(), HttpResponse> {
+    let expected_token = std::env::var("ROUTIIUM_ADMIN_TOKEN").ok();
+    authorize_admin_request(req, expected_token.as_deref())
 }
 
 fn log_request_start(
@@ -83,6 +144,7 @@ fn log_request_start(
         requested_model,
         resolved_model = %resolution.model_id,
         mode = mode_label(resolution.mode),
+        source = source_label(resolution.source),
         stream,
         route_id,
         "request"
@@ -124,12 +186,16 @@ fn router_strict_mode() -> bool {
 async fn record_chat_history(
     chat_history: &Option<std::sync::Arc<crate::chat_history_manager::ChatHistoryManager>>,
     conversation_id: Option<String>,
+    requested_model: &str,
     request_body: &serde_json::Value,
     response_body: &serde_json::Value,
     resolution: &UpstreamResolution,
-    usage: Option<&crate::models::chat::ChatUsage>,
+    usage: Option<&crate::analytics::TokenUsage>,
 ) {
-    tracing::info!("record_chat_history called with conversation_id: {:?}", conversation_id);
+    tracing::info!(
+        "record_chat_history called with conversation_id: {:?}",
+        conversation_id
+    );
     if let Some(manager) = chat_history {
         tracing::info!("Chat history manager available, recording conversation");
         let conversation_id = conversation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -144,7 +210,18 @@ async fn record_chat_history(
         let privacy_level = manager.privacy_level();
         let mut messages_to_record = Vec::new();
 
-        // Record user messages from the request
+        let set_routing_fields = |message: &mut crate::chat_history::Message| {
+            if !requested_model.is_empty() {
+                message.routing.requested_model = Some(requested_model.to_string());
+            }
+            message.routing.actual_model = Some(resolution.model_id.clone());
+            message.routing.backend = Some(source_label(resolution.source).to_string());
+            message.routing.backend_url = Some(resolution.base_url.clone());
+            message.routing.upstream_mode = Some(mode_label(resolution.mode).to_string());
+            message.routing.route_id = resolution.plan.as_ref().map(|p| p.route_id.clone());
+        };
+
+        // Record user/system messages from Chat Completions request payload.
         if let Some(messages) = request_body.get("messages").and_then(|v| v.as_array()) {
             for msg in messages {
                 if let Some(role) = msg.get("role").and_then(|v| v.as_str()) {
@@ -165,17 +242,54 @@ async fn record_chat_history(
                             privacy_level,
                         );
 
-                        // Add routing info
-                        message.routing.requested_model = Some(resolution.model_id.clone());
-                        message.routing.backend = Some(mode_label(resolution.mode).to_string());
+                        set_routing_fields(&mut message);
 
                         messages_to_record.push(message);
                     }
                 }
             }
+        } else if let Some(inputs) = request_body.get("input").and_then(|v| v.as_array()) {
+            // Record user/system messages from Responses API request payload.
+            for input in inputs {
+                if let Some(obj) = input.as_object() {
+                    let role = obj
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("user")
+                        .to_ascii_lowercase();
+                    if role == "user" || role == "system" {
+                        let role_enum = if role == "system" {
+                            crate::chat_history::MessageRole::System
+                        } else {
+                            crate::chat_history::MessageRole::User
+                        };
+                        let content = obj
+                            .get("content")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!(obj));
+                        let mut message = crate::chat_history::Message::new(
+                            conversation_id.clone(),
+                            role_enum,
+                            content,
+                            privacy_level,
+                        );
+                        set_routing_fields(&mut message);
+                        messages_to_record.push(message);
+                    }
+                } else if let Some(raw_text) = input.as_str() {
+                    let mut message = crate::chat_history::Message::new(
+                        conversation_id.clone(),
+                        crate::chat_history::MessageRole::User,
+                        serde_json::json!(raw_text),
+                        privacy_level,
+                    );
+                    set_routing_fields(&mut message);
+                    messages_to_record.push(message);
+                }
+            }
         }
 
-        // Record assistant response from the response body
+        // Record assistant response from Chat Completions style payload.
         if let Some(choices) = response_body.get("choices").and_then(|v| v.as_array()) {
             for choice in choices {
                 if let Some(msg) = choice.get("message") {
@@ -190,16 +304,64 @@ async fn record_chat_history(
                         privacy_level,
                     );
 
-                    // Add routing info
-                    message.routing.requested_model = Some(resolution.model_id.clone());
-                    message.routing.backend = Some(mode_label(resolution.mode).to_string());
+                    set_routing_fields(&mut message);
 
                     // Add token usage
                     if let Some(usage) = usage {
                         message.tokens.input_tokens = Some(usage.prompt_tokens);
                         message.tokens.output_tokens = Some(usage.completion_tokens);
+                        message.tokens.cached_tokens = usage.cached_tokens;
+                        message.tokens.reasoning_tokens = usage.reasoning_tokens;
                     }
 
+                    messages_to_record.push(message);
+                }
+            }
+        } else {
+            // Record assistant response from Responses API payloads.
+            let mut recorded_from_output_items = false;
+            if let Some(output_items) = response_body.get("output").and_then(|v| v.as_array()) {
+                for item in output_items {
+                    let content = item
+                        .get("content")
+                        .cloned()
+                        .or_else(|| item.get("output_text").cloned());
+                    if let Some(content) = content {
+                        let mut message = crate::chat_history::Message::new(
+                            conversation_id.clone(),
+                            crate::chat_history::MessageRole::Assistant,
+                            content,
+                            privacy_level,
+                        );
+                        set_routing_fields(&mut message);
+                        if let Some(usage) = usage {
+                            message.tokens.input_tokens = Some(usage.prompt_tokens);
+                            message.tokens.output_tokens = Some(usage.completion_tokens);
+                            message.tokens.cached_tokens = usage.cached_tokens;
+                            message.tokens.reasoning_tokens = usage.reasoning_tokens;
+                        }
+                        messages_to_record.push(message);
+                        recorded_from_output_items = true;
+                    }
+                }
+            }
+
+            if !recorded_from_output_items {
+                if let Some(output_text) = response_body.get("output_text").and_then(|v| v.as_str())
+                {
+                    let mut message = crate::chat_history::Message::new(
+                        conversation_id.clone(),
+                        crate::chat_history::MessageRole::Assistant,
+                        serde_json::json!(output_text),
+                        privacy_level,
+                    );
+                    set_routing_fields(&mut message);
+                    if let Some(usage) = usage {
+                        message.tokens.input_tokens = Some(usage.prompt_tokens);
+                        message.tokens.output_tokens = Some(usage.completion_tokens);
+                        message.tokens.cached_tokens = usage.cached_tokens;
+                        message.tokens.reasoning_tokens = usage.reasoning_tokens;
+                    }
                     messages_to_record.push(message);
                 }
             }
@@ -224,18 +386,168 @@ async fn record_chat_history(
     }
 }
 
+fn request_message_count(body: &serde_json::Value) -> Option<usize> {
+    body.get("messages")
+        .and_then(|v| v.as_array())
+        .map(|m| m.len())
+        .or_else(|| {
+            body.get("input")
+                .and_then(|v| v.as_array())
+                .map(|m| m.len())
+        })
+}
+
+fn request_size_bytes(body: &serde_json::Value) -> usize {
+    serde_json::to_string(body).map(|s| s.len()).unwrap_or(0)
+}
+
+fn extract_error_message(
+    body: Option<&serde_json::Value>,
+    fallback_bytes: &[u8],
+) -> Option<String> {
+    if let Some(value) = body {
+        if let Some(message) = value
+            .get("error")
+            .and_then(|e| e.get("message").or_else(|| e.get("error")))
+            .and_then(|v| v.as_str())
+        {
+            return Some(message.to_string());
+        }
+        if let Some(message) = value.get("message").and_then(|v| v.as_str()) {
+            return Some(message.to_string());
+        }
+    }
+
+    let text = String::from_utf8_lossy(fallback_bytes).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.chars().take(240).collect())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_analytics_event(
+    state: &AppState,
+    req: &HttpRequest,
+    request_body: &serde_json::Value,
+    requested_model: &str,
+    resolution: &UpstreamResolution,
+    started_at: std::time::Instant,
+    status_code: u16,
+    response_size: usize,
+    token_usage: Option<crate::analytics::TokenUsage>,
+    authenticated: bool,
+    api_key_id: Option<String>,
+    api_key_label: Option<String>,
+    system_prompt_applied: bool,
+    error_message: Option<String>,
+) {
+    let Some(manager) = state.analytics.as_ref() else {
+        return;
+    };
+
+    let duration_ms = started_at.elapsed().as_millis() as u64;
+    let output_tokens = token_usage.as_ref().map(|u| u.completion_tokens);
+    let tokens_per_second = output_tokens.and_then(|tokens| {
+        if duration_ms > 0 {
+            Some((tokens as f64 / duration_ms as f64) * 1000.0)
+        } else {
+            None
+        }
+    });
+
+    let cost = token_usage.as_ref().and_then(|usage| {
+        state.pricing.calculate_cost(
+            &resolution.model_id,
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            usage.cached_tokens,
+            usage.reasoning_tokens,
+        )
+    });
+
+    let event = crate::analytics::AnalyticsEvent {
+        id: crate::analytics::generate_event_id(),
+        timestamp: crate::analytics::current_timestamp(),
+        request: crate::analytics::RequestMetadata {
+            endpoint: req.path().to_string(),
+            method: req.method().to_string(),
+            model: if requested_model.is_empty() {
+                None
+            } else {
+                Some(requested_model.to_string())
+            },
+            stream: request_body
+                .get("stream")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            size_bytes: request_size_bytes(request_body),
+            message_count: request_message_count(request_body),
+            input_tokens: token_usage.as_ref().map(|u| u.prompt_tokens),
+            user_agent: req
+                .headers()
+                .get("user-agent")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string),
+            client_ip: Some(request_client_ip(req)),
+        },
+        response: Some(crate::analytics::ResponseMetadata {
+            status_code,
+            size_bytes: response_size,
+            output_tokens,
+            success: (200..300).contains(&status_code),
+            error_message,
+        }),
+        performance: crate::analytics::PerformanceMetrics {
+            duration_ms,
+            ttfb_ms: None,
+            upstream_duration_ms: None,
+            tokens_per_second,
+        },
+        auth: crate::analytics::AuthMetadata {
+            authenticated,
+            api_key_id,
+            api_key_label,
+            auth_method: if authenticated {
+                Some("bearer".to_string())
+            } else {
+                None
+            },
+        },
+        routing: crate::analytics::RoutingMetadata {
+            backend: source_label(resolution.source).to_string(),
+            upstream_mode: mode_label(resolution.mode).to_string(),
+            mcp_enabled: state.mcp_manager.is_some(),
+            mcp_servers: Vec::new(),
+            system_prompt_applied,
+        },
+        token_usage,
+        cost,
+    };
+
+    if let Err(err) = manager.record(event).await {
+        tracing::warn!("Failed to record analytics event: {}", err);
+    }
+}
+
 async fn resolve_upstream(
     state: &AppState,
     api: &str,
-    body: &serde_json::Value,
+    body: &mut serde_json::Value,
 ) -> Result<UpstreamResolution, RouteError> {
-    let requested_model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
+    let requested_model = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let strict_mode = router_strict_mode();
 
     if let Some(router) = state.router_client.as_ref() {
         if !requested_model.is_empty() {
             let privacy_mode = router_privacy_mode_from_env();
-            let route_request = extract_route_request(requested_model, api, body, privacy_mode);
+            let route_request =
+                extract_route_request(requested_model.as_str(), api, body, privacy_mode);
             match router.plan(&route_request).await {
                 Ok(plan) => {
                     let model_id = plan.upstream.model_id.clone();
@@ -246,6 +558,7 @@ async fn resolve_upstream(
                         headers: plan.upstream.headers.clone(),
                         model_id,
                         plan: Some(plan),
+                        source: UpstreamSource::RouterPlan,
                     });
                 }
                 Err(e) => {
@@ -266,7 +579,7 @@ async fn resolve_upstream(
     // Try routing config first (if loaded and actually has a match/default)
     let routing_guard = state.routing_config.read().await;
     let resolved_alias = if !requested_model.is_empty() {
-        routing_guard.resolve_alias(requested_model)
+        routing_guard.resolve_alias(requested_model.as_str())
     } else {
         String::new()
     };
@@ -274,10 +587,22 @@ async fn resolve_upstream(
         !requested_model.is_empty() && routing_guard.find_rule(resolved_alias.as_str()).is_some();
     let has_default = routing_guard.default_backend.is_some();
     if has_rule || has_default {
-        if let Ok(route) = routing_guard.resolve_route(requested_model) {
-            // Resolve alias to get the actual model ID
+        if let Ok(route) = routing_guard.resolve_route(requested_model.as_str()) {
+            // Apply alias + transform chain from routing.json so runtime behavior matches config.
             let resolved_model = if !requested_model.is_empty() {
-                resolved_alias.clone()
+                match routing_guard.apply_transformations(requested_model.as_str(), body) {
+                    Ok(model) => model,
+                    Err(e) => {
+                        if strict_mode {
+                            return Err(RouteError::InvalidRequest(format!(
+                                "routing transform failed: {}",
+                                e
+                            )));
+                        }
+                        tracing::warn!("routing transform failed, continuing: {}", e);
+                        resolved_alias.clone()
+                    }
+                }
             } else {
                 std::env::var("MODEL").unwrap_or_else(|_| "gpt-5-nano".to_string())
             };
@@ -297,6 +622,7 @@ async fn resolve_upstream(
                 headers: None,
                 model_id: resolved_model,
                 plan: None,
+                source: UpstreamSource::RoutingConfig,
             });
         }
     }
@@ -306,55 +632,15 @@ async fn resolve_upstream(
     let mut base_url: Option<String> = None;
     let mut mode: Option<crate::util::UpstreamMode> = None;
     let mut key_env: Option<String> = None;
-
-    if let Ok(cfg) = std::env::var("ROUTIIUM_BACKENDS") {
-        if !requested_model.is_empty() {
-            for rule_raw in cfg.split(';') {
-                let r = rule_raw.trim();
-                if r.is_empty() {
-                    continue;
-                }
-                let mut prefix: Option<String> = None;
-                let mut base: Option<String> = None;
-                let mut key_env_local: Option<String> = None;
-                let mut mode_local: Option<crate::util::UpstreamMode> = None;
-
-                for kv in r.split([',', ';']) {
-                    let p = kv.trim();
-                    if p.is_empty() || !p.contains('=') {
-                        continue;
-                    }
-                    let mut it = p.splitn(2, '=');
-                    let k = it.next().unwrap_or("").trim().to_ascii_lowercase();
-                    let v = it.next().unwrap_or("").trim().to_string();
-                    if v.is_empty() {
-                        continue;
-                    }
-                    match k.as_str() {
-                        "prefix" => prefix = Some(v),
-                        "base" | "base_url" => base = Some(v),
-                        "key_env" | "api_key_env" => key_env_local = Some(v),
-                        "mode" => {
-                            let vv = v.to_ascii_lowercase();
-                            mode_local = match vv.as_str() {
-                                "chat" => Some(crate::util::UpstreamMode::Chat),
-                                "bedrock" => Some(crate::util::UpstreamMode::Bedrock),
-                                _ => Some(crate::util::UpstreamMode::Responses),
-                            };
-                        }
-                        _ => {}
-                    }
-                }
-
-                if let (Some(pfx), Some(bu)) = (prefix, base) {
-                    if requested_model.starts_with(pfx.as_str()) {
-                        base_url = Some(bu);
-                        mode = mode_local;
-                        key_env = key_env_local;
-                        break;
-                    }
-                }
-            }
+    let mut source = UpstreamSource::Default;
+    if !requested_model.is_empty() {
+        if let Some((bu, ke, m)) =
+            crate::util::resolve_backend_for_model_name(requested_model.as_str())
+        {
+            base_url = Some(bu);
+            key_env = ke;
+            mode = Some(m);
+            source = UpstreamSource::BackendsEnv;
         }
     }
 
@@ -362,7 +648,7 @@ async fn resolve_upstream(
         if !resolved_alias.is_empty() {
             resolved_alias
         } else {
-            requested_model.to_string()
+            requested_model
         }
     } else {
         std::env::var("MODEL").unwrap_or_else(|_| "gpt-5-nano".to_string())
@@ -383,6 +669,7 @@ async fn resolve_upstream(
         headers: None,
         model_id: resolved_model,
         plan: None,
+        source,
     })
 }
 
@@ -490,6 +777,100 @@ fn strip_responses_only_fields(payload: &mut serde_json::Value) {
     }
 }
 
+fn collect_existing_tool_names(
+    tools: &[serde_json::Value],
+    prefer_nested_function_name: bool,
+) -> HashSet<String> {
+    let mut names = HashSet::new();
+
+    for tool in tools {
+        let Some(obj) = tool.as_object() else {
+            continue;
+        };
+
+        let nested_name = obj
+            .get("function")
+            .and_then(|f| f.as_object())
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str());
+        let direct_name = obj.get("name").and_then(|n| n.as_str());
+        let selected = if prefer_nested_function_name {
+            nested_name.or(direct_name)
+        } else {
+            direct_name.or(nested_name)
+        };
+        if let Some(name) = selected {
+            names.insert(name.to_string());
+        }
+    }
+
+    names
+}
+
+fn merge_mcp_tools_into_chat_payload(
+    payload: &mut serde_json::Value,
+    mcp_tools: &[crate::mcp_client::McpTool],
+) {
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+    let tools_value = obj
+        .entry("tools".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let Some(tools_array) = tools_value.as_array_mut() else {
+        return;
+    };
+
+    let mut existing_names = collect_existing_tool_names(tools_array, true);
+
+    for tool in mcp_tools {
+        let combined_name = format!("{}_{}", tool.server_name, tool.name);
+        if !existing_names.insert(combined_name.clone()) {
+            continue;
+        }
+
+        tools_array.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": combined_name,
+                "description": tool.description.as_deref().unwrap_or("MCP tool"),
+                "parameters": tool.input_schema.clone()
+            }
+        }));
+    }
+}
+
+fn merge_mcp_tools_into_responses_payload(
+    payload: &mut serde_json::Value,
+    mcp_tools: &[crate::mcp_client::McpTool],
+) {
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+    let tools_value = obj
+        .entry("tools".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let Some(tools_array) = tools_value.as_array_mut() else {
+        return;
+    };
+
+    let mut existing_names = collect_existing_tool_names(tools_array, false);
+
+    for tool in mcp_tools {
+        let combined_name = format!("{}_{}", tool.server_name, tool.name);
+        if !existing_names.insert(combined_name.clone()) {
+            continue;
+        }
+
+        tools_array.push(serde_json::json!({
+            "type": "function",
+            "name": combined_name,
+            "description": tool.description.as_deref().unwrap_or("MCP tool"),
+            "parameters": tool.input_schema.clone()
+        }));
+    }
+}
+
 fn inject_system_prompt_chat_json(payload: &mut serde_json::Value, prompt: &str, mode: &str) {
     let Some(messages) = payload.get_mut("messages").and_then(|v| v.as_array_mut()) else {
         return;
@@ -534,7 +915,11 @@ fn inject_system_prompt_chat_json(payload: &mut serde_json::Value, prompt: &str,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat_history::{MessageFilters, MessageRole, PrivacyLevel};
+    use crate::chat_history_manager::{ChatHistoryConfig, ChatHistoryManager};
+    use actix_web::test::TestRequest;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
     fn extract_conversation_supports_object_form() {
@@ -579,6 +964,266 @@ mod tests {
         assert!(payload.get("conversation").is_none());
         assert!(payload.get("conversation_id").is_none());
         assert!(payload.get("previous_response_id").is_none());
+    }
+
+    #[test]
+    fn merge_mcp_tools_into_chat_payload_dedupes_existing_names() {
+        let mut payload = json!({
+            "model": "gpt-4o-mini",
+            "messages": [{"role":"user","content":"hi"}],
+            "tools": [
+                {"type":"function","function":{"name":"local_tool","description":"local","parameters":{"type":"object","properties":{}}}},
+                {"type":"function","function":{"name":"mock_echo","description":"existing","parameters":{"type":"object","properties":{}}}}
+            ]
+        });
+
+        let mcp_tools = vec![
+            crate::mcp_client::McpTool {
+                server_name: "mock".to_string(),
+                name: "echo".to_string(),
+                description: Some("Echo text".to_string()),
+                input_schema: json!({"type":"object","properties":{"text":{"type":"string"}}}),
+            },
+            crate::mcp_client::McpTool {
+                server_name: "mock".to_string(),
+                name: "sum".to_string(),
+                description: Some("Sum values".to_string()),
+                input_schema: json!({"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"}}}),
+            },
+        ];
+
+        merge_mcp_tools_into_chat_payload(&mut payload, &mcp_tools);
+
+        let tools = payload["tools"].as_array().expect("tools array");
+        let names: Vec<String> = tools
+            .iter()
+            .filter_map(|t| {
+                t.get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+
+        assert!(names.contains(&"local_tool".to_string()));
+        assert!(names.contains(&"mock_echo".to_string()));
+        assert!(names.contains(&"mock_sum".to_string()));
+        assert_eq!(
+            names.iter().filter(|n| n.as_str() == "mock_echo").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn merge_mcp_tools_into_responses_payload_dedupes_existing_names() {
+        let mut payload = json!({
+            "model": "gpt-4.1-nano",
+            "input": [{"role":"user","content":"hi"}],
+            "tools": [
+                {"type":"function","name":"local_tool","description":"local","parameters":{"type":"object","properties":{}}},
+                {"type":"function","name":"mock_echo","description":"existing","parameters":{"type":"object","properties":{}}}
+            ]
+        });
+
+        let mcp_tools = vec![
+            crate::mcp_client::McpTool {
+                server_name: "mock".to_string(),
+                name: "echo".to_string(),
+                description: Some("Echo text".to_string()),
+                input_schema: json!({"type":"object","properties":{"text":{"type":"string"}}}),
+            },
+            crate::mcp_client::McpTool {
+                server_name: "mock".to_string(),
+                name: "sum".to_string(),
+                description: Some("Sum values".to_string()),
+                input_schema: json!({"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"}}}),
+            },
+        ];
+
+        merge_mcp_tools_into_responses_payload(&mut payload, &mcp_tools);
+
+        let tools = payload["tools"].as_array().expect("tools array");
+        let names: Vec<String> = tools
+            .iter()
+            .filter_map(|t| {
+                t.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+
+        assert!(names.contains(&"local_tool".to_string()));
+        assert!(names.contains(&"mock_echo".to_string()));
+        assert!(names.contains(&"mock_sum".to_string()));
+        assert_eq!(
+            names.iter().filter(|n| n.as_str() == "mock_echo").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn admin_auth_allows_when_token_unset() {
+        let req = TestRequest::default().to_http_request();
+        assert!(authorize_admin_request(&req, None).is_ok());
+    }
+
+    #[test]
+    fn admin_auth_requires_matching_bearer() {
+        let req = TestRequest::default().to_http_request();
+        assert!(authorize_admin_request(&req, Some("secret-token")).is_err());
+
+        let bad = TestRequest::default()
+            .insert_header(("Authorization", "Bearer wrong-token"))
+            .to_http_request();
+        assert!(authorize_admin_request(&bad, Some("secret-token")).is_err());
+
+        let good = TestRequest::default()
+            .insert_header(("Authorization", "Bearer secret-token"))
+            .to_http_request();
+        assert!(authorize_admin_request(&good, Some("secret-token")).is_ok());
+    }
+
+    async fn test_history_manager() -> Arc<ChatHistoryManager> {
+        let config = ChatHistoryConfig {
+            enabled: true,
+            primary_backend: "memory".to_string(),
+            sink_backends: Vec::new(),
+            privacy_level: PrivacyLevel::Full,
+            ttl_seconds: 3600,
+            strict: false,
+            jsonl_path: None,
+            memory_max_messages: Some(1000),
+            sqlite_url: None,
+            postgres_url: None,
+            turso_url: None,
+            turso_auth_token: None,
+        };
+        Arc::new(
+            ChatHistoryManager::new(config)
+                .await
+                .expect("create chat history manager"),
+        )
+    }
+
+    #[actix_web::test]
+    async fn record_chat_history_tracks_requested_and_actual_models() {
+        let manager = test_history_manager().await;
+        let chat_history = Some(manager.clone());
+        let resolution = UpstreamResolution {
+            base_url: "https://upstream.example/v1".to_string(),
+            mode: crate::util::UpstreamMode::Responses,
+            key_env: None,
+            headers: None,
+            model_id: "gpt-4o-mini-2024-07-18".to_string(),
+            plan: None,
+            source: UpstreamSource::RoutingConfig,
+        };
+        let request_body = json!({
+            "model": "alias-x",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let response_body = json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": "Hi there" }
+            }]
+        });
+        let usage = crate::analytics::TokenUsage {
+            prompt_tokens: 12,
+            completion_tokens: 7,
+            total_tokens: 19,
+            cached_tokens: Some(5),
+            reasoning_tokens: Some(1),
+        };
+
+        record_chat_history(
+            &chat_history,
+            Some("conv-alias-model".to_string()),
+            "alias-x",
+            &request_body,
+            &response_body,
+            &resolution,
+            Some(&usage),
+        )
+        .await;
+
+        let messages = manager
+            .list_messages(&MessageFilters {
+                conversation_id: Some("conv-alias-model".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("messages");
+        assert_eq!(messages.len(), 2);
+
+        for msg in &messages {
+            assert_eq!(msg.routing.requested_model.as_deref(), Some("alias-x"));
+            assert_eq!(
+                msg.routing.actual_model.as_deref(),
+                Some("gpt-4o-mini-2024-07-18")
+            );
+        }
+
+        let assistant = messages
+            .iter()
+            .find(|m| m.role == MessageRole::Assistant)
+            .expect("assistant message");
+        assert_eq!(assistant.tokens.input_tokens, Some(12));
+        assert_eq!(assistant.tokens.output_tokens, Some(7));
+        assert_eq!(assistant.tokens.cached_tokens, Some(5));
+        assert_eq!(assistant.tokens.reasoning_tokens, Some(1));
+    }
+
+    #[actix_web::test]
+    async fn record_chat_history_supports_responses_shape() {
+        let manager = test_history_manager().await;
+        let chat_history = Some(manager.clone());
+        let resolution = UpstreamResolution {
+            base_url: "https://upstream.example/v1".to_string(),
+            mode: crate::util::UpstreamMode::Responses,
+            key_env: None,
+            headers: None,
+            model_id: "gpt-4o-mini".to_string(),
+            plan: None,
+            source: UpstreamSource::RouterPlan,
+        };
+        let request_body = json!({
+            "model": "alias-responses",
+            "input": [{"role": "user", "content": "Ping"}]
+        });
+        let response_body = json!({
+            "output_text": "Pong",
+            "usage": {"input_tokens": 9, "output_tokens": 4}
+        });
+        let usage = crate::analytics_middleware::extract_token_usage(&response_body)
+            .expect("responses usage extraction");
+
+        record_chat_history(
+            &chat_history,
+            Some("conv-responses-shape".to_string()),
+            "alias-responses",
+            &request_body,
+            &response_body,
+            &resolution,
+            Some(&usage),
+        )
+        .await;
+
+        let messages = manager
+            .list_messages(&MessageFilters {
+                conversation_id: Some("conv-responses-shape".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("messages");
+
+        assert!(
+            messages.iter().any(|m| m.role == MessageRole::User),
+            "expected a user message from input[]"
+        );
+        assert!(
+            messages.iter().any(|m| m.role == MessageRole::Assistant),
+            "expected an assistant message from output_text"
+        );
     }
 }
 
@@ -752,6 +1397,14 @@ async fn responses_passthrough(
     body: web::Json<serde_json::Value>,
 ) -> impl Responder {
     let mut body = body.into_inner();
+    let started_at = std::time::Instant::now();
+    let requested_model = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let conversation_hint = extract_conversation_id(&body).filter(|s| !s.trim().is_empty());
+    let mut system_prompt_applied = false;
 
     // Apply system prompt injection if configured
     let system_prompt_guard = state.system_prompt_config.read().await;
@@ -760,6 +1413,7 @@ async fn responses_passthrough(
     if let Some(prompt) = system_prompt_guard.get_prompt(model, Some("responses")) {
         // Inject system prompt into messages (Responses API uses "input" not "messages")
         if let Some(messages) = body.get_mut("input").and_then(|v| v.as_array_mut()) {
+            system_prompt_applied = true;
             let system_msg = serde_json::json!({
                 "role": "system",
                 "content": prompt
@@ -819,8 +1473,19 @@ async fn responses_passthrough(
         }
     }
 
+    if let Some(mgr) = state.mcp_manager.as_ref() {
+        let manager = mgr.read().await;
+        match manager.list_all_tools().await {
+            Ok(mcp_tools) => merge_mcp_tools_into_responses_payload(&mut body, &mcp_tools),
+            Err(err) => warn!("Failed to fetch MCP tools for /v1/responses: {}", err),
+        }
+    }
+
     // Determine managed (internal upstream key) vs passthrough mode
     let managed_mode = managed_mode_from_env();
+    let authenticated: bool;
+    let mut api_key_id: Option<String> = None;
+    let mut api_key_label: Option<String> = None;
 
     // Extract client bearer
     let client_bearer = req
@@ -840,7 +1505,12 @@ async fn responses_passthrough(
     let upstream_bearer = if managed_mode {
         if let Some(manager) = &state.api_keys {
             match client_bearer.as_deref().map(|tok| manager.verify(tok)) {
-                Some(crate::auth::Verification::Valid { .. }) => None,
+                Some(crate::auth::Verification::Valid { id, label, .. }) => {
+                    authenticated = true;
+                    api_key_id = Some(id);
+                    api_key_label = label;
+                    None
+                }
                 Some(crate::auth::Verification::Revoked { .. }) => {
                     tracing::warn!(
                         target: "routiium::auth",
@@ -883,6 +1553,7 @@ async fn responses_passthrough(
             }
         } else {
             // No manager: accept and let routing pick env key
+            authenticated = client_bearer.is_some();
             None
         }
     } else {
@@ -898,6 +1569,7 @@ async fn responses_passthrough(
                 "Missing Authorization bearer",
             );
         }
+        authenticated = true;
         client_bearer.clone()
     };
 
@@ -907,7 +1579,7 @@ async fn responses_passthrough(
         .unwrap_or(false);
 
     let client = &state.http;
-    let resolution = match resolve_upstream(&state, "responses", &body).await {
+    let resolution = match resolve_upstream(&state, "responses", &mut body).await {
         Ok(res) => res,
         Err(err) => {
             return error_response(
@@ -917,8 +1589,7 @@ async fn responses_passthrough(
         }
     };
 
-    let requested_model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
-    log_request_start("responses", &req, requested_model, &resolution, stream);
+    log_request_start("responses", &req, &requested_model, &resolution, stream);
 
     let mut effective_body = body.clone();
     if let Some(obj) = effective_body.as_object_mut() {
@@ -980,6 +1651,42 @@ async fn responses_passthrough(
                         // Convert Chat to Responses format
                         let responses_response =
                             crate::conversion::chat_to_responses_response(&chat_response);
+                        let response_json =
+                            serde_json::to_value(&responses_response).unwrap_or_default();
+                        let token_usage =
+                            crate::analytics_middleware::extract_token_usage(&response_json);
+
+                        record_chat_history(
+                            &state.chat_history,
+                            conversation_hint.clone(),
+                            &requested_model,
+                            &body,
+                            &response_json,
+                            &resolution,
+                            token_usage.as_ref(),
+                        )
+                        .await;
+
+                        record_analytics_event(
+                            &state,
+                            &req,
+                            &body,
+                            &requested_model,
+                            &resolution,
+                            started_at,
+                            200,
+                            serde_json::to_vec(&responses_response)
+                                .map(|v| v.len())
+                                .unwrap_or(0),
+                            token_usage,
+                            authenticated,
+                            api_key_id.clone(),
+                            api_key_label.clone(),
+                            system_prompt_applied,
+                            None,
+                        )
+                        .await;
+
                         let mut builder = HttpResponse::Ok();
                         if let Some(plan) = resolution.plan.as_ref() {
                             insert_route_headers(&mut builder, plan, &resolution.model_id);
@@ -1036,6 +1743,29 @@ async fn responses_passthrough(
                 let status = up.status();
                 if !status.is_success() {
                     let bytes = up.bytes().await.unwrap_or_default();
+                    let response_json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+                    let token_usage = response_json
+                        .as_ref()
+                        .and_then(crate::analytics_middleware::extract_token_usage);
+                    let error_message = extract_error_message(response_json.as_ref(), &bytes);
+                    record_analytics_event(
+                        &state,
+                        &req,
+                        &body,
+                        &requested_model,
+                        &resolution,
+                        started_at,
+                        status.as_u16(),
+                        bytes.len(),
+                        token_usage,
+                        authenticated,
+                        api_key_id.clone(),
+                        api_key_label.clone(),
+                        system_prompt_applied,
+                        error_message,
+                    )
+                    .await;
+
                     let mut builder = HttpResponse::build(
                         actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap(),
                     );
@@ -1097,14 +1827,52 @@ async fn responses_passthrough(
                 if let Some(plan) = resolution.plan.as_ref() {
                     insert_route_headers(&mut response, plan, &resolution.model_id);
                 }
+
+                record_analytics_event(
+                    &state,
+                    &req,
+                    &body,
+                    &requested_model,
+                    &resolution,
+                    started_at,
+                    status.as_u16(),
+                    0,
+                    None,
+                    authenticated,
+                    api_key_id.clone(),
+                    api_key_label.clone(),
+                    system_prompt_applied,
+                    None,
+                )
+                .await;
+
                 response.streaming(stream)
             }
-            Err(e) => router_error_response(
-                http::StatusCode::BAD_GATEWAY,
-                &e.to_string(),
-                resolution.plan.as_ref(),
-                &resolution.model_id,
-            ),
+            Err(e) => {
+                record_analytics_event(
+                    &state,
+                    &req,
+                    &body,
+                    &requested_model,
+                    &resolution,
+                    started_at,
+                    502,
+                    0,
+                    None,
+                    authenticated,
+                    api_key_id.clone(),
+                    api_key_label.clone(),
+                    system_prompt_applied,
+                    Some(e.to_string()),
+                )
+                .await;
+                router_error_response(
+                    http::StatusCode::BAD_GATEWAY,
+                    &e.to_string(),
+                    resolution.plan.as_ref(),
+                    &resolution.model_id,
+                )
+            }
         }
     } else {
         let mut outbound_body = effective_body.clone();
@@ -1113,17 +1881,60 @@ async fn responses_passthrough(
         }
 
         let real_url = format!("{}/{}", base, endpoint);
-        let mut req = client
+        let mut upstream_req = client
             .post(&real_url)
             .header("content-type", "application/json");
-        req = apply_upstream_headers(req, &resolution.headers);
+        upstream_req = apply_upstream_headers(upstream_req, &resolution.headers);
         if let Some(b) = eff_bearer {
-            req = req.bearer_auth(b);
+            upstream_req = upstream_req.bearer_auth(b);
         }
-        match req.json(&outbound_body).send().await {
+        match upstream_req.json(&outbound_body).send().await {
             Ok(up) => {
                 let status = up.status();
                 let bytes = up.bytes().await.unwrap_or_default();
+                let response_json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+                let token_usage = response_json
+                    .as_ref()
+                    .and_then(crate::analytics_middleware::extract_token_usage);
+
+                if status.is_success() {
+                    if let Some(ref response_json) = response_json {
+                        record_chat_history(
+                            &state.chat_history,
+                            conversation_hint.clone(),
+                            &requested_model,
+                            &body,
+                            response_json,
+                            &resolution,
+                            token_usage.as_ref(),
+                        )
+                        .await;
+                    }
+                }
+
+                let error_message = if status.is_success() {
+                    None
+                } else {
+                    extract_error_message(response_json.as_ref(), &bytes)
+                };
+                record_analytics_event(
+                    &state,
+                    &req,
+                    &body,
+                    &requested_model,
+                    &resolution,
+                    started_at,
+                    status.as_u16(),
+                    bytes.len(),
+                    token_usage.clone(),
+                    authenticated,
+                    api_key_id.clone(),
+                    api_key_label.clone(),
+                    system_prompt_applied,
+                    error_message,
+                )
+                .await;
+
                 let mut builder = HttpResponse::build(
                     actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap(),
                 );
@@ -1145,12 +1956,31 @@ async fn responses_passthrough(
                 }
                 builder.body(bytes)
             }
-            Err(e) => router_error_response(
-                http::StatusCode::BAD_GATEWAY,
-                &e.to_string(),
-                resolution.plan.as_ref(),
-                &resolution.model_id,
-            ),
+            Err(e) => {
+                record_analytics_event(
+                    &state,
+                    &req,
+                    &body,
+                    &requested_model,
+                    &resolution,
+                    started_at,
+                    502,
+                    0,
+                    None,
+                    authenticated,
+                    api_key_id,
+                    api_key_label,
+                    system_prompt_applied,
+                    Some(e.to_string()),
+                )
+                .await;
+                router_error_response(
+                    http::StatusCode::BAD_GATEWAY,
+                    &e.to_string(),
+                    resolution.plan.as_ref(),
+                    &resolution.model_id,
+                )
+            }
         }
     }
 }
@@ -1159,12 +1989,14 @@ async fn responses_passthrough(
 pub fn config_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("")
+            .route("/health", web::get().to(health))
             .route("/status", web::get().to(status))
             .route("/convert", web::post().to(convert))
             .route(
                 "/v1/chat/completions",
                 web::post().to(chat_completions_passthrough),
             )
+            .route("/models", web::get().to(list_models))
             .route("/v1/models", web::get().to(list_models))
             .route("/v1/responses", web::post().to(responses_passthrough))
             .route("/keys", web::get().to(list_keys))
@@ -1205,13 +2037,22 @@ pub fn config_routes(cfg: &mut web::ServiceConfig) {
     );
 }
 
+/// Liveness endpoint for orchestrator probes.
+async fn health() -> impl Responder {
+    web::Json(serde_json::json!({
+        "status": "ok"
+    }))
+}
+
 /// Service status endpoint to expose feature flags and available routes.
 async fn status(state: web::Data<AppState>) -> impl Responder {
     let proxy_enabled: bool = true;
     let routes = vec![
+        "/health",
         "/status",
         "/convert",
         "/v1/chat/completions",
+        "/models",
         "/v1/models",
         "/v1/responses",
         "/keys",
@@ -1250,6 +2091,23 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
     let routing_stats = routing_guard.stats();
     drop(routing_guard);
 
+    let router_enabled = state.router_client.is_some();
+    let router_url = state.router_url.as_deref();
+    let router_config_path = state.router_config_path.as_deref();
+    let router_mode = if state.router_config_path.is_some() {
+        "local"
+    } else if state.router_url.is_some() {
+        "remote"
+    } else if router_enabled {
+        "configured"
+    } else {
+        "none"
+    };
+    let router_policy = state
+        .router_config_path
+        .as_ref()
+        .map(|p| format!("file://{}", p));
+
     // Get analytics status
     let analytics_enabled = state.analytics.is_some();
     let analytics_stats = if let Some(mgr) = &state.analytics {
@@ -1277,6 +2135,12 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
         "version": env!("CARGO_PKG_VERSION"),
         "proxy_enabled": proxy_enabled,
         "routes": routes,
+        "router": {
+            "enabled": router_enabled,
+            "mode": router_mode,
+            "policy": router_policy,
+            "url": router_url
+        },
         "features": {
             "auth": {
                 "mode": auth_mode,
@@ -1300,6 +2164,12 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
                 "config_path": routing_config_path,
                 "reloadable": routing_config_path.is_some(),
                 "stats": routing_stats
+            },
+            "router": {
+                "enabled": router_enabled,
+                "mode": router_mode,
+                "config_path": router_config_path,
+                "url": router_url
             },
             "analytics": {
                 "enabled": analytics_enabled,
@@ -1492,15 +2362,23 @@ async fn chat_completions_passthrough(
     body: web::Json<serde_json::Value>,
 ) -> impl Responder {
     let mut body = body.into_inner();
+    let started_at = std::time::Instant::now();
+    let requested_model = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let query = query.into_inner();
     let conversation_hint = query.conversation_id.filter(|s| !s.trim().is_empty());
     let previous_response_hint = query.previous_response_id.filter(|s| !s.trim().is_empty());
+    let mut system_prompt_applied = false;
 
     // Apply system prompt injection if configured
     let system_prompt_guard = state.system_prompt_config.read().await;
     let model = body.get("model").and_then(|v| v.as_str());
 
     if let Some(prompt) = system_prompt_guard.get_prompt(model, Some("chat")) {
+        system_prompt_applied = true;
         inject_system_prompt_chat_json(&mut body, &prompt, &system_prompt_guard.injection_mode);
     }
     drop(system_prompt_guard);
@@ -1523,8 +2401,22 @@ async fn chat_completions_passthrough(
         }
     }
 
+    if let Some(mgr) = state.mcp_manager.as_ref() {
+        let manager = mgr.read().await;
+        match manager.list_all_tools().await {
+            Ok(mcp_tools) => merge_mcp_tools_into_chat_payload(&mut body, &mcp_tools),
+            Err(err) => warn!(
+                "Failed to fetch MCP tools for /v1/chat/completions: {}",
+                err
+            ),
+        }
+    }
+
     // Determine managed (internal upstream key) vs passthrough mode
     let managed_mode = managed_mode_from_env();
+    let authenticated: bool;
+    let mut api_key_id: Option<String> = None;
+    let mut api_key_label: Option<String> = None;
 
     // Extract client bearer (could be internal access token or upstream key)
     let client_bearer = req
@@ -1544,7 +2436,12 @@ async fn chat_completions_passthrough(
     let upstream_bearer = if managed_mode {
         if let Some(manager) = &state.api_keys {
             match client_bearer.as_deref().map(|tok| manager.verify(tok)) {
-                Some(crate::auth::Verification::Valid { .. }) => None,
+                Some(crate::auth::Verification::Valid { id, label, .. }) => {
+                    authenticated = true;
+                    api_key_id = Some(id);
+                    api_key_label = label;
+                    None
+                }
                 Some(crate::auth::Verification::Revoked { .. }) => {
                     tracing::warn!(
                         target: "routiium::auth",
@@ -1587,6 +2484,7 @@ async fn chat_completions_passthrough(
             }
         } else {
             // No manager: accept and let routing pick env key
+            authenticated = client_bearer.is_some();
             None
         }
     } else {
@@ -1602,6 +2500,7 @@ async fn chat_completions_passthrough(
                 "Missing Authorization bearer",
             );
         }
+        authenticated = true;
         client_bearer.clone()
     };
 
@@ -1612,7 +2511,7 @@ async fn chat_completions_passthrough(
         .unwrap_or(false);
 
     let client = &state.http;
-    let resolution = match resolve_upstream(&state, "chat", &body).await {
+    let resolution = match resolve_upstream(&state, "chat", &mut body).await {
         Ok(res) => res,
         Err(err) => {
             return error_response(
@@ -1622,11 +2521,6 @@ async fn chat_completions_passthrough(
         }
     };
 
-    let requested_model = body
-        .get("model")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
     log_request_start("chat", &req, &requested_model, &resolution, stream);
 
     if let Some(obj) = body.as_object_mut() {
@@ -1728,6 +2622,25 @@ async fn chat_completions_passthrough(
                     if let Some(plan) = resolution.plan.as_ref() {
                         insert_route_headers(&mut response, plan, &resolution.model_id);
                     }
+
+                    record_analytics_event(
+                        &state,
+                        &req,
+                        &body,
+                        &requested_model,
+                        &resolution,
+                        started_at,
+                        200,
+                        0,
+                        None,
+                        authenticated,
+                        api_key_id.clone(),
+                        api_key_label.clone(),
+                        system_prompt_applied,
+                        None,
+                    )
+                    .await;
+
                     return response
                         .insert_header(("content-type", "text/event-stream"))
                         .insert_header(("cache-control", "no-cache"))
@@ -1735,6 +2648,23 @@ async fn chat_completions_passthrough(
                         .streaming(mapped);
                 }
                 Err(err) => {
+                    record_analytics_event(
+                        &state,
+                        &req,
+                        &body,
+                        &requested_model,
+                        &resolution,
+                        started_at,
+                        502,
+                        0,
+                        None,
+                        authenticated,
+                        api_key_id.clone(),
+                        api_key_label.clone(),
+                        system_prompt_applied,
+                        Some(err.to_string()),
+                    )
+                    .await;
                     return error_response(
                         http::StatusCode::BAD_GATEWAY,
                         &format!("Bedrock streaming invocation failed: {}", err),
@@ -1753,13 +2683,36 @@ async fn chat_completions_passthrough(
                 Ok(chat_response) => {
                     // Record chat history for Bedrock responses
                     let response_json = serde_json::to_value(&chat_response).unwrap_or_default();
+                    let token_usage =
+                        crate::analytics_middleware::extract_token_usage(&response_json);
                     record_chat_history(
                         &state.chat_history,
                         conversation_hint.clone(),
+                        &requested_model,
                         &body,
                         &response_json,
                         &resolution,
-                        chat_response.usage.as_ref(),
+                        token_usage.as_ref(),
+                    )
+                    .await;
+
+                    record_analytics_event(
+                        &state,
+                        &req,
+                        &body,
+                        &requested_model,
+                        &resolution,
+                        started_at,
+                        200,
+                        serde_json::to_vec(&chat_response)
+                            .map(|v| v.len())
+                            .unwrap_or(0),
+                        token_usage,
+                        authenticated,
+                        api_key_id.clone(),
+                        api_key_label.clone(),
+                        system_prompt_applied,
+                        None,
                     )
                     .await;
 
@@ -1777,6 +2730,23 @@ async fn chat_completions_passthrough(
                 }
             },
             Err(e) => {
+                record_analytics_event(
+                    &state,
+                    &req,
+                    &body,
+                    &requested_model,
+                    &resolution,
+                    started_at,
+                    502,
+                    0,
+                    None,
+                    authenticated,
+                    api_key_id.clone(),
+                    api_key_label.clone(),
+                    system_prompt_applied,
+                    Some(e.to_string()),
+                )
+                .await;
                 return error_response(
                     http::StatusCode::BAD_GATEWAY,
                     &format!("Bedrock invocation failed: {}", e),
@@ -1833,6 +2803,29 @@ async fn chat_completions_passthrough(
                 let status = up.status();
                 if !status.is_success() {
                     let bytes = up.bytes().await.unwrap_or_default();
+                    let response_json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+                    let token_usage = response_json
+                        .as_ref()
+                        .and_then(crate::analytics_middleware::extract_token_usage);
+                    let error_message = extract_error_message(response_json.as_ref(), &bytes);
+                    record_analytics_event(
+                        &state,
+                        &req,
+                        &body,
+                        &requested_model,
+                        &resolution,
+                        started_at,
+                        status.as_u16(),
+                        bytes.len(),
+                        token_usage,
+                        authenticated,
+                        api_key_id.clone(),
+                        api_key_label.clone(),
+                        system_prompt_applied,
+                        error_message,
+                    )
+                    .await;
+
                     let mut builder = HttpResponse::build(
                         actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap(),
                     );
@@ -1870,14 +2863,52 @@ async fn chat_completions_passthrough(
                 if let Some(plan) = resolution.plan.as_ref() {
                     insert_route_headers(&mut response, plan, &resolution.model_id);
                 }
+
+                record_analytics_event(
+                    &state,
+                    &req,
+                    &body,
+                    &requested_model,
+                    &resolution,
+                    started_at,
+                    status.as_u16(),
+                    0,
+                    None,
+                    authenticated,
+                    api_key_id.clone(),
+                    api_key_label.clone(),
+                    system_prompt_applied,
+                    None,
+                )
+                .await;
+
                 response.streaming(stream)
             }
-            Err(e) => router_error_response(
-                http::StatusCode::BAD_GATEWAY,
-                &e.to_string(),
-                resolution.plan.as_ref(),
-                &resolution.model_id,
-            ),
+            Err(e) => {
+                record_analytics_event(
+                    &state,
+                    &req,
+                    &body,
+                    &requested_model,
+                    &resolution,
+                    started_at,
+                    502,
+                    0,
+                    None,
+                    authenticated,
+                    api_key_id.clone(),
+                    api_key_label.clone(),
+                    system_prompt_applied,
+                    Some(e.to_string()),
+                )
+                .await;
+                router_error_response(
+                    http::StatusCode::BAD_GATEWAY,
+                    &e.to_string(),
+                    resolution.plan.as_ref(),
+                    &resolution.model_id,
+                )
+            }
         }
     } else {
         let mut outbound_body = body.clone();
@@ -1896,37 +2927,62 @@ async fn chat_completions_passthrough(
         }
 
         let real_url = format!("{}/{}", base, endpoint);
-        let mut req = client
+        let mut upstream_req = client
             .post(&real_url)
             .header("content-type", "application/json");
-        req = apply_upstream_headers(req, &resolution.headers);
+        upstream_req = apply_upstream_headers(upstream_req, &resolution.headers);
         if let Some(b) = eff_bearer {
-            req = req.bearer_auth(b);
+            upstream_req = upstream_req.bearer_auth(b);
         }
-        match req.json(&outbound_body).send().await {
+        match upstream_req.json(&outbound_body).send().await {
             Ok(up) => {
                 let status = up.status();
                 let bytes = up.bytes().await.unwrap_or_default();
-                
+                let response_json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+                let token_usage = response_json
+                    .as_ref()
+                    .and_then(crate::analytics_middleware::extract_token_usage);
+
                 // Record chat history for successful non-streaming responses
                 // This must happen BEFORE any early returns below
                 if status.is_success() {
-                    if let Ok(response_json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                        let usage = response_json.get("usage").and_then(|u| {
-                            serde_json::from_value::<crate::models::chat::ChatUsage>(u.clone()).ok()
-                        });
+                    if let Some(ref response_json) = response_json {
                         record_chat_history(
                             &state.chat_history,
                             conversation_hint.clone(),
+                            &requested_model,
                             &body,
-                            &response_json,
+                            response_json,
                             &resolution,
-                            usage.as_ref(),
+                            token_usage.as_ref(),
                         )
                         .await;
                     }
                 }
-                
+
+                let error_message = if status.is_success() {
+                    None
+                } else {
+                    extract_error_message(response_json.as_ref(), &bytes)
+                };
+                record_analytics_event(
+                    &state,
+                    &req,
+                    &body,
+                    &requested_model,
+                    &resolution,
+                    started_at,
+                    status.as_u16(),
+                    bytes.len(),
+                    token_usage.clone(),
+                    authenticated,
+                    api_key_id.clone(),
+                    api_key_label.clone(),
+                    system_prompt_applied,
+                    error_message,
+                )
+                .await;
+
                 let mut builder = HttpResponse::build(
                     actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap(),
                 );
@@ -1958,7 +3014,7 @@ async fn chat_completions_passthrough(
                 // For Gemini models, parse thought tags from the response
                 if status.is_success()
                     && !expects_responses
-                    && requested_model.starts_with("gemini-")
+                    && resolution.model_id.starts_with("gemini-")
                 {
                     if let Ok(mut chat_resp) = serde_json::from_slice::<
                         crate::models::chat::ChatCompletionResponse,
@@ -1977,15 +3033,13 @@ async fn chat_completions_passthrough(
                                 choice.message.reasoning = reasoning;
 
                                 // Estimate reasoning tokens if we have reasoning content
-                                if choice.message.reasoning.is_some() && chat_resp.usage.is_some() {
-                                    if let Some(ref mut usage) = chat_resp.usage {
-                                        // Rough estimate: 1 token per 4 characters
-                                        let reasoning_text =
-                                            choice.message.reasoning.as_ref().unwrap();
-                                        let reasoning_tokens =
-                                            (reasoning_text.len() as u64).div_ceil(4);
-                                        usage.reasoning_tokens = Some(reasoning_tokens);
-                                    }
+                                if let (Some(reasoning_text), Some(ref mut usage)) =
+                                    (choice.message.reasoning.as_ref(), chat_resp.usage.as_mut())
+                                {
+                                    // Rough estimate: 1 token per 4 characters
+                                    let reasoning_tokens =
+                                        (reasoning_text.len() as u64).div_ceil(4);
+                                    usage.reasoning_tokens = Some(reasoning_tokens);
                                 }
                             }
                         }
@@ -2005,12 +3059,31 @@ async fn chat_completions_passthrough(
 
                 builder.body(bytes)
             }
-            Err(e) => router_error_response(
-                http::StatusCode::BAD_GATEWAY,
-                &e.to_string(),
-                resolution.plan.as_ref(),
-                &resolution.model_id,
-            ),
+            Err(e) => {
+                record_analytics_event(
+                    &state,
+                    &req,
+                    &body,
+                    &requested_model,
+                    &resolution,
+                    started_at,
+                    502,
+                    0,
+                    None,
+                    authenticated,
+                    api_key_id,
+                    api_key_label,
+                    system_prompt_applied,
+                    Some(e.to_string()),
+                )
+                .await;
+                router_error_response(
+                    http::StatusCode::BAD_GATEWAY,
+                    &e.to_string(),
+                    resolution.plan.as_ref(),
+                    &resolution.model_id,
+                )
+            }
         }
     }
 }
@@ -2088,8 +3161,12 @@ fn resolve_ttl_seconds(
 
 async fn generate_key(
     state: web::Data<AppState>,
+    req: HttpRequest,
     body: web::Json<GenerateKeyRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     let payload = body.into_inner();
     let ttl_seconds = match resolve_ttl_seconds(payload.expires_at, payload.ttl_seconds) {
         Ok(value) => value,
@@ -2117,8 +3194,12 @@ async fn generate_key(
 
 async fn generate_key_batch(
     state: web::Data<AppState>,
+    req: HttpRequest,
     body: web::Json<GenerateKeyBatchRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     let payload = body.into_inner();
 
     if payload.labels.is_empty() {
@@ -2176,7 +3257,14 @@ async fn generate_key_batch(
     }
 }
 
-async fn list_keys(state: web::Data<AppState>, query: web::Query<ListKeysQuery>) -> impl Responder {
+async fn list_keys(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    query: web::Query<ListKeysQuery>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     match &state.api_keys {
         Some(mgr) => match mgr.list_keys() {
             Ok(items) => {
@@ -2233,8 +3321,12 @@ struct RevokeKeyRequest {
 
 async fn revoke_key(
     state: web::Data<AppState>,
+    req: HttpRequest,
     body: web::Json<RevokeKeyRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     let payload = body.into_inner();
 
     match &state.api_keys {
@@ -2266,8 +3358,12 @@ struct SetExpirationRequest {
 
 async fn set_key_expiration(
     state: web::Data<AppState>,
+    req: HttpRequest,
     body: web::Json<SetExpirationRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     let payload = body.into_inner();
 
     let new_exp = if let Some(at) = payload.expires_at {
@@ -2303,7 +3399,10 @@ async fn set_key_expiration(
 }
 
 /// Reload MCP configuration from file at runtime
-async fn reload_mcp(state: web::Data<AppState>) -> impl Responder {
+async fn reload_mcp(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     let config_path = match &state.mcp_config_path {
         Some(path) => path.clone(),
         None => {
@@ -2368,7 +3467,10 @@ async fn reload_mcp(state: web::Data<AppState>) -> impl Responder {
 }
 
 /// Reload system prompt configuration from file at runtime
-async fn reload_system_prompt(state: web::Data<AppState>) -> impl Responder {
+async fn reload_system_prompt(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     let config_path = match &state.system_prompt_config_path {
         Some(path) => path.clone(),
         None => {
@@ -2415,7 +3517,10 @@ async fn reload_system_prompt(state: web::Data<AppState>) -> impl Responder {
 }
 
 /// Reload routing configuration from file at runtime
-async fn reload_routing(state: web::Data<AppState>) -> impl Responder {
+async fn reload_routing(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     let config_path = match &state.routing_config_path {
         Some(path) => path.clone(),
         None => {
@@ -2456,7 +3561,10 @@ async fn reload_routing(state: web::Data<AppState>) -> impl Responder {
 }
 
 /// Reload both MCP and system prompt configurations
-async fn reload_all(state: web::Data<AppState>) -> impl Responder {
+async fn reload_all(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     let mut results = serde_json::json!({
         "mcp": { "success": false, "message": "Not attempted" },
         "system_prompt": { "success": false, "message": "Not attempted" },
@@ -2588,7 +3696,10 @@ async fn reload_all(state: web::Data<AppState>) -> impl Responder {
 /// Analytics endpoints
 ///
 /// Get analytics statistics
-async fn analytics_stats(state: web::Data<AppState>) -> impl Responder {
+async fn analytics_stats(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     match &state.analytics {
         Some(mgr) => match mgr.stats().await {
             Ok(stats) => HttpResponse::Ok().json(stats),
@@ -2617,8 +3728,12 @@ struct AnalyticsEventsQuery {
 /// Query analytics events
 async fn analytics_events(
     state: web::Data<AppState>,
+    req: HttpRequest,
     query: web::Query<AnalyticsEventsQuery>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     match &state.analytics {
         Some(mgr) => {
             let now = std::time::SystemTime::now()
@@ -2660,8 +3775,12 @@ struct AnalyticsAggregateQuery {
 /// Get aggregated analytics
 async fn analytics_aggregate(
     state: web::Data<AppState>,
+    req: HttpRequest,
     query: web::Query<AnalyticsAggregateQuery>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     match &state.analytics {
         Some(mgr) => {
             let now = std::time::SystemTime::now()
@@ -2700,8 +3819,12 @@ struct AnalyticsExportQuery {
 /// Export analytics data
 async fn analytics_export(
     state: web::Data<AppState>,
+    req: HttpRequest,
     query: web::Query<AnalyticsExportQuery>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     match &state.analytics {
         Some(mgr) => {
             let now = std::time::SystemTime::now()
@@ -2826,7 +3949,10 @@ async fn analytics_export(
 }
 
 /// Clear all analytics data
-async fn analytics_clear(state: web::Data<AppState>) -> impl Responder {
+async fn analytics_clear(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     match &state.analytics {
         Some(mgr) => match mgr.clear().await {
             Ok(_) => HttpResponse::Ok().json(serde_json::json!({
@@ -2865,7 +3991,10 @@ struct ChatHistoryMessagesQuery {
 }
 
 /// Get chat history stats
-async fn chat_history_stats(state: web::Data<AppState>) -> impl Responder {
+async fn chat_history_stats(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     match &state.chat_history {
         Some(mgr) => match mgr.stats().await {
             Ok(stats) => HttpResponse::Ok().json(serde_json::json!({
@@ -2889,8 +4018,12 @@ async fn chat_history_stats(state: web::Data<AppState>) -> impl Responder {
 /// Query chat conversations
 async fn chat_history_conversations(
     state: web::Data<AppState>,
+    req: HttpRequest,
     query: web::Query<ChatHistoryConversationsQuery>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     use crate::chat_history::ConversationFilters;
 
     match &state.chat_history {
@@ -2922,8 +4055,12 @@ async fn chat_history_conversations(
 /// Get a specific conversation
 async fn chat_history_conversation(
     state: web::Data<AppState>,
+    req: HttpRequest,
     path: web::Path<String>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     let conversation_id = path.into_inner();
 
     match &state.chat_history {
@@ -2944,8 +4081,12 @@ async fn chat_history_conversation(
 /// Query chat messages
 async fn chat_history_messages(
     state: web::Data<AppState>,
+    req: HttpRequest,
     query: web::Query<ChatHistoryMessagesQuery>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     use crate::chat_history::MessageFilters;
 
     match &state.chat_history {
@@ -2987,8 +4128,12 @@ async fn chat_history_messages(
 /// Delete a conversation
 async fn chat_history_delete_conversation(
     state: web::Data<AppState>,
+    req: HttpRequest,
     path: web::Path<String>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     let conversation_id = path.into_inner();
 
     match &state.chat_history {
@@ -3011,7 +4156,10 @@ async fn chat_history_delete_conversation(
 }
 
 /// Clear all chat history
-async fn chat_history_clear(state: web::Data<AppState>) -> impl Responder {
+async fn chat_history_clear(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
     match &state.chat_history {
         Some(mgr) => match mgr.clear().await {
             Ok(_) => HttpResponse::Ok().json(serde_json::json!({
