@@ -1085,3 +1085,274 @@ pub fn cors_config_from_env() -> actix_cors::Cors {
 
     cors
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::body::to_bytes;
+    use axum::{extract::State, http::HeaderMap, routing::any, Json, Router};
+    use serde_json::json;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+    use tokio::net::TcpListener;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        saved: Vec<(String, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new(keys: &[&str]) -> Self {
+            let saved = keys
+                .iter()
+                .map(|k| (k.to_string(), std::env::var(k).ok()))
+                .collect();
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    async fn spawn_axum(app: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let base = format!("http://{}", addr);
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app.into_make_service()).await;
+        });
+        base
+    }
+
+    #[test]
+    fn managed_mode_from_env_honors_override_and_fallback() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _env = EnvGuard::new(&["ROUTIIUM_MANAGED_MODE", "OPENAI_API_KEY"]);
+
+        std::env::remove_var("ROUTIIUM_MANAGED_MODE");
+        std::env::remove_var("OPENAI_API_KEY");
+        assert!(!managed_mode_from_env());
+
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+        assert!(managed_mode_from_env());
+
+        std::env::set_var("ROUTIIUM_MANAGED_MODE", "off");
+        assert!(!managed_mode_from_env());
+
+        std::env::set_var("ROUTIIUM_MANAGED_MODE", "managed");
+        assert!(managed_mode_from_env());
+
+        std::env::set_var("ROUTIIUM_MANAGED_MODE", "");
+        assert!(managed_mode_from_env());
+    }
+
+    #[test]
+    fn upstream_mode_and_url_rewrite_behave_as_expected() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _env = EnvGuard::new(&["ROUTIIUM_UPSTREAM_MODE"]);
+
+        std::env::remove_var("ROUTIIUM_UPSTREAM_MODE");
+        assert_eq!(upstream_mode_from_env(), UpstreamMode::Responses);
+
+        std::env::set_var("ROUTIIUM_UPSTREAM_MODE", "chat");
+        assert_eq!(upstream_mode_from_env(), UpstreamMode::Chat);
+
+        std::env::set_var("ROUTIIUM_UPSTREAM_MODE", "bedrock");
+        assert_eq!(upstream_mode_from_env(), UpstreamMode::Bedrock);
+
+        assert_eq!(
+            rewrite_responses_url_for_mode("https://x/v1/responses", UpstreamMode::Chat),
+            "https://x/v1/chat/completions"
+        );
+        assert_eq!(
+            rewrite_responses_url_for_mode("https://x/v1/responses", UpstreamMode::Responses),
+            "https://x/v1/responses"
+        );
+    }
+
+    #[test]
+    fn backends_parser_and_resolution_handle_multiple_rules() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _env = EnvGuard::new(&["ROUTIIUM_BACKENDS", "ROUTIIUM_UPSTREAM_MODE"]);
+
+        std::env::set_var(
+            "ROUTIIUM_BACKENDS",
+            "prefix=gpt-4o,base=https://openai.example/v1,mode=responses; \
+             prefix=vllm-,base=http://127.0.0.1:8000/v1,key_env=VLLM_API_KEY,mode=chat; \
+             prefix=claude-,base=https://anthropic.example/v1,mode=responses",
+        );
+        std::env::set_var("ROUTIIUM_UPSTREAM_MODE", "responses");
+
+        let rules = backends_from_env();
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[1].prefix, "vllm-");
+        assert_eq!(rules[1].key_env.as_deref(), Some("VLLM_API_KEY"));
+        assert_eq!(rules[1].mode, Some(UpstreamMode::Chat));
+
+        let resolved =
+            resolve_backend_for_model_name("vllm-nemotron").expect("vllm backend should match");
+        assert_eq!(resolved.0, "http://127.0.0.1:8000/v1");
+        assert_eq!(resolved.1.as_deref(), Some("VLLM_API_KEY"));
+        assert_eq!(resolved.2, UpstreamMode::Chat);
+    }
+
+    #[test]
+    fn backends_parser_drops_partial_fragments() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _env = EnvGuard::new(&["ROUTIIUM_BACKENDS"]);
+
+        std::env::set_var(
+            "ROUTIIUM_BACKENDS",
+            "prefix=good;base=https://good/v1;prefix=missing_base;prefix=ok;base=https://ok/v1",
+        );
+        let rules = backends_from_env();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].prefix, "good");
+        assert_eq!(rules[1].prefix, "ok");
+    }
+
+    #[test]
+    fn derive_input_string_prefers_last_user_message() {
+        let payload = json!({
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": [{"type": "text", "text": "hello"}, {"type":"input_text", "text":"world"}]},
+                {"role": "assistant", "content": "ignored"},
+                {"role": "user", "content": "final-user"}
+            ]
+        });
+
+        assert_eq!(derive_input_string(&payload), "final-user");
+    }
+
+    #[tokio::test]
+    async fn post_responses_with_input_retry_retries_once_when_needed() {
+        #[derive(Clone)]
+        struct RetryState {
+            calls: Arc<AtomicUsize>,
+        }
+
+        async fn handler(
+            State(state): State<RetryState>,
+            Json(payload): Json<serde_json::Value>,
+        ) -> (axum::http::StatusCode, String) {
+            let call = state.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 1 && payload.get("input").is_none() {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "Field required: 'input'".to_string(),
+                );
+            }
+            (
+                axum::http::StatusCode::OK,
+                serde_json::to_string(&payload).expect("serialize payload"),
+            )
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/responses", any(handler))
+            .with_state(RetryState {
+                calls: calls.clone(),
+            });
+        let base = spawn_axum(app).await;
+
+        let payload = json!({
+            "model": "gpt-4o-mini",
+            "messages": [{"role":"user","content":"hello retry"}]
+        });
+        let client = reqwest::Client::new();
+        let resp = post_responses_with_input_retry(
+            &client,
+            &format!("{}/responses", base),
+            &payload,
+            Some("sk-test".to_string()),
+        )
+        .await
+        .expect("request succeeds");
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let body = to_bytes(resp.into_body()).await.expect("body bytes");
+        let body_json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(body_json["input"], "hello retry");
+    }
+
+    #[tokio::test]
+    async fn post_responses_with_input_retry_does_not_retry_for_other_400_errors() {
+        #[derive(Clone)]
+        struct RetryState {
+            calls: Arc<AtomicUsize>,
+        }
+
+        async fn handler(
+            State(state): State<RetryState>,
+            Json(_payload): Json<serde_json::Value>,
+        ) -> (axum::http::StatusCode, &'static str) {
+            state.calls.fetch_add(1, Ordering::SeqCst);
+            (axum::http::StatusCode::BAD_REQUEST, "unrelated validation error")
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/responses", any(handler))
+            .with_state(RetryState {
+                calls: calls.clone(),
+            });
+        let base = spawn_axum(app).await;
+
+        let payload = json!({
+            "model": "gpt-4o-mini",
+            "messages": [{"role":"user","content":"hello retry"}]
+        });
+        let client = reqwest::Client::new();
+        let resp = post_responses_with_input_retry(
+            &client,
+            &format!("{}/responses", base),
+            &payload,
+            Some("sk-test".to_string()),
+        )
+        .await
+        .expect("request completes");
+        assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn http_get_with_bearer_forwards_authorization_header() {
+        async fn handler(headers: HeaderMap) -> String {
+            headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string()
+        }
+
+        let app = Router::new().route("/inspect", any(handler));
+        let base = spawn_axum(app).await;
+
+        let resp = http_get_with_bearer(
+            &reqwest::Client::new(),
+            &format!("{}/inspect", base),
+            Some("token-123"),
+        )
+        .await
+        .expect("get succeeds");
+
+        let body = to_bytes(resp.into_body()).await.expect("body bytes");
+        assert_eq!(&body[..], b"Bearer token-123");
+    }
+}

@@ -1248,4 +1248,38 @@ mod tests {
             "post-revoke verification should still use the cache"
         );
     }
+
+    #[test]
+    fn verify_bearer_rejects_malformed_authorization_headers() {
+        let mgr = AuthManager::from_backend(KeyBackend::Memory).expect("memory backend");
+
+        assert!(matches!(
+            verify_bearer(&mgr, None),
+            Verification::InvalidTokenFormat
+        ));
+        assert!(matches!(
+            verify_bearer(&mgr, Some("Basic abc")),
+            Verification::InvalidTokenFormat
+        ));
+        assert!(matches!(
+            verify_bearer(&mgr, Some("Bearer ")),
+            Verification::InvalidTokenFormat
+        ));
+        assert!(matches!(
+            verify_bearer(&mgr, Some("Bearer sk_not-a-real-token")),
+            Verification::InvalidTokenFormat
+        ));
+    }
+
+    #[test]
+    fn parse_token_validates_expected_shape() {
+        assert!(parse_token(
+            "sk_1234567890abcdef1234567890abcdef.abcdefabcdefabcdefabcdefabcdefabcd"
+        )
+        .is_some());
+        assert!(parse_token("sk_missingdot").is_none());
+        assert!(parse_token("notprefixed.abcdef").is_none());
+        assert!(parse_token("sk_.abcdef").is_none());
+        assert!(parse_token("sk_abc.").is_none());
+    }
 }
