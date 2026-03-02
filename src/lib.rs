@@ -26,6 +26,7 @@ pub mod chat_history;
 pub mod chat_history_jsonl;
 pub mod chat_history_manager;
 pub mod chat_history_memory;
+pub mod rate_limit;
 
 #[cfg(feature = "sqlite")]
 pub mod chat_history_sqlite;

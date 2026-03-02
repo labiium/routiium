@@ -66,6 +66,9 @@ pub struct ApiKeyInfo {
     pub expires_at: Option<u64>,
     pub revoked_at: Option<u64>,
     pub scopes: Option<Vec<String>>,
+    /// Optional rate limit policy ID assigned to this key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_policy: Option<String>,
 }
 
 impl From<ApiKeyRecord> for ApiKeyInfo {
@@ -77,6 +80,7 @@ impl From<ApiKeyRecord> for ApiKeyInfo {
             expires_at: rec.expires_at,
             revoked_at: rec.revoked_at,
             scopes: rec.scopes,
+            rate_limit_policy: None,
         }
     }
 }

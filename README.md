@@ -12,6 +12,7 @@ Routiium is an Actix-web service and Rust crate that exposes OpenAI-compatible `
 - Integrates with Router services (remote HTTP or local alias files) for policy-aware routing and falls back to legacy prefix rules defined via `ROUTIIUM_BACKENDS`.
 - Issues, verifies, revokes, and expires first-party API keys (Redis, sled, or in-memory backends) so clients never see provider secrets.
 - Pulls Model Context Protocol (MCP) tools into each request so clients automatically see the union of their declared tools plus any connected MCP servers.
+- **Multi-bucket rate limiting**: enforces per-key time-window limits (daily, per-minute, custom) with fixed or sliding windows, in-process concurrency semaphores, emergency key blocking, and a dynamic admin API — all without restarts.
 - Records detailed analytics (request metadata, routing choices, auth state, token usage, per-request cost) using JSONL, Redis, Sled, or memory, and exposes query/export endpoints for operators.
 - Ships with reloadable configuration for system prompts, MCP servers, and (experimental) routing metadata plus `/status` for automation.
 
@@ -70,6 +71,7 @@ Override the public port by exporting `ROUTIIUM_PORT`, and pass additional routi
 | `--system-prompt-config=PATH` | Load system prompt injection rules (see `system_prompt.json.example`). |
 | `--router-config=PATH` | Load a local alias/policy file consumed by the `LocalPolicyRouter` (`router_aliases.json.example`). |
 | `--routing-config=PATH` | Load routing JSON aliases/rules/transforms with runtime reload support. |
+| `--rate-limit-config=PATH` | Load rate limit policy config (JSON). Hot-reloadable via `/admin/rate-limits/reload`. |
 
 ## Environment Reference
 
@@ -117,6 +119,20 @@ Routiium loads `.env`, `.envfile`, or any path referenced via `ENV_FILE`, `ENVFI
 - `ROUTIIUM_KEYS_DISABLE_CACHE` – set to `1/true` to skip the in-memory API key cache. By default Routiium eagerly loads and maintains every key in-process so sled-backed verification never blocks on disk I/O; disable the cache when multiple Routiium instances share the same external store and you prefer every verification to hit that backend directly.
 - `ROUTIIUM_ADMIN_TOKEN` – optional admin bearer token. When set, admin/internal endpoints require `Authorization: Bearer <token>` (keys, reload, analytics, chat_history).
 
+### Rate Limiting
+
+Rate limiting is off by default; it activates when a backend URL or config file is provided. See [`docs/RATE_LIMITS.md`](docs/RATE_LIMITS.md) for the full reference.
+
+- `ROUTIIUM_RATE_LIMIT_ENABLED` – set to `false` to explicitly disable (default: `true` when backend/config present).
+- `ROUTIIUM_RATE_LIMIT_BACKEND` – backend selector: `redis://host:port`, `sled:/path/to/db`, or `memory`. Falls back to `ROUTIIUM_REDIS_URL` for Redis when unset.
+- `ROUTIIUM_REDIS_POOL_MAX` – r2d2 Redis connection pool size for the rate limit store (default `16`).
+- `ROUTIIUM_RL_SLED_PATH` – Sled database path for the rate limit store (default `./data/rate_limit.db`).
+- `ROUTIIUM_RATE_LIMIT_CONFIG` – path to rate limit JSON config file (override with `--rate-limit-config=PATH`).
+- `ROUTIIUM_RATE_LIMIT_DAILY` – shorthand: create a sliding-window daily bucket with this limit as the default policy.
+- `ROUTIIUM_RATE_LIMIT_PER_MINUTE` – shorthand: create a sliding-window per-minute bucket.
+- `ROUTIIUM_RATE_LIMIT_CUSTOM_REQUESTS` + `ROUTIIUM_RATE_LIMIT_CUSTOM_WINDOW_SECONDS` – shorthand: custom bucket.
+- `ROUTIIUM_RATE_LIMIT_BUCKETS` – full bucket list as a JSON array (highest priority; overrides the shorthand vars).
+
 ### Analytics & Pricing
 
 - `ROUTIIUM_ANALYTICS_REDIS_URL`, `ROUTIIUM_ANALYTICS_SLED_PATH`, `ROUTIIUM_ANALYTICS_JSONL_PATH` – choose the analytics backend (JSONL at `data/analytics.jsonl` is the default).
@@ -149,6 +165,22 @@ Routiium loads `.env`, `.envfile`, or any path referenced via `ENV_FILE`, `ENVFI
 | `GET /analytics/aggregate` | Aggregate metrics for a time window. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
 | `GET /analytics/export` | Export events as JSON (`format=json`) or CSV (`format=csv`). | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
 | `POST /analytics/clear` | Wipe analytics storage. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
+| `GET /admin/rate-limits/policies` | List rate limit policies. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
+| `POST /admin/rate-limits/policies` | Create a rate limit policy. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
+| `GET /admin/rate-limits/policies/{id}` | Get a rate limit policy by ID. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
+| `PUT /admin/rate-limits/policies/{id}` | Replace a rate limit policy. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
+| `DELETE /admin/rate-limits/policies/{id}` | Delete a rate limit policy. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
+| `GET /admin/rate-limits/default` | Get the default policy ID. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
+| `POST /admin/rate-limits/default` | Set the default policy. Body: `{ "policy_id": "..." }`. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
+| `GET /admin/rate-limits/keys/{key_id}/status` | Full rate limit + concurrency + block status for a key. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
+| `POST /admin/rate-limits/keys/{key_id}` | Assign a policy to a key. Body: `{ "policy_id": "..." }`. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
+| `DELETE /admin/rate-limits/keys/{key_id}` | Remove a key's policy assignment (reverts to default). | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
+| `POST /admin/rate-limits/emergency` | Emergency-block a key. Body: `{ "key_id", "duration_secs"?, "reason"? }`. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
+| `GET /admin/rate-limits/emergency` | List active emergency blocks. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
+| `DELETE /admin/rate-limits/emergency/{key_id}` | Remove an emergency block. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
+| `POST /admin/rate-limits/reload` | Hot-reload the rate limit config file. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
+| `GET /admin/concurrency/keys/{key_id}` | Live concurrency counters for a key. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
+| `GET /admin/analytics/rate-limits` | Query rate limit events and per-key metrics. Query: `key_id`, `start`, `end`, `limit`. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
 
 ## Authentication Modes
 
@@ -195,6 +227,56 @@ If you are implementing a Router, start with that document—the server expects 
 
 Managed mode validates tokens on every call; passthrough mode skips the manager and forwards whatever bearer the client sent.
 
+## Rate Limiting
+
+When rate limiting is enabled, every proxy request is checked against the resolved policy for the authenticated key before the upstream call is made. If any bucket is exhausted, Routiium returns HTTP 429 immediately with `X-RateLimit-*` headers.
+
+**Enabling:**
+
+```bash
+# Simplest: daily + per-minute limits, memory backend
+ROUTIIUM_RATE_LIMIT_BACKEND=memory \
+ROUTIIUM_RATE_LIMIT_DAILY=500 \
+ROUTIIUM_RATE_LIMIT_PER_MINUTE=100 \
+cargo run --release
+
+# File-based tiered policies, Redis backend
+ROUTIIUM_RATE_LIMIT_BACKEND=redis://localhost:6379 \
+cargo run --release -- --rate-limit-config=rate_limits.json
+```
+
+**Policy resolution order** (first match wins):
+1. Emergency block (always 429, bypasses policy lookup)
+2. Explicit per-key assignment via admin API
+3. File config `key_overrides` for the key ID
+4. Default policy set via admin API
+5. `default_policy` from the config file
+6. Unlimited (no limiting applied)
+
+**Live management** — no restarts required:
+
+```bash
+# Create a policy
+curl -X POST http://localhost:8088/admin/rate-limits/policies \
+  -H "Authorization: Bearer $ROUTIIUM_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"pro","buckets":[{"name":"daily","requests":5000,"window_seconds":86400}]}'
+
+# Assign to a key
+curl -X POST http://localhost:8088/admin/rate-limits/keys/sk_abc.xyz \
+  -H "Authorization: Bearer $ROUTIIUM_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"policy_id":"pro"}'
+
+# Emergency block (instant, persisted)
+curl -X POST http://localhost:8088/admin/rate-limits/emergency \
+  -H "Authorization: Bearer $ROUTIIUM_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"key_id":"sk_abc.xyz","duration_secs":3600,"reason":"abuse"}'
+```
+
+See [`docs/RATE_LIMITS.md`](docs/RATE_LIMITS.md) for the complete reference including concurrency limits, analytics, storage backend selection, and all admin endpoints.
+
 ## Analytics & Pricing
 
 Analytics events are recorded in the request handlers for `/v1/chat/completions` and `/v1/responses` using shared extraction helpers:
@@ -229,6 +311,7 @@ Operators can inspect and manage analytics through `/analytics/stats`, `/analyti
 - [docs/README.md](docs/README.md) – documentation index.
 - [docs/API_REFERENCE.md](docs/API_REFERENCE.md) – exhaustive request/response documentation with curl snippets.
 - [docs/ANALYTICS.md](docs/ANALYTICS.md) – analytics architecture, storage backends, API responses.
+- [docs/RATE_LIMITS.md](docs/RATE_LIMITS.md) – rate limiting implementation reference: buckets, policies, concurrency, admin API, storage backends, analytics.
 - [docs/PRODUCTION_HARDENING.md](docs/PRODUCTION_HARDENING.md) – deployment hardening checklist (secrets, admin routes, container security).
 - [docs/ROUTER_API_SPEC.md](docs/ROUTER_API_SPEC.md) – Router schema 1.1 and implementation guide (see `examples/router_service.rs` for a runnable Router).
 - `mcp.json.example`, `system_prompt.json.example`, `router_aliases.json.example` – starter configs for MCP servers, system prompts, and local router aliases.

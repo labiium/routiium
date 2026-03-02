@@ -167,6 +167,8 @@ pub struct AppState {
     pub router_config_path: Option<String>,
     /// Remote router URL configured via ROUTIIUM_ROUTER_URL
     pub router_url: Option<String>,
+    /// Rate limiting and concurrency manager
+    pub rate_limit_manager: Option<std::sync::Arc<crate::rate_limit::RateLimitManager>>,
 }
 
 /// Build an HTTP client honoring proxy and timeout environment variables.
@@ -266,6 +268,7 @@ impl Default for AppState {
             router_client: None,
             router_config_path: None,
             router_url: None,
+            rate_limit_manager: None,
         }
     }
 }
@@ -306,6 +309,7 @@ impl AppState {
             router_client: None,
             router_config_path: None,
             router_url: None,
+            rate_limit_manager: None,
         }
     }
 
@@ -347,6 +351,7 @@ impl AppState {
             router_client: None,
             router_config_path: None,
             router_url: None,
+            rate_limit_manager: None,
         }
     }
     /// Read the OpenAI API key from environment if present. Optional for /proxy.
@@ -1303,7 +1308,10 @@ mod tests {
             Json(_payload): Json<serde_json::Value>,
         ) -> (axum::http::StatusCode, &'static str) {
             state.calls.fetch_add(1, Ordering::SeqCst);
-            (axum::http::StatusCode::BAD_REQUEST, "unrelated validation error")
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                "unrelated validation error",
+            )
         }
 
         let calls = Arc::new(AtomicUsize::new(0));

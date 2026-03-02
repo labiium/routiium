@@ -1,3 +1,4 @@
+#![allow(clippy::await_holding_lock)]
 use actix_web::{http::header, test, web, App};
 use routiium::analytics::{
     AnalyticsEvent, AnalyticsManager, AuthMetadata, CostInfo, PerformanceMetrics, RequestMetadata,
@@ -62,6 +63,7 @@ fn app_state_with_keys(
         router_client: None,
         router_config_path: None,
         router_url: None,
+        rate_limit_manager: None,
     }
 }
 

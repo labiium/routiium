@@ -272,6 +272,66 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
+    // Initialize rate limit manager
+    // Check for --rate-limit-config CLI flag first, then ROUTIIUM_RATE_LIMIT_CONFIG env var.
+    let rate_limit_config_arg = args
+        .iter()
+        .find(|a| a.starts_with("--rate-limit-config="))
+        .and_then(|a| {
+            a.strip_prefix("--rate-limit-config=")
+                .map(|s| s.to_string())
+        })
+        .or_else(|| env::var("ROUTIIUM_RATE_LIMIT_CONFIG").ok());
+
+    let rate_limit_manager = {
+        let enabled = env::var("ROUTIIUM_RATE_LIMIT_ENABLED")
+            .map(|v| v.trim().to_lowercase())
+            .map(|v| v == "true" || v == "1" || v == "yes")
+            .unwrap_or(true); // enabled by default when a config or backend is provided
+
+        // Only initialise when explicitly configured or when a backend env is set.
+        let has_backend = env::var("ROUTIIUM_RATE_LIMIT_BACKEND").is_ok()
+            || env::var("ROUTIIUM_REDIS_URL").is_ok();
+        let has_config = rate_limit_config_arg.is_some();
+
+        if enabled && (has_backend || has_config) {
+            match routiium::rate_limit::RateLimitManager::from_env() {
+                Ok(mgr) => {
+                    let config_path = rate_limit_config_arg.clone();
+                    let mgr = mgr.with_config_path(config_path.clone());
+                    let mgr = std::sync::Arc::new(mgr);
+                    if let Some(path) = config_path {
+                        tracing::info!("Loading rate limit config from: {}", path);
+                        if let Err(e) = mgr.load_file_config(&path).await {
+                            tracing::warn!("Failed to load rate limit config: {}", e);
+                        }
+                    }
+                    // Apply default env-based policy if present and no file config set it.
+                    if let Some(default_policy) = routiium::rate_limit::default_policy_from_env() {
+                        if let Err(e) = mgr.create_policy(default_policy.clone()).await {
+                            tracing::warn!(
+                                "Failed to register default env rate limit policy: {}",
+                                e
+                            );
+                        } else {
+                            let _ = mgr.set_default_policy(&default_policy.id).await;
+                        }
+                    }
+                    tracing::info!("Rate limiting initialized");
+                    Some(mgr)
+                }
+                Err(e) => {
+                    tracing::warn!("Rate limit manager initialization failed: {}", e);
+                    tracing::info!("Continuing without rate limiting");
+                    None
+                }
+            }
+        } else {
+            tracing::info!("Rate limiting disabled (set ROUTIIUM_RATE_LIMIT_ENABLED=true or provide a backend/config to enable)");
+            None
+        }
+    };
+
     // Load pricing configuration
     let pricing = if let Ok(pricing_path) = env::var("ROUTIIUM_PRICING_CONFIG") {
         let path = pricing_path.trim();
@@ -311,6 +371,7 @@ async fn main() -> std::io::Result<()> {
         router_client,
         router_config_path: router_config_path_state,
         router_url: router_url_state,
+        rate_limit_manager,
     };
 
     // Startup mode announcement (managed vs passthrough)
