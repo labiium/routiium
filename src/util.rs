@@ -153,6 +153,8 @@ pub struct AppState {
     pub chat_history: Option<std::sync::Arc<crate::chat_history_manager::ChatHistoryManager>>,
     /// Pricing configuration for cost calculation
     pub pricing: std::sync::Arc<crate::pricing::PricingConfig>,
+    /// Path to pricing config file when loaded from disk
+    pub pricing_config_path: Option<String>,
     /// Path to MCP config file for reload operations
     pub mcp_config_path: Option<String>,
     /// Path to system prompt config file for reload operations
@@ -259,6 +261,7 @@ impl Default for AppState {
                 .map(std::sync::Arc::new),
             chat_history: None,
             pricing: std::sync::Arc::new(crate::pricing::PricingConfig::default()),
+            pricing_config_path: None,
             mcp_config_path: None,
             system_prompt_config_path: None,
             routing_config: std::sync::Arc::new(tokio::sync::RwLock::new(
@@ -300,6 +303,7 @@ impl AppState {
                 .map(std::sync::Arc::new),
             chat_history: None,
             pricing: std::sync::Arc::new(crate::pricing::PricingConfig::default()),
+            pricing_config_path: None,
             mcp_config_path: None,
             system_prompt_config_path: None,
             routing_config: std::sync::Arc::new(tokio::sync::RwLock::new(
@@ -342,6 +346,7 @@ impl AppState {
                 .map(std::sync::Arc::new),
             chat_history: None,
             pricing: std::sync::Arc::new(crate::pricing::PricingConfig::default()),
+            pricing_config_path: None,
             mcp_config_path: None,
             system_prompt_config_path: None,
             routing_config: std::sync::Arc::new(tokio::sync::RwLock::new(

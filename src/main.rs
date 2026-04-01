@@ -41,25 +41,43 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
-    // Optional MCP config path via --mcp-config=<path>
+    // Optional MCP config path via --mcp-config=<path> or ROUTIIUM_MCP_CONFIG
     let mcp_config_arg = args
         .iter()
         .find(|a| a.starts_with("--mcp-config="))
-        .and_then(|a| a.strip_prefix("--mcp-config=").map(|s| s.to_string()));
+        .and_then(|a| a.strip_prefix("--mcp-config=").map(|s| s.to_string()))
+        .or_else(|| {
+            env::var("ROUTIIUM_MCP_CONFIG")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        });
 
-    // Check for --system-prompt-config flag
+    // Optional system prompt config path via --system-prompt-config or ROUTIIUM_SYSTEM_PROMPT_CONFIG
     let system_prompt_config_arg = args
         .iter()
         .find(|a| a.starts_with("--system-prompt-config="))
         .and_then(|a| a.strip_prefix("--system-prompt-config="))
-        .map(|s| s.to_string());
+        .map(|s| s.to_string())
+        .or_else(|| {
+            env::var("ROUTIIUM_SYSTEM_PROMPT_CONFIG")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        });
 
-    // Check for --routing-config flag
+    // Optional routing config path via --routing-config or ROUTIIUM_ROUTING_CONFIG
     let routing_config_arg = args
         .iter()
         .find(|a| a.starts_with("--routing-config="))
         .and_then(|a| a.strip_prefix("--routing-config="))
-        .map(|s| s.to_string());
+        .map(|s| s.to_string())
+        .or_else(|| {
+            env::var("ROUTIIUM_ROUTING_CONFIG")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        });
 
     // Check for --router-config flag (alias map for Router)
     let router_config_arg = args
@@ -333,6 +351,7 @@ async fn main() -> std::io::Result<()> {
     };
 
     // Load pricing configuration
+    let mut pricing_config_path_state = None;
     let pricing = if let Ok(pricing_path) = env::var("ROUTIIUM_PRICING_CONFIG") {
         let path = pricing_path.trim();
         if !path.is_empty() {
@@ -340,6 +359,7 @@ async fn main() -> std::io::Result<()> {
             match routiium::pricing::PricingConfig::load_from_file(path) {
                 Ok(config) => {
                     tracing::info!("Pricing configuration loaded");
+                    pricing_config_path_state = Some(path.to_string());
                     Arc::new(config)
                 }
                 Err(e) => {
@@ -364,6 +384,7 @@ async fn main() -> std::io::Result<()> {
         analytics,
         chat_history,
         pricing,
+        pricing_config_path: pricing_config_path_state,
         mcp_config_path,
         system_prompt_config_path,
         routing_config,

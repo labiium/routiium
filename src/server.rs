@@ -3,7 +3,7 @@ use actix_web::{web, HttpRequest, HttpResponse, HttpResponseBuilder, Responder};
 use bytes::Bytes;
 #[allow(unused_imports)]
 use futures_util::TryStreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -17,7 +17,7 @@ use crate::router_client::{
     extract_route_request, PrivacyMode as RouterPrivacyMode, RouteError, RoutePlan,
     UpstreamMode as RouterUpstreamMode,
 };
-use crate::util::{managed_mode_from_env, AppState};
+use crate::util::{env_bind_addr, managed_mode_from_env, upstream_mode_from_env, AppState};
 
 use crate::util::error_response;
 use tracing::warn;
@@ -123,6 +123,46 @@ fn authorize_admin_request(
 fn require_admin(req: &HttpRequest) -> Result<(), HttpResponse> {
     let expected_token = std::env::var("ROUTIIUM_ADMIN_TOKEN").ok();
     authorize_admin_request(req, expected_token.as_deref())
+}
+
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_truthy(name: &str) -> bool {
+    non_empty_env(name)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn write_pretty_json_file<T: Serialize>(path: &str, value: &T) -> std::io::Result<()> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let payload = serde_json::to_vec_pretty(value)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
+    std::fs::write(path, payload)
+}
+
+fn api_key_status(info: &crate::auth::ApiKeyInfo, now_secs: u64) -> &'static str {
+    if info.revoked_at.is_some() {
+        "revoked"
+    } else if info.expires_at.map(|ts| ts <= now_secs).unwrap_or(false) {
+        "expired"
+    } else {
+        "active"
+    }
 }
 
 fn log_request_start(
@@ -2083,6 +2123,580 @@ async fn responses_passthrough(
     }
 }
 
+async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut keys = match &state.api_keys {
+        Some(mgr) => mgr.list_keys().unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    if let Some(rl_mgr) = state.rate_limit_manager.as_ref() {
+        for key in &mut keys {
+            key.rate_limit_policy = rl_mgr.get_key_policy_id(&key.id).await.ok().flatten();
+        }
+    }
+    keys.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    let active_key_count = keys
+        .iter()
+        .filter(|key| api_key_status(key, now_secs) == "active")
+        .count();
+
+    let principal_window_start = now_secs.saturating_sub(30 * 24 * 60 * 60);
+    let principal_events = if let Some(mgr) = &state.analytics {
+        mgr.query_range(principal_window_start, now_secs, Some(5000))
+            .await
+            .ok()
+    } else {
+        None
+    };
+
+    let mut principal_stats: HashMap<String, (u64, u64, HashSet<String>)> = HashMap::new();
+    if let Some(events) = &principal_events {
+        for event in events {
+            if !event.auth.authenticated {
+                continue;
+            }
+            let Some(api_key_id) = event.auth.api_key_id.as_ref() else {
+                continue;
+            };
+            let entry = principal_stats
+                .entry(api_key_id.clone())
+                .or_insert_with(|| (0, 0, HashSet::new()));
+            entry.0 += 1;
+            entry.1 = entry.1.max(event.timestamp);
+            if let Some(model) = event.request.model.as_ref() {
+                if !model.is_empty() {
+                    entry.2.insert(model.clone());
+                }
+            }
+        }
+    }
+
+    let mut principal_items: Vec<serde_json::Value> = Vec::new();
+    let known_key_ids: HashSet<String> = keys.iter().map(|key| key.id.clone()).collect();
+    for key in &keys {
+        let (request_count, last_seen, models) = principal_stats
+            .remove(&key.id)
+            .unwrap_or_else(|| (0, 0, HashSet::new()));
+        let mut models_used: Vec<String> = models.into_iter().collect();
+        models_used.sort();
+        principal_items.push(serde_json::json!({
+            "id": key.id,
+            "label": key.label,
+            "status": api_key_status(key, now_secs),
+            "created_at": key.created_at,
+            "expires_at": key.expires_at,
+            "revoked_at": key.revoked_at,
+            "scopes": key.scopes,
+            "rate_limit_policy": key.rate_limit_policy,
+            "request_count_30d": request_count,
+            "last_seen_at": (last_seen > 0).then_some(last_seen),
+            "models_used": models_used
+        }));
+    }
+
+    for (key_id, (request_count, last_seen, models)) in principal_stats {
+        if known_key_ids.contains(&key_id) {
+            continue;
+        }
+        let mut models_used: Vec<String> = models.into_iter().collect();
+        models_used.sort();
+        principal_items.push(serde_json::json!({
+            "id": key_id,
+            "label": serde_json::Value::Null,
+            "status": "observed_only",
+            "created_at": serde_json::Value::Null,
+            "expires_at": serde_json::Value::Null,
+            "revoked_at": serde_json::Value::Null,
+            "scopes": serde_json::Value::Null,
+            "rate_limit_policy": serde_json::Value::Null,
+            "request_count_30d": request_count,
+            "last_seen_at": (last_seen > 0).then_some(last_seen),
+            "models_used": models_used
+        }));
+    }
+
+    principal_items.sort_by(|a, b| {
+        let b_requests = b
+            .get("request_count_30d")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let a_requests = a
+            .get("request_count_30d")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        b_requests.cmp(&a_requests)
+    });
+
+    let analytics_stats = if let Some(mgr) = &state.analytics {
+        mgr.stats()
+            .await
+            .ok()
+            .and_then(|stats| serde_json::to_value(stats).ok())
+    } else {
+        None
+    };
+
+    let chat_history_stats = if let Some(mgr) = &state.chat_history {
+        mgr.stats()
+            .await
+            .ok()
+            .and_then(|stats| serde_json::to_value(stats).ok())
+    } else {
+        None
+    };
+    let chat_history_health = if let Some(mgr) = &state.chat_history {
+        mgr.health().await.ok()
+    } else {
+        None
+    };
+    let chat_history_config = crate::chat_history_manager::ChatHistoryConfig::from_env();
+
+    let system_prompt_guard = state.system_prompt_config.read().await;
+    let system_prompt_config = system_prompt_guard.clone();
+    let system_prompt_summary = serde_json::json!({
+        "global_configured": system_prompt_config.global.is_some(),
+        "per_model_count": system_prompt_config.per_model.len(),
+        "per_api_count": system_prompt_config.per_api.len(),
+        "injection_mode": system_prompt_config.injection_mode,
+        "enabled": system_prompt_config.enabled
+    });
+    drop(system_prompt_guard);
+
+    let mcp_config = state
+        .mcp_config_path
+        .as_ref()
+        .and_then(|path| crate::mcp_config::McpConfig::load_from_file(path).ok());
+    let (mcp_connected_servers, mcp_tools) = if let Some(manager_arc) = state.mcp_manager.as_ref() {
+        let manager = manager_arc.read().await;
+        let connected_servers = manager.connected_servers();
+        let tools = manager
+            .list_all_tools()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tool| {
+                serde_json::json!({
+                    "server_name": tool.server_name,
+                    "name": tool.name,
+                    "combined_name": format!("{}_{}", tool.server_name, tool.name),
+                    "description": tool.description,
+                    "input_schema": tool.input_schema
+                })
+            })
+            .collect::<Vec<_>>();
+        (connected_servers, tools)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    let routing_guard = state.routing_config.read().await;
+    let routing_config = routing_guard.clone();
+    let routing_stats = routing_guard.stats();
+    let mut routing_bedrock_backends = Vec::new();
+    for rule in &routing_guard.rules {
+        for backend in &rule.backends {
+            if backend.mode == crate::routing_config::UpstreamMode::Bedrock {
+                routing_bedrock_backends.push(serde_json::json!({
+                    "rule_id": rule.id,
+                    "description": rule.description,
+                    "base_url": backend.base_url,
+                    "key_env": backend.key_env,
+                    "weight": backend.weight,
+                    "timeout_seconds": backend.timeout_seconds
+                }));
+            }
+        }
+    }
+    if let Some(default_backend) = routing_guard.default_backend.as_ref() {
+        if default_backend.mode == crate::routing_config::UpstreamMode::Bedrock {
+            routing_bedrock_backends.push(serde_json::json!({
+                "rule_id": serde_json::Value::Null,
+                "description": "default_backend",
+                "base_url": default_backend.base_url,
+                "key_env": default_backend.key_env
+            }));
+        }
+    }
+    drop(routing_guard);
+
+    let router_catalog = if let Some(router) = &state.router_client {
+        router.get_catalog().await.ok()
+    } else {
+        None
+    };
+    let router_catalog_models = router_catalog
+        .as_ref()
+        .map(|catalog| {
+            catalog
+                .models
+                .iter()
+                .map(|model| {
+                    serde_json::json!({
+                        "id": model.id,
+                        "provider": model.provider,
+                        "aliases": model.aliases,
+                        "status": model.status,
+                        "policy_tags": model.policy_tags,
+                        "region": model.region
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let bedrock_catalog_models = router_catalog
+        .as_ref()
+        .map(|catalog| {
+            catalog
+                .models
+                .iter()
+                .filter(|model| model.provider.eq_ignore_ascii_case("bedrock"))
+                .map(|model| {
+                    serde_json::json!({
+                        "id": model.id,
+                        "provider": model.provider,
+                        "aliases": model.aliases,
+                        "region": model.region,
+                        "status": model.status
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut pricing_models = state
+        .pricing
+        .models
+        .iter()
+        .map(|(model, pricing)| {
+            serde_json::json!({
+                "model": model,
+                "input_per_million": pricing.input_per_million,
+                "output_per_million": pricing.output_per_million,
+                "cached_per_million": pricing.cached_per_million,
+                "reasoning_per_million": pricing.reasoning_per_million
+            })
+        })
+        .collect::<Vec<_>>();
+    pricing_models.sort_by(|a, b| {
+        let a_model = a.get("model").and_then(|value| value.as_str()).unwrap_or("");
+        let b_model = b.get("model").and_then(|value| value.as_str()).unwrap_or("");
+        a_model.cmp(b_model)
+    });
+
+    let (rate_limit_policies, rate_limit_default_policy_id, emergency_blocks) =
+        if let Some(mgr) = &state.rate_limit_manager {
+            (
+                mgr.list_policies().await.unwrap_or_default(),
+                mgr.get_default_policy_id().await.ok().flatten(),
+                mgr.list_emergency_blocks().await.unwrap_or_default(),
+            )
+        } else {
+            (Vec::new(), None, Vec::new())
+        };
+
+    let upstream_mode = match upstream_mode_from_env() {
+        crate::util::UpstreamMode::Responses => "responses",
+        crate::util::UpstreamMode::Chat => "chat",
+        crate::util::UpstreamMode::Bedrock => "bedrock",
+    };
+    let aws_region = non_empty_env("AWS_REGION").or_else(|| non_empty_env("AWS_DEFAULT_REGION"));
+    let aws_profile = non_empty_env("AWS_PROFILE");
+    let bedrock_credentials_source = if non_empty_env("AWS_ACCESS_KEY_ID").is_some()
+        && non_empty_env("AWS_SECRET_ACCESS_KEY").is_some()
+    {
+        "static"
+    } else if aws_profile.is_some() {
+        "profile"
+    } else if non_empty_env("AWS_WEB_IDENTITY_TOKEN_FILE").is_some() {
+        "web_identity"
+    } else if aws_region.is_some() {
+        "default_provider_chain"
+    } else {
+        "not_configured"
+    };
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "overview": {
+            "generated_at": now_secs,
+            "health": "ok",
+            "bind_addr": env_bind_addr(),
+            "admin_token_configured": non_empty_env("ROUTIIUM_ADMIN_TOKEN").is_some(),
+            "api_keys": {
+                "total": keys.len(),
+                "active": active_key_count
+            },
+            "rate_limits": {
+                "enabled": state.rate_limit_manager.is_some(),
+                "policies": rate_limit_policies.len(),
+                "default_policy_id": rate_limit_default_policy_id,
+                "emergency_blocks": emergency_blocks.len()
+            },
+            "analytics": {
+                "enabled": state.analytics.is_some(),
+                "stats": analytics_stats
+            },
+            "chat_history": {
+                "enabled": state.chat_history.is_some(),
+                "health": chat_history_health,
+                "stats": chat_history_stats
+            }
+        },
+        "system_prompt": {
+            "config_path": state.system_prompt_config_path,
+            "reloadable": state.system_prompt_config_path.is_some(),
+            "config": system_prompt_config,
+            "summary": system_prompt_summary
+        },
+        "mcp": {
+            "enabled": state.mcp_manager.is_some(),
+            "config_path": state.mcp_config_path,
+            "reloadable": state.mcp_config_path.is_some(),
+            "config": mcp_config,
+            "configured_servers": mcp_config.as_ref().map(|cfg| cfg.server_names()).unwrap_or_default(),
+            "connected_servers": mcp_connected_servers,
+            "tools": mcp_tools
+        },
+        "routing": {
+            "config_path": state.routing_config_path,
+            "reloadable": state.routing_config_path.is_some(),
+            "config": routing_config,
+            "stats": routing_stats,
+            "router": {
+                "enabled": state.router_client.is_some(),
+                "mode": if state.router_config_path.is_some() {
+                    "local"
+                } else if state.router_url.is_some() {
+                    "remote"
+                } else if state.router_client.is_some() {
+                    "configured"
+                } else {
+                    "none"
+                },
+                "config_path": state.router_config_path,
+                "url": state.router_url,
+                "catalog_revision": router_catalog.as_ref().map(|catalog| catalog.revision.clone()),
+                "catalog_models": router_catalog_models
+            }
+        },
+        "pricing": {
+            "config_path": state.pricing_config_path,
+            "source": if state.pricing_config_path.is_some() { "file" } else { "built_in" },
+            "models_count": pricing_models.len(),
+            "default_pricing": state.pricing.default.as_ref().map(|pricing| serde_json::json!({
+                "input_per_million": pricing.input_per_million,
+                "output_per_million": pricing.output_per_million,
+                "cached_per_million": pricing.cached_per_million,
+                "reasoning_per_million": pricing.reasoning_per_million
+            })),
+            "models": pricing_models
+        },
+        "settings": {
+            "auth": {
+                "mode": if managed_mode_from_env() { "managed" } else { "passthrough" },
+                "managed_override": non_empty_env("ROUTIIUM_MANAGED_MODE"),
+                "admin_token_configured": non_empty_env("ROUTIIUM_ADMIN_TOKEN").is_some(),
+                "key_store_available": state.api_keys.is_some()
+            },
+            "server": {
+                "bind_addr": env_bind_addr(),
+                "upstream_mode": upstream_mode,
+                "http_timeout_seconds": non_empty_env("ROUTIIUM_HTTP_TIMEOUT_SECONDS"),
+                "proxy_url_configured": non_empty_env("ROUTIIUM_PROXY_URL").is_some(),
+                "no_proxy": env_truthy("ROUTIIUM_NO_PROXY")
+            },
+            "cors": {
+                "allow_all": env_truthy("CORS_ALLOW_ALL"),
+                "allowed_origins": non_empty_env("CORS_ALLOWED_ORIGINS"),
+                "allowed_methods": non_empty_env("CORS_ALLOWED_METHODS")
+            },
+            "analytics": {
+                "enabled": state.analytics.is_some(),
+                "backend": non_empty_env("ROUTIIUM_ANALYTICS_BACKEND"),
+                "path": non_empty_env("ROUTIIUM_ANALYTICS_PATH")
+            },
+            "chat_history": {
+                "enabled": chat_history_config.enabled,
+                "primary_backend": chat_history_config.primary_backend,
+                "sink_backends": chat_history_config.sink_backends,
+                "privacy_level": format!("{:?}", chat_history_config.privacy_level).to_ascii_lowercase(),
+                "ttl_seconds": chat_history_config.ttl_seconds,
+                "strict": chat_history_config.strict,
+                "jsonl_path": chat_history_config.jsonl_path,
+                "sqlite_url_configured": chat_history_config.sqlite_url.is_some(),
+                "postgres_url_configured": chat_history_config.postgres_url.is_some(),
+                "turso_url_configured": chat_history_config.turso_url.is_some()
+            },
+            "rate_limits": {
+                "enabled": state.rate_limit_manager.is_some(),
+                "backend": non_empty_env("ROUTIIUM_RATE_LIMIT_BACKEND"),
+                "config_path": non_empty_env("ROUTIIUM_RATE_LIMIT_CONFIG")
+            }
+        },
+        "bedrock": {
+            "enabled": matches!(upstream_mode_from_env(), crate::util::UpstreamMode::Bedrock) || !routing_bedrock_backends.is_empty() || !bedrock_catalog_models.is_empty(),
+            "default_upstream_mode": upstream_mode,
+            "aws_region": aws_region,
+            "aws_profile": aws_profile,
+            "credentials_source": bedrock_credentials_source,
+            "routing_backends": routing_bedrock_backends,
+            "router_catalog_models": bedrock_catalog_models
+        },
+        "principals": {
+            "kind": "api_keys",
+            "note": "Routiium does not maintain a first-class user directory. This panel derives principals from API keys and recent authenticated traffic.",
+            "items": principal_items,
+            "sample_window_start": principal_window_start,
+            "sample_window_end": now_secs,
+            "sample_limit": principal_events.as_ref().map(|events| events.len()).unwrap_or(0)
+        },
+        "rate_limits": {
+            "policies": rate_limit_policies,
+            "default_policy_id": rate_limit_default_policy_id,
+            "emergency_blocks": emergency_blocks
+        }
+    }))
+}
+
+async fn admin_panel_update_system_prompts(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    body: web::Json<crate::system_prompt_config::SystemPromptConfig>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
+
+    let Some(path) = state.system_prompt_config_path.as_ref() else {
+        return error_response(
+            http::StatusCode::BAD_REQUEST,
+            "System prompt config is not file-backed",
+        );
+    };
+
+    let config = body.into_inner();
+    if let Err(err) = write_pretty_json_file(path, &config) {
+        return error_response(
+            http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to write system prompt config: {}", err),
+        );
+    }
+
+    let mut guard = state.system_prompt_config.write().await;
+    *guard = config.clone();
+    drop(guard);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "config_path": path,
+        "config": config
+    }))
+}
+
+async fn admin_panel_update_mcp(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    body: web::Json<crate::mcp_config::McpConfig>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
+
+    let Some(path) = state.mcp_config_path.as_ref() else {
+        return error_response(http::StatusCode::BAD_REQUEST, "MCP config is not file-backed");
+    };
+    let Some(manager_arc) = state.mcp_manager.as_ref() else {
+        return error_response(
+            http::StatusCode::BAD_REQUEST,
+            "MCP manager is unavailable at runtime",
+        );
+    };
+
+    let config = body.into_inner();
+    if let Err(err) = write_pretty_json_file(path, &config) {
+        return error_response(
+            http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to write MCP config: {}", err),
+        );
+    }
+
+    let new_manager = match crate::mcp_client::McpClientManager::new(config.clone()).await {
+        Ok(manager) => manager,
+        Err(err) => {
+            return error_response(
+                http::StatusCode::BAD_REQUEST,
+                &format!("Updated MCP config could not be initialized: {}", err),
+            )
+        }
+    };
+
+    let mut manager_guard = manager_arc.write().await;
+    *manager_guard = new_manager;
+    drop(manager_guard);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "config_path": path,
+        "configured_servers": config.server_names()
+    }))
+}
+
+async fn admin_panel_update_routing(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    body: web::Json<crate::routing_config::RoutingConfig>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
+
+    let Some(path) = state.routing_config_path.as_ref() else {
+        return error_response(
+            http::StatusCode::BAD_REQUEST,
+            "Routing config is not file-backed",
+        );
+    };
+
+    let config = body.into_inner();
+    if let Err(err) = write_pretty_json_file(path, &config) {
+        return error_response(
+            http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to write routing config: {}", err),
+        );
+    }
+
+    let loaded = match crate::routing_config::RoutingConfig::load_from_file(path) {
+        Ok(config) => config,
+        Err(err) => {
+            return error_response(
+                http::StatusCode::BAD_REQUEST,
+                &format!("Updated routing config could not be loaded: {}", err),
+            )
+        }
+    };
+    let stats = loaded.stats();
+
+    let mut guard = state.routing_config.write().await;
+    *guard = loaded.clone();
+    drop(guard);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "config_path": path,
+        "stats": stats,
+        "config": loaded
+    }))
+}
+
 /// Configure Actix-web routes with AppState.
 pub fn config_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -2193,7 +2807,17 @@ pub fn config_routes(cfg: &mut web::ServiceConfig) {
                 "/admin/rate-limits/reload",
                 web::post().to(rl_reload_config),
             )
-            .route("/admin/analytics/rate-limits", web::get().to(rl_analytics)),
+            .route("/admin/analytics/rate-limits", web::get().to(rl_analytics))
+            .route("/admin/panel/state", web::get().to(admin_panel_state))
+            .route(
+                "/admin/panel/system-prompts",
+                web::put().to(admin_panel_update_system_prompts),
+            )
+            .route("/admin/panel/mcp", web::put().to(admin_panel_update_mcp))
+            .route(
+                "/admin/panel/routing",
+                web::put().to(admin_panel_update_routing),
+            ),
     );
 }
 
@@ -2234,6 +2858,10 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
         "/chat_history/conversations/{id}",
         "/chat_history/messages",
         "/chat_history/clear",
+        "/admin/panel/state",
+        "/admin/panel/system-prompts",
+        "/admin/panel/mcp",
+        "/admin/panel/routing",
     ];
 
     // Get current configuration status
@@ -2267,6 +2895,7 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
         .router_config_path
         .as_ref()
         .map(|p| format!("file://{}", p));
+    let pricing_config_path = state.pricing_config_path.as_deref();
 
     // Get analytics status
     let analytics_enabled = state.analytics.is_some();
@@ -2334,6 +2963,12 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
             "analytics": {
                 "enabled": analytics_enabled,
                 "stats": analytics_stats
+            },
+            "pricing": {
+                "enabled": true,
+                "config_path": pricing_config_path,
+                "models_count": state.pricing.models.len(),
+                "source": if pricing_config_path.is_some() { "file" } else { "built_in" }
             }
         }
     }))
@@ -3462,7 +4097,7 @@ async fn list_keys(
                     .filter(|v| !v.is_empty());
                 let include_revoked = query.include_revoked.unwrap_or(true);
 
-                let filtered: Vec<_> = items
+                let mut filtered: Vec<_> = items
                     .into_iter()
                     .filter(|item| {
                         if !include_revoked && item.revoked_at.is_some() {
@@ -3481,6 +4116,13 @@ async fn list_keys(
                         true
                     })
                     .collect();
+
+                if let Some(rl_mgr) = state.rate_limit_manager.as_ref() {
+                    for item in &mut filtered {
+                        item.rate_limit_policy =
+                            rl_mgr.get_key_policy_id(&item.id).await.ok().flatten();
+                    }
+                }
 
                 HttpResponse::Ok().json(filtered)
             }

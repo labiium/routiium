@@ -39,6 +39,9 @@ WORKDIR /app
 
 # Copy the built binary
 COPY --from=builder /build/target/release/routiium /usr/local/bin/routiium
+COPY mcp.json.example /opt/routiium/examples/mcp.json
+COPY system_prompt.json.example /opt/routiium/examples/system_prompt.json
+COPY routing.json.example /opt/routiium/examples/routing.json
 
 # Run as non-root
 USER app

@@ -2,320 +2,320 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Routiium is an Actix-web service and Rust crate that exposes OpenAI-compatible `/v1/chat/completions` and `/v1/responses` endpoints while transparently translating payloads, streaming events, tools, routing decisions, and analytics on the fly. It lets existing Chat Completions clients tap into the modern Responses API (or any compatible upstream) without rewriting application code, while still benefiting from policy-aware multi-backend routing (documented in [`docs/ROUTER_API_SPEC.md`](docs/ROUTER_API_SPEC.md)) and full-stack observability via the analytics pipeline described in [`docs/ANALYTICS.md`](docs/ANALYTICS.md).
+You have applications calling OpenAI's Chat Completions API. You want to issue API keys to customers, route traffic across providers, enforce rate limits, track per-request costs, and inject tools and system prompts — all without changing your application code.
 
-## What It Does
+**Routiium is a self-hosted LLM reverse proxy.** Drop it between your clients and any LLM provider. Your existing Chat Completions code keeps working while Routiium handles auth, routing, limiting, and observability transparently.
 
-- Converts legacy Chat Completions requests, responses, and SSE chunks into the Responses API format (and back) while preserving tools, multimodal parts, logprobs, and token usage.
-- Proxies `/v1/chat/completions` and `/v1/responses` to multiple upstream providers with per-model base URLs, custom headers, managed or passthrough auth, and automatic system prompt injection.
-- **AWS Bedrock Support** - Full integration with AWS Bedrock including Claude 3, Llama 3, Titan, and other models with complete tool calling and multimodal support (see [docs/AWS_BEDROCK.md](docs/AWS_BEDROCK.md)).
-- Integrates with Router services (remote HTTP or local alias files) for policy-aware routing and falls back to legacy prefix rules defined via `ROUTIIUM_BACKENDS`.
-- Issues, verifies, revokes, and expires first-party API keys (Redis, sled, or in-memory backends) so clients never see provider secrets.
-- Pulls Model Context Protocol (MCP) tools into each request so clients automatically see the union of their declared tools plus any connected MCP servers.
-- **Multi-bucket rate limiting**: enforces per-key time-window limits (daily, per-minute, custom) with fixed or sliding windows, in-process concurrency semaphores, emergency key blocking, and a dynamic admin API — all without restarts.
-- Records detailed analytics (request metadata, routing choices, auth state, token usage, per-request cost) using JSONL, Redis, Sled, or memory, and exposes query/export endpoints for operators.
-- Ships with reloadable configuration for system prompts, MCP servers, and (experimental) routing metadata plus `/status` for automation.
+```
+Your App (any OpenAI-compatible SDK)
+               │
+       ┌───────┴───────┐
+       │   Routiium    │  ← auth, rate limits, system prompts,
+       │   :8088       │    MCP tools, analytics, cost tracking
+       └───┬───┬───┬───┘
+           │   │   │
+     OpenAI  Anthropic  AWS Bedrock / vLLM / Ollama
+```
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/labiium/routiium.git
-cd routiium
-# Provide whatever env vars you need (OPENAI_API_KEY, ROUTIIUM_BACKENDS, etc.)
-cargo run --release -- \
-  --mcp-config=mcp.json.example \
-  --system-prompt-config=system_prompt.json.example \
-  --router-config=router_aliases.json.example
+git clone https://github.com/labiium/routiium.git && cd routiium
+
+# Set your upstream provider key
+export OPENAI_API_KEY=sk-your-key
+
+cargo run --release
 ```
 
-Call the proxy (managed auth shown — use your issued `sk_<id>.<secret>` token):
+Routiium is now proxying on `localhost:8088`. Try it:
 
 ```bash
+# Generate a managed API key
+curl -s http://localhost:8088/keys/generate \
+  -H "Content-Type: application/json" \
+  -d '{"label":"my-first-key"}' | jq .
+
+# Use the returned sk_<id>.<secret> token to call the proxy
 curl -N http://localhost:8088/v1/chat/completions \
-  -H "Authorization: Bearer sk_test.abcdef..." \
+  -H "Authorization: Bearer sk_<id>.<secret>" \
   -H "Content-Type: application/json" \
   -d '{
-        "model":"gpt-4.1-nano",
-        "messages":[{"role":"user","content":"Stream this"}],
-        "stream": true
-      }'
+    "model": "gpt-4.1-nano",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": true
+  }'
 ```
 
-Need a container? The repo ships with a `Dockerfile`:
+Your client never sees `OPENAI_API_KEY`. Routiium validates the issued token, substitutes the real key upstream, records analytics, and returns the response.
+
+### Docker
 
 ```bash
 docker build -t routiium .
-docker run --rm -p 8088:8088 \
-  -e OPENAI_API_KEY=sk-your-upstream-key \
-  routiium
+docker run --rm -p 8088:8088 -e OPENAI_API_KEY=sk-your-key routiium
 ```
 
-### Docker Compose
-
-The repository now ships with a hardened `docker-compose.yml` that builds the local image, maps `8088`, persists data at `/data`, runs with `read_only`, drops Linux capabilities, and enables `no-new-privileges`. Provide your upstream credentials in `.env` (Compose reads it for variable substitution):
+Or with the included `docker-compose.yml` (hardened: read-only rootfs, dropped capabilities, no-new-privileges):
 
 ```bash
-cp .env.example .env
-echo "OPENAI_API_KEY=sk-your-upstream-key" >> .env
+cp .env.example .env       # add your provider keys
 docker compose up --build
 ```
 
-Override the public port by exporting `ROUTIIUM_PORT`, and pass additional routing knobs (e.g. `ROUTIIUM_BACKENDS`, `ROUTIIUM_ROUTER_URL`) via `.env` or your shell.
+## Why Routiium
+
+### "I want to give customers API keys without exposing my provider secrets"
+
+Routiium issues opaque tokens (`sk_<id>.<secret>`) and validates them on every request. Provider keys stay on the server. You control issuance, revocation, expiration, and scopes through a REST API — no redeploy needed.
+
+### "I want to route `gpt-4` to OpenAI but `claude-3` to Anthropic from the same client"
+
+Configure `ROUTIIUM_BACKENDS` with prefix rules and Routiium selects the right upstream automatically. Clients send any model name; the proxy resolves the provider, swaps in the correct auth, and converts payloads if needed (Chat Completions, Responses API, or Bedrock SigV4).
+
+```bash
+export ROUTIIUM_BACKENDS="prefix=gpt-,base=https://api.openai.com/v1,key_env=OPENAI_API_KEY; \
+  prefix=claude-,base=https://api.anthropic.com/v1,key_env=ANTHROPIC_API_KEY; \
+  prefix=anthropic.,base=https://bedrock-runtime.us-east-1.amazonaws.com,mode=bedrock"
+```
+
+### "I want to know how much each customer is spending"
+
+Every request is logged with token usage, model, routing decision, auth identity, and computed cost. Query the analytics API or export as CSV. Bring your own pricing cards or use the built-in OpenAI defaults.
+
+### "I need per-customer rate limits without client-side logic"
+
+Define policies with daily, per-minute, or custom-window buckets. Assign policies to keys via the admin API. Emergency-block abusive keys instantly. Everything is hot-reloadable — no restarts.
+
+### "I want every request to include my company's system prompt and database tools"
+
+System prompt injection (global, per-model, or per-API-mode) is applied transparently. MCP (Model Context Protocol) servers are spawned at boot and their tools are merged into every request — clients see the union of their declared tools plus any MCP-provided ones.
+
+## Features
+
+### Multi-Backend Routing
+
+Route requests to any combination of providers based on model prefix, local policy files, or an external Router service (Schema 1.1 with caching, stickiness, and cost hints). Upstream modes:
+- **Responses** (default) — native OpenAI Responses API
+- **Chat** — rewrite to `/v1/chat/completions` for vLLM, Ollama, or any Chat-compatible endpoint
+- **Bedrock** — AWS SigV4 signing for Claude, Llama, Titan, and other Bedrock models
+
+See [docs/ROUTER_API_SPEC.md](docs/ROUTER_API_SPEC.md) and [docs/AWS_BEDROCK.md](docs/AWS_BEDROCK.md).
+
+### Managed Authentication
+
+- Tokens: `sk_<id>.<secret>` — secrets are never stored (salted SHA-256 hashes only)
+- Backends: Redis, sled (embedded), or in-memory — auto-detected or overridden via `--keys-backend`
+- In-process key cache for single-digit-microsecond verification (disable with `ROUTIIUM_KEYS_DISABLE_CACHE=1` for multi-node setups sharing Redis)
+- Passthrough mode available: leave `OPENAI_API_KEY` unset and clients forward their own provider keys
+
+### Rate Limiting
+
+- Multi-bucket policies: daily, per-minute, custom time windows (fixed or sliding)
+- In-process concurrency semaphores
+- Emergency key blocking (instant 429, with optional duration and reason)
+- Per-key policy assignment or global default
+- Hot-reloadable config file and full admin API — no restarts
+
+See [docs/RATE_LIMITS.md](docs/RATE_LIMITS.md).
+
+### Analytics and Cost Tracking
+
+Every request records: endpoint, model, status, auth identity, routing decision, token usage (prompt/completion/cached/reasoning), and computed cost.
+
+- Storage: JSONL (default), Redis, Sled, or in-memory
+- Query: `/analytics/events`, `/analytics/aggregate`, `/analytics/export?format=csv`
+- Pricing: built-in OpenAI cards or custom JSON via `ROUTIIUM_PRICING_CONFIG`
+
+See [docs/ANALYTICS.md](docs/ANALYTICS.md).
+
+### System Prompts
+
+JSON config with `global`, `per_model`, and `per_api` prompts. Injection modes: `prepend`, `append`, or `replace`. Hot-reloadable via `/reload/system_prompt`.
+
+### Model Context Protocol (MCP)
+
+Point `--mcp-config` at your MCP config and Routiium spawns each server, discovers its tools, and merges them into every request. Tool names are namespaced (`serverName_toolName`). Hot-reload via `/reload/mcp`.
+
+### Payload Translation
+
+Bidirectional conversion between Chat Completions and Responses API formats, preserving tools, multimodal content, streaming SSE events, logprobs, reasoning tokens, and token usage.
+
+## Admin Panel
+
+A React + Vite dashboard backed by Routiium's live admin APIs (not a mock). Run it from the repo root:
+
+```bash
+npm run admin:install && npm run admin:dev
+```
+
+The panel provides:
+- API key management (generate, revoke, set expiration)
+- Rate limit policy CRUD, per-key assignment, emergency blocks
+- System prompt, MCP, and routing config editing with hot-apply
+- Analytics dashboard with export
+- Chat history inspection
+- Read-only views of pricing, Bedrock detection, and environment settings
+
+Set `ROUTIIUM_ADMIN_TOKEN` on the server and enter the matching bearer in the panel header.
+
+## Repo Layout
+
+```
+src/           Rust server and library code
+tests/         Integration and behavior tests
+docs/          Protocol, analytics, hardening, and rate-limit references
+apps/admin/    Admin panel (Vite + React)
+```
 
 ## CLI Flags
 
 | Flag | Description |
 | ---- | ----------- |
-| `--keys-backend=redis://...|sled:<path>|memory` | Override the API key store (defaults to Redis via `ROUTIIUM_REDIS_URL`, else sled, else memory). |
-| `--mcp-config=PATH` | Load Model Context Protocol server definitions (see `mcp.json.example`). |
-| `--system-prompt-config=PATH` | Load system prompt injection rules (see `system_prompt.json.example`). |
-| `--router-config=PATH` | Load a local alias/policy file consumed by the `LocalPolicyRouter` (`router_aliases.json.example`). |
-| `--routing-config=PATH` | Load routing JSON aliases/rules/transforms with runtime reload support. |
-| `--rate-limit-config=PATH` | Load rate limit policy config (JSON). Hot-reloadable via `/admin/rate-limits/reload`. |
+| `--keys-backend=redis://...\|sled:<path>\|memory` | Override the API key store. |
+| `--mcp-config=PATH` | Load MCP server definitions. |
+| `--system-prompt-config=PATH` | Load system prompt injection rules. |
+| `--router-config=PATH` | Load a local alias/policy file for routing. |
+| `--routing-config=PATH` | Load routing JSON with runtime reload support. |
+| `--rate-limit-config=PATH` | Load rate limit policy config. |
 
-## Environment Reference
+## Environment Variables
 
-Routiium loads `.env`, `.envfile`, or any path referenced via `ENV_FILE`, `ENVFILE`, or `DOTENV_PATH` before reading the rest of the environment.
+### Server
 
-### Server & HTTP
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `BIND_ADDR` | `0.0.0.0:8088` | Listen address. |
+| `OPENAI_API_KEY` | — | Enables managed auth; used as fallback upstream bearer. |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Default upstream base URL. |
+| `MODEL` | — | Default model when the client omits `model`. |
+| `ROUTIIUM_MANAGED_MODE` | auto | `managed\|force\|true` or `passthrough\|false`. |
+| `ROUTIIUM_UPSTREAM_MODE` | `responses` | `responses` or `chat` (for vLLM/Ollama). |
+| `ROUTIIUM_HTTP_TIMEOUT_SECONDS` | — | Upstream request timeout. |
+| `RUST_LOG` | — | Tracing filter (e.g. `info,tower_http=info`). |
 
-- `BIND_ADDR` – listen address (default `0.0.0.0:8088`).
-- `RUST_LOG` – tracing filter, e.g. `info,tower_http=info`.
-- `OPENAI_BASE_URL` – default upstream base URL (`https://api.openai.com/v1`).
-- `OPENAI_API_KEY` – presence enables managed auth and serves as the fallback upstream bearer.
-- `ROUTIIUM_MANAGED_MODE` – override auth mode selection (`managed|force|true` to require Routiium keys even without `OPENAI_API_KEY`, `passthrough|false` to disable). Defaults to auto (managed when `OPENAI_API_KEY` is present).
-- `MODEL` – default model when the client omits `model`.
-- `ROUTIIUM_UPSTREAM_MODE` – `responses` (default) or `chat`; `chat` rewrites upstream calls to `/v1/chat/completions` and converts payloads (handy for vLLM/Ollama).
-- `ROUTIIUM_HTTP_TIMEOUT_SECONDS` – reqwest client timeout.
-- `ROUTIIUM_NO_PROXY`, `ROUTIIUM_PROXY_URL`, `HTTP_PROXY`/`http_proxy`, `HTTPS_PROXY`/`https_proxy` – proxy controls.
-- `CORS_ALLOWED_ORIGINS`, `CORS_ALLOWED_METHODS`, `CORS_ALLOWED_HEADERS`, `CORS_ALLOW_CREDENTIALS`, `CORS_MAX_AGE` – CORS policy knobs.
+### Routing
 
-### Routing & Upstream Selection
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `ROUTIIUM_BACKENDS` | — | Semicolon-separated backend rules (`prefix`, `base`, `key_env`, `mode`). |
+| `ROUTIIUM_ROUTER_URL` | — | Enable HTTP Router client (Schema 1.1). |
+| `ROUTIIUM_ROUTER_TIMEOUT_MS` | `15` | Router request timeout. |
+| `ROUTIIUM_CACHE_TTL_MS` | `15000` | Router plan cache TTL. |
+| `ROUTIIUM_ROUTER_PRIVACY_MODE` | `features` | `features\|summary\|full` — controls content sent to router. |
+| `ROUTIIUM_ROUTER_STRICT` | — | Fail if router rejects (no legacy fallback). |
 
-- `ROUTIIUM_BACKENDS` – semicolon-separated rules (`prefix`, `base`/`base_url`, optional `key_env`, optional `mode=responses|chat|bedrock`). Example:
+### Auth and Keys
 
-  ```bash
-  export OPENAI_API_KEY=sk-openai...
-  export ANTHROPIC_API_KEY=sk-anthropic...
-  export AWS_ACCESS_KEY_ID=your-access-key
-  export AWS_SECRET_ACCESS_KEY=your-secret-key
-  export AWS_REGION=us-east-1
-  export ROUTIIUM_BACKENDS="prefix=gpt-,base=https://api.openai.com/v1,key_env=OPENAI_API_KEY,mode=responses; prefix=claude-,base=https://api.anthropic.com/v1,key_env=ANTHROPIC_API_KEY,mode=responses; prefix=anthropic.,base=https://bedrock-runtime.us-east-1.amazonaws.com,mode=bedrock; prefix=llama,base=http://localhost:11434/v1,mode=chat"
-  ```
-
-- `ROUTIIUM_ROUTER_URL` – enable the HTTP Router client (Schema 1.1). Helper env vars:
-  - `ROUTIIUM_ROUTER_TIMEOUT_MS` – router request timeout (default 15 ms).
-  - `ROUTIIUM_CACHE_TTL_MS` – plan cache TTL (default 15000 ms).
-  - `ROUTIIUM_ROUTER_PRIVACY_MODE=features|summary|full` – how much request context is sent to the router.
-  - `ROUTIIUM_ROUTER_STRICT` – when truthy, fail the request if the router rejects the alias (no legacy fallback).
-  - `ROUTIIUM_ROUTER_MTLS` – set to enable mutual TLS (expects OS-level cert configuration).
-
-### Authentication & Key Storage
-
-- `ROUTIIUM_REDIS_URL` – use Redis for the API key store.
-- `ROUTIIUM_REDIS_POOL_MAX` – r2d2 pool size for Redis (default 16).
-- `ROUTIIUM_SLED_PATH` – path for the embedded sled database (default `./data/keys.db` when the `sled` feature is enabled).
-- `ROUTIIUM_KEYS_REQUIRE_EXPIRATION`, `ROUTIIUM_KEYS_ALLOW_NO_EXPIRATION`, `ROUTIIUM_KEYS_DEFAULT_TTL_SECONDS` – key issuance policy toggles.
-- `ROUTIIUM_KEYS_DISABLE_CACHE` – set to `1/true` to skip the in-memory API key cache. By default Routiium eagerly loads and maintains every key in-process so sled-backed verification never blocks on disk I/O; disable the cache when multiple Routiium instances share the same external store and you prefer every verification to hit that backend directly.
-- `ROUTIIUM_ADMIN_TOKEN` – optional admin bearer token. When set, admin/internal endpoints require `Authorization: Bearer <token>` (keys, reload, analytics, chat_history).
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `ROUTIIUM_REDIS_URL` | — | Redis URL for key store. |
+| `ROUTIIUM_SLED_PATH` | `./data/keys.db` | Sled database path. |
+| `ROUTIIUM_ADMIN_TOKEN` | — | Admin bearer token for protected endpoints. |
+| `ROUTIIUM_KEYS_REQUIRE_EXPIRATION` | — | Require TTL on new keys. |
+| `ROUTIIUM_KEYS_DEFAULT_TTL_SECONDS` | — | Default TTL for new keys. |
+| `ROUTIIUM_KEYS_DISABLE_CACHE` | — | Skip in-memory key cache. |
 
 ### Rate Limiting
 
-Rate limiting is off by default; it activates when a backend URL or config file is provided. See [`docs/RATE_LIMITS.md`](docs/RATE_LIMITS.md) for the full reference.
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `ROUTIIUM_RATE_LIMIT_BACKEND` | — | `redis://...`, `sled:/path`, or `memory`. |
+| `ROUTIIUM_RATE_LIMIT_ENABLED` | `true` | Set `false` to disable. |
+| `ROUTIIUM_RATE_LIMIT_DAILY` | — | Daily request limit (sliding window). |
+| `ROUTIIUM_RATE_LIMIT_PER_MINUTE` | — | Per-minute request limit. |
+| `ROUTIIUM_RATE_LIMIT_CONFIG` | — | Path to rate limit JSON config. |
 
-- `ROUTIIUM_RATE_LIMIT_ENABLED` – set to `false` to explicitly disable (default: `true` when backend/config present).
-- `ROUTIIUM_RATE_LIMIT_BACKEND` – backend selector: `redis://host:port`, `sled:/path/to/db`, or `memory`. Falls back to `ROUTIIUM_REDIS_URL` for Redis when unset.
-- `ROUTIIUM_REDIS_POOL_MAX` – r2d2 Redis connection pool size for the rate limit store (default `16`).
-- `ROUTIIUM_RL_SLED_PATH` – Sled database path for the rate limit store (default `./data/rate_limit.db`).
-- `ROUTIIUM_RATE_LIMIT_CONFIG` – path to rate limit JSON config file (override with `--rate-limit-config=PATH`).
-- `ROUTIIUM_RATE_LIMIT_DAILY` – shorthand: create a sliding-window daily bucket with this limit as the default policy.
-- `ROUTIIUM_RATE_LIMIT_PER_MINUTE` – shorthand: create a sliding-window per-minute bucket.
-- `ROUTIIUM_RATE_LIMIT_CUSTOM_REQUESTS` + `ROUTIIUM_RATE_LIMIT_CUSTOM_WINDOW_SECONDS` – shorthand: custom bucket.
-- `ROUTIIUM_RATE_LIMIT_BUCKETS` – full bucket list as a JSON array (highest priority; overrides the shorthand vars).
+### Analytics
 
-### Analytics & Pricing
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `ROUTIIUM_ANALYTICS_JSONL_PATH` | `data/analytics.jsonl` | JSONL analytics file. |
+| `ROUTIIUM_ANALYTICS_REDIS_URL` | — | Redis URL for analytics. |
+| `ROUTIIUM_ANALYTICS_SLED_PATH` | — | Sled path for analytics. |
+| `ROUTIIUM_ANALYTICS_TTL_SECONDS` | — | Auto-expire analytics entries. |
+| `ROUTIIUM_PRICING_CONFIG` | — | Custom pricing JSON path. |
 
-- `ROUTIIUM_ANALYTICS_REDIS_URL`, `ROUTIIUM_ANALYTICS_SLED_PATH`, `ROUTIIUM_ANALYTICS_JSONL_PATH` – choose the analytics backend (JSONL at `data/analytics.jsonl` is the default).
-- `ROUTIIUM_ANALYTICS_TTL_SECONDS` – automatic expiration for Redis/Sled entries.
-- `ROUTIIUM_ANALYTICS_FORCE_MEMORY`, `ROUTIIUM_ANALYTICS_MAX_EVENTS` – force the in-memory backend and cap retained events.
-- `ROUTIIUM_PRICING_CONFIG` – path to custom pricing JSON (falls back to built-in OpenAI price cards).
+### Proxy and CORS
 
-## HTTP APIs
+| Variable | Description |
+| -------- | ----------- |
+| `ROUTIIUM_NO_PROXY`, `ROUTIIUM_PROXY_URL`, `HTTP_PROXY`, `HTTPS_PROXY` | Proxy controls. |
+| `CORS_ALLOWED_ORIGINS`, `CORS_ALLOWED_METHODS`, `CORS_ALLOWED_HEADERS` | CORS policy. |
+| `CORS_ALLOW_CREDENTIALS`, `CORS_MAX_AGE` | CORS policy (cont.). |
 
-| Route | Description | Auth |
-| ----- | ----------- | ---- |
-| `GET /health` | Lightweight liveness probe endpoint. | None |
-| `GET /status` | Feature flags, config file paths, routing stats, analytics status. | None |
-| `GET /models` | OpenAI-compatibility alias for `GET /v1/models`. | Managed or passthrough bearer |
-| `GET /v1/models` | List available models in OpenAI format. | Managed or passthrough bearer |
-| `POST /convert` | Convert a Chat Completions payload into a Responses payload (applies system prompts, merges MCP tools, supports `conversation_id`). | None |
-| `POST /v1/responses` | Native Responses proxy (handles system prompts, legacy tool formats, routing, analytics, streaming). | Managed or passthrough bearer |
-| `POST /v1/chat/completions` | Native Chat Completions proxy with prompt injection and optional conversion of Responses-shaped upstream bodies. | Managed or passthrough bearer |
-| `GET /keys` | List issued API keys (id, label, timestamps, scopes). Supports `label`, `label_prefix`, `include_revoked=false`. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise protect via network ACLs |
-| `POST /keys/generate` | Issue a new `sk_<id>.<secret>` token; body supports `label`, `ttl_seconds`, `expires_at`, `scopes`. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise protect via network ACLs |
-| `POST /keys/generate_batch` | Issue multiple keys in one call (`labels` array, optional `label_prefix`, `ttl_seconds`, `expires_at`, `scopes`). | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise protect via network ACLs |
-| `POST /keys/revoke` | Revoke a key by id. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise protect via network ACLs |
-| `POST /keys/set_expiration` | Set or clear expiration on an existing key. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise protect via network ACLs |
-| `POST /reload/mcp` | Reload the MCP config and reconnect servers. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
-| `POST /reload/system_prompt` | Reload the system prompt config. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
-| `POST /reload/routing` | Reload the optional routing JSON (currently surfaces metadata only). | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
-| `POST /reload/all` | Reload MCP + system prompt configs. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
-| `GET /analytics/stats` | Analytics backend stats (requires analytics enabled). | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
-| `GET /analytics/events` | Query raw analytics events (`start`, `end`, `limit`). | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
-| `GET /analytics/aggregate` | Aggregate metrics for a time window. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
-| `GET /analytics/export` | Export events as JSON (`format=json`) or CSV (`format=csv`). | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
-| `POST /analytics/clear` | Wipe analytics storage. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set; otherwise internal |
-| `GET /admin/rate-limits/policies` | List rate limit policies. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
-| `POST /admin/rate-limits/policies` | Create a rate limit policy. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
-| `GET /admin/rate-limits/policies/{id}` | Get a rate limit policy by ID. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
-| `PUT /admin/rate-limits/policies/{id}` | Replace a rate limit policy. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
-| `DELETE /admin/rate-limits/policies/{id}` | Delete a rate limit policy. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
-| `GET /admin/rate-limits/default` | Get the default policy ID. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
-| `POST /admin/rate-limits/default` | Set the default policy. Body: `{ "policy_id": "..." }`. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
-| `GET /admin/rate-limits/keys/{key_id}/status` | Full rate limit + concurrency + block status for a key. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
-| `POST /admin/rate-limits/keys/{key_id}` | Assign a policy to a key. Body: `{ "policy_id": "..." }`. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
-| `DELETE /admin/rate-limits/keys/{key_id}` | Remove a key's policy assignment (reverts to default). | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
-| `POST /admin/rate-limits/emergency` | Emergency-block a key. Body: `{ "key_id", "duration_secs"?, "reason"? }`. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
-| `GET /admin/rate-limits/emergency` | List active emergency blocks. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
-| `DELETE /admin/rate-limits/emergency/{key_id}` | Remove an emergency block. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
-| `POST /admin/rate-limits/reload` | Hot-reload the rate limit config file. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
-| `GET /admin/concurrency/keys/{key_id}` | Live concurrency counters for a key. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
-| `GET /admin/analytics/rate-limits` | Query rate limit events and per-key metrics. Query: `key_id`, `start`, `end`, `limit`. | Admin bearer if `ROUTIIUM_ADMIN_TOKEN` is set |
+Routiium also loads `.env`, `.envfile`, or any path set via `ENV_FILE` / `ENVFILE` / `DOTENV_PATH`.
 
-## Authentication Modes
+## HTTP API Reference
 
-1. **Managed mode** (recommended): set `OPENAI_API_KEY` (and any additional provider env vars referenced by routing rules). Clients call Routiium with internally issued tokens (`sk_<id>.<secret>`). The proxy validates them through `ApiKeyManager` before substituting provider secrets upstream. If you are routing only to providers that don't require OpenAI keys (e.g., Bedrock), you can force managed mode via `ROUTIIUM_MANAGED_MODE=force`.
-2. **Passthrough mode**: leave `OPENAI_API_KEY` unset, or explicitly set `ROUTIIUM_MANAGED_MODE=passthrough`. Clients send their provider key in `Authorization: Bearer ...` and Routiium forwards it upstream unchanged (still applying conversion, routing, analytics, etc.).
+### Proxy Endpoints
 
-Managed mode keeps a hot, in-process cache of every issued API key so sled-backed deployments never block on host filesystem latency during verification. The cache is warmed at startup and updated immediately on `generate`, `revoke`, and `set_expiration`. Set `ROUTIIUM_KEYS_DISABLE_CACHE=1` if you need every verification to go back to a shared store (e.g., Redis in multi-node setups).
+| Route | Auth |
+| ----- | ---- |
+| `GET /health` | None |
+| `GET /status` | None |
+| `GET /v1/models` | Bearer |
+| `POST /v1/chat/completions` | Bearer |
+| `POST /v1/responses` | Bearer |
+| `POST /convert` | None |
 
-## Multi-backend Routing & Router Integration
+### Key Management
 
-When resolving an upstream:
+| Route | Description |
+| ----- | ----------- |
+| `GET /keys` | List keys (supports `label`, `label_prefix`, `include_revoked`). |
+| `POST /keys/generate` | Issue a new token (`label`, `ttl_seconds`, `expires_at`, `scopes`). |
+| `POST /keys/generate_batch` | Issue multiple keys (`labels` array). |
+| `POST /keys/revoke` | Revoke by id. |
+| `POST /keys/set_expiration` | Set or clear expiration. |
 
-1. If `--router-config` or `ROUTIIUM_ROUTER_URL` is configured, Routiium asks the Router for a plan (Schema 1.1, see [`docs/ROUTER_API_SPEC.md`](docs/ROUTER_API_SPEC.md)). Plans return the upstream base URL, API mode (`responses` or `chat`), optional auth env var, stickiness tokens, headers, and policy metadata. Successful plans are cached for `ROUTIIUM_CACHE_TTL_MS` and surfaced to clients via headers like `x-route-id`, `x-resolved-model`, `router-schema`, and `x-policy-rev`.
-2. If the Router rejects the alias (or is unavailable and `ROUTIIUM_ROUTER_STRICT` is not set), Routiium falls back to `ROUTIIUM_BACKENDS`, selecting the first rule whose `prefix` matches the requested model. `mode=chat` rewrites the upstream URL to `/v1/chat/completions` and converts payloads so you can front services such as vLLM or Ollama with a Responses surface.
-3. If neither mechanism matches, the proxy uses `OPENAI_BASE_URL` and whichever `model` the client supplied (or the `MODEL` env fallback).
+### Admin (requires `ROUTIIUM_ADMIN_TOKEN`)
 
-The optional `routing.json` loader (see `routing.json.example`) supports aliases, rule matching, backend selection, and request transforms in-process. Router plans (`--router-config` / `ROUTIIUM_ROUTER_URL`) still take precedence; when no router plan is available, Routiium applies `routing.json`, then `ROUTIIUM_BACKENDS`, then `OPENAI_BASE_URL`.
+| Route | Description |
+| ----- | ----------- |
+| `GET/POST/PUT/DELETE /admin/rate-limits/policies[/{id}]` | Rate limit policy CRUD. |
+| `GET/POST /admin/rate-limits/default` | Get/set default policy. |
+| `GET/POST/DELETE /admin/rate-limits/keys/{key_id}` | Per-key policy assignment. |
+| `GET/POST/DELETE /admin/rate-limits/emergency[/{key_id}]` | Emergency blocks. |
+| `POST /admin/rate-limits/reload` | Hot-reload rate limit config. |
+| `GET /admin/concurrency/keys/{key_id}` | Live concurrency counters. |
+| `GET /admin/analytics/rate-limits` | Rate limit event metrics. |
+| `GET /admin/panel/state` | Full runtime snapshot for the admin panel. |
+| `PUT /admin/panel/system-prompts` | Persist and hot-apply system prompts. |
+| `PUT /admin/panel/mcp` | Persist and reconnect MCP config. |
+| `PUT /admin/panel/routing` | Persist and hot-apply routing config. |
 
-### Router Contract (Schema 1.1)
+### Analytics
 
-The Router integration follows the full Schema 1.1 contract captured in [`docs/ROUTER_API_SPEC.md`](docs/ROUTER_API_SPEC.md). Highlights:
+| Route | Description |
+| ----- | ----------- |
+| `GET /analytics/stats` | Backend stats. |
+| `GET /analytics/events` | Query events (`start`, `end`, `limit`). |
+| `GET /analytics/aggregate` | Aggregated metrics. |
+| `GET /analytics/export` | Export as JSON or CSV. |
+| `POST /analytics/clear` | Wipe storage. |
 
-- Every `RouteRequest`/`RoutePlan` exchanges `schema_version`, `request_id`, cache hints, and typed error metadata so upgrades remain safe.
-- Budgets, estimates, and cost hints use **micro** units; routers can emit tokenizer hints, latency/cost targets, stickiness tokens, and prompt overlay metadata.
-- Cache + stickiness semantics (`ttl_ms`, `valid_until`, `freeze_key`, `plan_token`) let Routiium deterministically reuse plans while `X-Route-Cache` and `Router-Schema` headers provide observability.
-- Privacy controls (`privacy_mode`, `content_attestation`, `content_used`) make it explicit how much transcript content the router consumed.
-- `RouteFeedback`, `plan_batch`, `prefetch`, and the catalog endpoints (`/catalog/models`) are part of the same spec; Routiium ships `examples/router_service.rs` as a runnable reference implementation.
+### Config Reload
 
-If you are implementing a Router, start with that document—the server expects the exact fields, headers, and error codes described there and falls back gracefully only when `ROUTIIUM_ROUTER_STRICT` is disabled.
+| Route | Description |
+| ----- | ----------- |
+| `POST /reload/mcp` | Reload MCP config. |
+| `POST /reload/system_prompt` | Reload system prompts. |
+| `POST /reload/routing` | Reload routing config. |
+| `POST /reload/all` | Reload all configs. |
 
-## System Prompts & MCP Tools
+Full request/response documentation with curl examples: [docs/API_REFERENCE.md](docs/API_REFERENCE.md).
 
-- **System prompts:** `--system-prompt-config` points to a JSON file with `global`, `per_model`, and `per_api` prompts plus an `injection_mode` (`prepend`, `append`, or `replace`). Prompts are applied to `/v1/responses`, `/v1/chat/completions`, and `/convert`, and you can hot-reload the file via `/reload/system_prompt`.
-- **Model Context Protocol:** `--mcp-config` points to your MCP config (`mcp.json`). On boot Routiium spawns each MCP server, lists available tools, and merges them into every request so clients automatically see both their declared tools and MCP-provided ones. Tool names are prefixed with `serverName_` (`filesystem_read_directory`, `postgres_run_query`, etc.). Use `/reload/mcp` after editing the config.
+## Documentation
 
-## API Key Lifecycle
-
-`ApiKeyManager` issues opaque tokens (`sk_<id>.<secret>`) whose secrets are never persisted (salted SHA-256 hashes only):
-
-- Backends are auto-detected at runtime (`ROUTIIUM_REDIS_URL` → Redis, else sled through the default `sled` feature, else memory). Override with `--keys-backend`.
-- Redis pool size is controlled through `ROUTIIUM_REDIS_POOL_MAX`.
-- Expiration policy is governed by `ROUTIIUM_KEYS_REQUIRE_EXPIRATION`, `ROUTIIUM_KEYS_ALLOW_NO_EXPIRATION`, and `ROUTIIUM_KEYS_DEFAULT_TTL_SECONDS`.
-- `/keys`, `/keys/generate`, `/keys/revoke`, and `/keys/set_expiration` cover the full key lifecycle. Set `ROUTIIUM_ADMIN_TOKEN` so these endpoints require `Authorization: Bearer <token>` in production.
-
-Managed mode validates tokens on every call; passthrough mode skips the manager and forwards whatever bearer the client sent.
-
-## Rate Limiting
-
-When rate limiting is enabled, every proxy request is checked against the resolved policy for the authenticated key before the upstream call is made. If any bucket is exhausted, Routiium returns HTTP 429 immediately with `X-RateLimit-*` headers.
-
-**Enabling:**
-
-```bash
-# Simplest: daily + per-minute limits, memory backend
-ROUTIIUM_RATE_LIMIT_BACKEND=memory \
-ROUTIIUM_RATE_LIMIT_DAILY=500 \
-ROUTIIUM_RATE_LIMIT_PER_MINUTE=100 \
-cargo run --release
-
-# File-based tiered policies, Redis backend
-ROUTIIUM_RATE_LIMIT_BACKEND=redis://localhost:6379 \
-cargo run --release -- --rate-limit-config=rate_limits.json
-```
-
-**Policy resolution order** (first match wins):
-1. Emergency block (always 429, bypasses policy lookup)
-2. Explicit per-key assignment via admin API
-3. File config `key_overrides` for the key ID
-4. Default policy set via admin API
-5. `default_policy` from the config file
-6. Unlimited (no limiting applied)
-
-**Live management** — no restarts required:
-
-```bash
-# Create a policy
-curl -X POST http://localhost:8088/admin/rate-limits/policies \
-  -H "Authorization: Bearer $ROUTIIUM_ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"id":"pro","buckets":[{"name":"daily","requests":5000,"window_seconds":86400}]}'
-
-# Assign to a key
-curl -X POST http://localhost:8088/admin/rate-limits/keys/sk_abc.xyz \
-  -H "Authorization: Bearer $ROUTIIUM_ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"policy_id":"pro"}'
-
-# Emergency block (instant, persisted)
-curl -X POST http://localhost:8088/admin/rate-limits/emergency \
-  -H "Authorization: Bearer $ROUTIIUM_ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"key_id":"sk_abc.xyz","duration_secs":3600,"reason":"abuse"}'
-```
-
-See [`docs/RATE_LIMITS.md`](docs/RATE_LIMITS.md) for the complete reference including concurrency limits, analytics, storage backend selection, and all admin endpoints.
-
-## Analytics & Pricing
-
-Analytics events are recorded in the request handlers for `/v1/chat/completions` and `/v1/responses` using shared extraction helpers:
-
-- Request metadata (endpoint, method, model, payload size, streaming flag, user agent, client IP).
-- Response metadata (status, body size, error message, streaming duration).
-- Auth metadata (key id + label when present, auth method).
-- Routing metadata (backend string, upstream mode, whether MCP/system prompts were used).
-- Token usage (prompt/completion/cached/reasoning tokens) and computed cost via `PricingConfig`.
-
-Token usage extraction supports both OpenAI Chat usage fields (`prompt_tokens`, `completion_tokens`) and Responses usage fields (`input_tokens`, `output_tokens`).
-
-Storage backends:
-
-- JSONL (`data/analytics.jsonl` by default; override via `ROUTIIUM_ANALYTICS_JSONL_PATH`).
-- Redis (`ROUTIIUM_ANALYTICS_REDIS_URL`, optional `ROUTIIUM_ANALYTICS_TTL_SECONDS`).
-- Sled (`ROUTIIUM_ANALYTICS_SLED_PATH`, compiled in by default).
-- Memory (`ROUTIIUM_ANALYTICS_FORCE_MEMORY=1`, optional `ROUTIIUM_ANALYTICS_MAX_EVENTS`).
-
-Operators can inspect and manage analytics through `/analytics/stats`, `/analytics/events`, `/analytics/aggregate`, `/analytics/export?format=csv`, and `/analytics/clear`. Costs come from the built-in OpenAI price cards unless you point `ROUTIIUM_PRICING_CONFIG` at your own JSON (prefix matching is supported). See [docs/ANALYTICS.md](docs/ANALYTICS.md) for the complete data model.
-
-## Operations & Observability
-
-- **Status & reloads:** `GET /status` reports version info, enabled features, config paths, routing stats, and analytics state. `/reload/mcp`, `/reload/system_prompt`, `/reload/routing`, and `/reload/all` re-read their respective files without restarting the server.
-- **Route headers:** When a Router plan is used Routiium forwards headers such as `x-route-id`, `router-schema`, `x-policy-rev`, and `x-resolved-model` so clients can trace which upstream handled the request.
-- **Logging:** `init_tracing` discovers `.env`, `.envfile`, or whatever you point `ENV_FILE`/`ENVFILE`/`DOTENV_PATH` at, then configures `tracing-subscriber` based on `RUST_LOG`.
-- **Proxies & CORS:** `build_http_client_from_env` honors `ROUTIIUM_NO_PROXY`, `ROUTIIUM_PROXY_URL`, `HTTP_PROXY`, and `HTTPS_PROXY`. `cors_config_from_env` applies the `CORS_*` knobs.
-- **Docker:** The provided image defaults to `BIND_ADDR=0.0.0.0:8088` and `ROUTIIUM_SLED_PATH=/data/keys.db`; mount `/data` if you want persistent key storage.
-
-## Additional Documentation & Examples
-
-- [docs/README.md](docs/README.md) – documentation index.
-- [docs/API_REFERENCE.md](docs/API_REFERENCE.md) – exhaustive request/response documentation with curl snippets.
-- [docs/ANALYTICS.md](docs/ANALYTICS.md) – analytics architecture, storage backends, API responses.
-- [docs/RATE_LIMITS.md](docs/RATE_LIMITS.md) – rate limiting implementation reference: buckets, policies, concurrency, admin API, storage backends, analytics.
-- [docs/PRODUCTION_HARDENING.md](docs/PRODUCTION_HARDENING.md) – deployment hardening checklist (secrets, admin routes, container security).
-- [docs/ROUTER_API_SPEC.md](docs/ROUTER_API_SPEC.md) – Router schema 1.1 and implementation guide (see `examples/router_service.rs` for a runnable Router).
-- `mcp.json.example`, `system_prompt.json.example`, `router_aliases.json.example` – starter configs for MCP servers, system prompts, and local router aliases.
-- `routing.json.example` – example of the experimental routing metadata file surfaced via `/status`.
+| Document | Description |
+| -------- | ----------- |
+| [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | Full API documentation with curl snippets. |
+| [docs/ANALYTICS.md](docs/ANALYTICS.md) | Analytics architecture and data model. |
+| [docs/RATE_LIMITS.md](docs/RATE_LIMITS.md) | Rate limiting reference. |
+| [docs/AWS_BEDROCK.md](docs/AWS_BEDROCK.md) | AWS Bedrock integration guide. |
+| [docs/ROUTER_API_SPEC.md](docs/ROUTER_API_SPEC.md) | Router Schema 1.1 specification. |
+| [docs/PRODUCTION_HARDENING.md](docs/PRODUCTION_HARDENING.md) | Deployment hardening checklist. |
 
 ## Development
 
@@ -325,38 +325,20 @@ cargo clippy --all-targets --all-features
 cargo test
 ```
 
-There is also a `python_tests/` directory with HTTP smoke tests; activate your preferred Python environment and run `pytest` if you modify the HTTP surface.
+HTTP smoke tests live in `python_tests/` — run with `pytest`.
 
 ### Responses CLI
 
-Need a manual multi-turn sanity check against the streaming Responses bridge? Use the lightweight helper:
+Manual multi-turn sanity check against the streaming proxy:
 
 ```bash
-ROUTIIUM_BASE=http://127.0.0.1:8088 \
-python python_tests/chat_cli.py --model gpt-4.1-nano
+ROUTIIUM_BASE=http://127.0.0.1:8088 python python_tests/chat_cli.py --model gpt-4.1-nano
 ```
 
-The script loads `.env`, calls `ROUTIIUM_BASE/keys/generate` (unless you pass `ROUTIIUM_ACCESS_TOKEN`), then streams Responses API calls through `ROUTIIUM_BASE/v1/responses` using the official OpenAI SDK. Commands: `/reset` to clear the conversation, `/exit` to quit.
+### Key Generator CLI
 
-Need to automate the smoke test? `python_tests/run_chat_cli_e2e.sh` bootstraps the Python env, (optionally) builds Routiium, launches the proxy, feeds a canned prompt into `chat_cli.py`, and tears things down when finished:
+Mint managed credentials from the command line:
 
 ```bash
-cd python_tests
-./run_chat_cli_e2e.sh --message "ping" --model gpt-4.1-nano
+ROUTIIUM_BASE=http://127.0.0.1:8088 python scripts/generate_api_key.py --label demo --ttl-seconds 86400
 ```
-
-Use `--reuse-server` to point at an already running proxy or `--transcript logs/chat_cli.txt` to archive the captured conversation.
-
-### Key generator CLI
-
-Need to mint managed credentials without crafting curl payloads? Use the bundled helper:
-
-```bash
-ROUTIIUM_BASE=http://127.0.0.1:8088 \
-python scripts/generate_api_key.py \
-  --label demo-session \
-  --ttl-seconds 86400 \
-  --scope inference
-```
-
-The script loads `.env`, hits `/keys/generate`, and prints either a friendly summary or `--json` output so you can pipe the token elsewhere. Use `--expires-at 2024-12-31T23:59:59Z` to pin an exact cutoff or add multiple `--scope` flags to match your policy. The bearer string is shown only once—store it securely.

@@ -1,0 +1,10 @@
+{
+  "name": "routiium-monorepo",
+  "private": true,
+  "scripts": {
+    "admin:install": "npm --prefix apps/admin install",
+    "admin:dev": "npm --prefix apps/admin run dev",
+    "admin:build": "npm --prefix apps/admin run build",
+    "admin:lint": "npm --prefix apps/admin run lint"
+  }
+}
