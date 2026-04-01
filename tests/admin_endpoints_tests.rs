@@ -56,6 +56,7 @@ fn app_state_with_keys(
         analytics,
         chat_history,
         pricing: Arc::new(PricingConfig::default()),
+        pricing_config_path: None,
         mcp_config_path: None,
         system_prompt_config_path: None,
         routing_config: Arc::new(RwLock::new(RoutingConfig::empty())),

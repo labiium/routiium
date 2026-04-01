@@ -2388,8 +2388,14 @@ async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl
         })
         .collect::<Vec<_>>();
     pricing_models.sort_by(|a, b| {
-        let a_model = a.get("model").and_then(|value| value.as_str()).unwrap_or("");
-        let b_model = b.get("model").and_then(|value| value.as_str()).unwrap_or("");
+        let a_model = a
+            .get("model")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let b_model = b
+            .get("model")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
         a_model.cmp(b_model)
     });
 
@@ -2612,7 +2618,10 @@ async fn admin_panel_update_mcp(
     }
 
     let Some(path) = state.mcp_config_path.as_ref() else {
-        return error_response(http::StatusCode::BAD_REQUEST, "MCP config is not file-backed");
+        return error_response(
+            http::StatusCode::BAD_REQUEST,
+            "MCP config is not file-backed",
+        );
     };
     let Some(manager_arc) = state.mcp_manager.as_ref() else {
         return error_response(
