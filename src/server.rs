@@ -801,6 +801,20 @@ fn insert_route_headers(builder: &mut HttpResponseBuilder, plan: &RoutePlan, res
     if let Some(content_used) = plan.content_used.as_deref() {
         builder.insert_header(("x-content-used", content_used.to_string()));
     }
+    if let Some(judge) = plan.judge.as_ref() {
+        if let Some(mode) = judge.mode.as_deref() {
+            builder.insert_header(("x-judge-mode", mode.to_string()));
+        }
+        if let Some(verdict) = judge.verdict.as_deref() {
+            builder.insert_header(("x-judge-verdict", verdict.to_string()));
+        }
+        if let Some(risk_level) = judge.risk_level.as_deref() {
+            builder.insert_header(("x-judge-risk", risk_level.to_string()));
+        }
+        if let Some(target) = judge.target.as_deref() {
+            builder.insert_header(("x-judge-target", target.to_string()));
+        }
+    }
 }
 
 fn router_error_response(
@@ -816,6 +830,71 @@ fn router_error_response(
     }
     let body = serde_json::json!({ "error": { "message": message } });
     builder.json(body)
+}
+
+fn router_plan_error_response(err: &RouteError) -> HttpResponse {
+    match err {
+        RouteError::Rejected {
+            status,
+            code,
+            message,
+            policy_rev,
+            retry_hint_ms,
+            body,
+        } => {
+            let status = actix_web::http::StatusCode::from_u16(*status)
+                .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
+            let mut builder = HttpResponse::build(status);
+            if let Some(retry_hint_ms) = retry_hint_ms {
+                builder.insert_header(("retry-after", retry_hint_ms.div_ceil(1000).to_string()));
+            }
+            if let Some(body) = body {
+                builder.json(body)
+            } else {
+                let mut error = serde_json::Map::new();
+                if let Some(code) = code {
+                    error.insert("code".to_string(), serde_json::json!(code));
+                }
+                error.insert("message".to_string(), serde_json::json!(message));
+                if let Some(policy_rev) = policy_rev {
+                    error.insert("policy_rev".to_string(), serde_json::json!(policy_rev));
+                }
+                if let Some(retry_hint_ms) = retry_hint_ms {
+                    error.insert(
+                        "retry_hint_ms".to_string(),
+                        serde_json::json!(retry_hint_ms),
+                    );
+                }
+                builder.json(serde_json::json!({ "error": error }))
+            }
+        }
+        RouteError::NoRoute(message) => HttpResponse::NotFound().json(serde_json::json!({
+            "error": {
+                "code": "NO_ROUTE",
+                "message": message
+            }
+        })),
+        RouteError::InvalidRequest(message) => HttpResponse::BadRequest().json(serde_json::json!({
+            "error": {
+                "code": "INVALID_REQUEST",
+                "message": message
+            }
+        })),
+        RouteError::Timeout(message)
+        | RouteError::Unavailable(message)
+        | RouteError::NetworkError(message) => HttpResponse::BadGateway().json(serde_json::json!({
+            "error": {
+                "code": "ROUTER_UNAVAILABLE",
+                "message": message
+            }
+        })),
+        RouteError::RouterError(message) => HttpResponse::BadGateway().json(serde_json::json!({
+            "error": {
+                "code": "ROUTER_ERROR",
+                "message": message
+            }
+        })),
+    }
 }
 
 fn extract_conversation_id(value: &serde_json::Value) -> Option<String> {
@@ -1711,10 +1790,7 @@ async fn responses_passthrough(
     let resolution = match resolve_upstream(&state, "responses", &mut body).await {
         Ok(res) => res,
         Err(err) => {
-            return error_response(
-                http::StatusCode::BAD_GATEWAY,
-                &format!("Router error: {}", err),
-            );
+            return router_plan_error_response(&err);
         }
     };
 
@@ -2937,7 +3013,10 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
             "enabled": router_enabled,
             "mode": router_mode,
             "policy": router_policy,
-            "url": router_url
+            "url": router_url,
+            "strict": state.router_strict,
+            "cache_ttl_ms": state.router_cache_ttl_ms,
+            "privacy_mode": state.router_privacy_mode
         },
         "features": {
             "auth": {
@@ -2967,7 +3046,10 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
                 "enabled": router_enabled,
                 "mode": router_mode,
                 "config_path": router_config_path,
-                "url": router_url
+                "url": router_url,
+                "strict": state.router_strict,
+                "cache_ttl_ms": state.router_cache_ttl_ms,
+                "privacy_mode": state.router_privacy_mode
             },
             "analytics": {
                 "enabled": analytics_enabled,
@@ -3331,10 +3413,7 @@ async fn chat_completions_passthrough(
     let resolution = match resolve_upstream(&state, "chat", &mut body).await {
         Ok(res) => res,
         Err(err) => {
-            return error_response(
-                http::StatusCode::BAD_GATEWAY,
-                &format!("Router error: {}", err),
-            );
+            return router_plan_error_response(&err);
         }
     };
 

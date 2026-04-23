@@ -255,6 +255,37 @@ async fn test_status_endpoint_includes_new_routes() {
 }
 
 #[actix_web::test]
+async fn test_status_endpoint_includes_router_runtime_contract() {
+    let app_state = AppState {
+        router_url: Some("http://router:9090".to_string()),
+        router_strict: true,
+        router_cache_ttl_ms: Some(0),
+        router_privacy_mode: "full".to_string(),
+        ..Default::default()
+    };
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(app_state))
+            .configure(config_routes),
+    )
+    .await;
+
+    let req = test::TestRequest::get().uri("/status").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let body = test::read_body(resp).await;
+    let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(body_json["router"]["mode"], "remote");
+    assert_eq!(body_json["router"]["strict"], true);
+    assert_eq!(body_json["router"]["cache_ttl_ms"], 0);
+    assert_eq!(body_json["router"]["privacy_mode"], "full");
+    assert_eq!(body_json["features"]["router"]["strict"], true);
+    assert_eq!(body_json["features"]["router"]["cache_ttl_ms"], 0);
+}
+
+#[actix_web::test]
 async fn test_health_endpoint() {
     let app_state = AppState::default();
     let app = test::init_service(

@@ -2,13 +2,11 @@ use actix_web::HttpResponse;
 use http::StatusCode;
 use tracing_subscriber::{fmt, EnvFilter};
 
-/// Initialize dotenv and structured tracing based on RUST_LOG.
-/// Enhanced:
-/// - Supports explicit env file paths via ENV_FILE, ENVFILE, DOTENV_PATH
-/// - Falls back to .envfile, then default .env
-/// - If all fail, tries a tolerant manual parser for ./.env (no overwrite of existing vars)
-/// - Logs the source used
-pub fn init_tracing() {
+/// Load environment variables from explicit env file hints, `.envfile`, or `.env`.
+///
+/// Existing process variables are not overwritten. The returned string describes
+/// the source that was loaded and is intended for startup observability.
+pub fn load_env() -> String {
     // Try explicit environment file variables first
     let mut env_source: String = "none".into();
     for key in ["ENV_FILE", "ENVFILE", "DOTENV_PATH"] {
@@ -89,6 +87,11 @@ pub fn init_tracing() {
         }
     }
 
+    env_source
+}
+
+/// Initialize structured tracing based on RUST_LOG and record the env source.
+pub fn init_tracing_with_env_source(env_source: &str) {
     // Initialize tracing (respects RUST_LOG potentially provided by the env file)
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info,tower_http=info".into());
     let subscriber = fmt().with_env_filter(EnvFilter::new(filter)).finish();
@@ -96,6 +99,12 @@ pub fn init_tracing() {
 
     // Log where the environment was loaded from for observability
     tracing::info!("Environment loaded from: {}", env_source);
+}
+
+/// Initialize dotenv and structured tracing based on RUST_LOG.
+pub fn init_tracing() {
+    let env_source = load_env();
+    init_tracing_with_env_source(&env_source);
 }
 
 /// Get the bind address for the HTTP server from env or default to 0.0.0.0:8088.
@@ -169,6 +178,12 @@ pub struct AppState {
     pub router_config_path: Option<String>,
     /// Remote router URL configured via ROUTIIUM_ROUTER_URL
     pub router_url: Option<String>,
+    /// Whether strict router mode is enabled for status/reporting.
+    pub router_strict: bool,
+    /// Configured remote router cache TTL in milliseconds when known.
+    pub router_cache_ttl_ms: Option<u64>,
+    /// Router privacy mode used when constructing route requests.
+    pub router_privacy_mode: String,
     /// Rate limiting and concurrency manager
     pub rate_limit_manager: Option<std::sync::Arc<crate::rate_limit::RateLimitManager>>,
 }
@@ -271,6 +286,9 @@ impl Default for AppState {
             router_client: None,
             router_config_path: None,
             router_url: None,
+            router_strict: false,
+            router_cache_ttl_ms: None,
+            router_privacy_mode: "features".to_string(),
             rate_limit_manager: None,
         }
     }
@@ -313,6 +331,9 @@ impl AppState {
             router_client: None,
             router_config_path: None,
             router_url: None,
+            router_strict: false,
+            router_cache_ttl_ms: None,
+            router_privacy_mode: "features".to_string(),
             rate_limit_manager: None,
         }
     }
@@ -356,6 +377,9 @@ impl AppState {
             router_client: None,
             router_config_path: None,
             router_url: None,
+            router_strict: false,
+            router_cache_ttl_ms: None,
+            router_privacy_mode: "features".to_string(),
             rate_limit_manager: None,
         }
     }

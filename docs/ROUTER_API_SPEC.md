@@ -165,7 +165,14 @@ Routers SHOULD reject requests with unknown `schema_version` unless they can dow
     "explain": "T1 cheap model selected; budget OK; latency target met"
   },
   "policy_rev": "pol_v5",   // legacy scalar for backwards compatibility
-  "content_used": "none"
+  "content_used": "none",
+  "judge": {
+    "mode": "enforce",
+    "verdict": "downgrade",
+    "risk_level": "medium",
+    "reason": "Safer/cheaper model satisfies this request",
+    "target": "gpt-4o-mini-2024-07-18"
+  }
 }
 ```
 
@@ -179,10 +186,12 @@ Routers SHOULD reject requests with unknown `schema_version` unless they can dow
 | `X-Route-Cache` | `miss`, `hit`, or `stale`. |
 | `X-Route-Id` / `X-Resolved-Model` / `X-Route-Tier` / `X-Policy-Rev` | Propagated for observability. |
 | `X-Content-Used` | Echo of `content_used` for audit logs. |
+| `X-Judge-Mode` / `X-Judge-Verdict` / `X-Judge-Risk` / `X-Judge-Target` | Optional LLM-judge observability when the Router includes judge metadata. |
 
 ### Cache & Stickiness Semantics
 
 - `ttl_ms` defines the soft lifetime for reuse. Routiium also honours `valid_until` when provided.
+- Routers that run an LLM judge on every request SHOULD set `ttl_ms: 0` for judged plans unless their cache key includes content fingerprints strong enough to preserve the judging guarantee.
 - `freeze_key` lets routers invalidate a single cached plan without altering revisions.
 - `stickiness.plan_token` (with optional `max_turns`/`expires_at`) instructs Routiium to reuse the plan for future turns by sending the token back in `RouteRequest.plan_token`.
 

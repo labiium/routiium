@@ -171,5 +171,6 @@ pub fn sample_plan(route_id: &str, model_id: &str) -> RoutePlan {
             expires_at: Some("2099-01-01T00:00:00Z".to_string()),
         }),
         content_used: Some("none".to_string()),
+        judge: None,
     }
 }

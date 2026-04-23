@@ -1,4 +1,17 @@
 # Routiium Router Usage Guide
+## CLI shortcuts
+
+Use the Routiium CLI for the common rollout loop:
+
+```bash
+routiium init --profile router --out .env
+routiium doctor --env-file .env --check-router
+routiium router probe --model <alias>
+routiium judge profile shadow --out .env
+```
+
+The CLI does not replace the Router API contract below; it gives operators a faster way to scaffold env files and verify the Routiium-to-Router path.
+
 
 The router layer lets Routiium resolve human-friendly model aliases into concrete upstream endpoints and policies. This guide explains how routing decisions are made, which configuration hooks are available, how to wire everything up in Docker, and how to verify and troubleshoot router integration.
 
@@ -62,14 +75,73 @@ The router’s `RoutePlan.content_used` field (and the `X-Content-Used` response
 ## 4. Plans, Caching, and Headers
 
 - Each `RoutePlan` carries cache metadata (`cache.ttl_ms`, `cache.valid_until`, `cache.freeze_key`). Routiium also exposes `ROUTIIUM_CACHE_TTL_MS` to override the default 15 s cache horizon for remote routers.  
+- For per-request LLM judging, configure the Router to return `cache.ttl_ms: 0` (or set `ROUTIIUM_CACHE_TTL_MS=0` as a belt-and-braces default) so each routed request reaches the judge. Cached alias-level plans are intentionally too coarse for a hard “every request is judged” guarantee.
 - Plans that include `stickiness.plan_token` cause Routiium to send that token back to the router on the next turn so multi-turn conversations stay on the same upstream.  
 - Observability headers forwarded to clients:
   - `x-route-id`: Router-generated identifier (helps correlate downstream logs).
   - `x-resolved-model`: Actual upstream model ID.
   - `x-policy-rev` and `router-schema`: Policy metadata + schema version.
   - `x-content-used`: Privacy attestation from the router.
+  - `x-judge-mode`, `x-judge-verdict`, `x-judge-risk`, `x-judge-target`: LLM judge observability when the Router includes judge metadata.
   - `x-route-cache`: `hit`, `miss`, or `stale` when the router exposed cache hints.
-- When strict mode is disabled (default), failed router lookups fall back to `ROUTIIUM_BACKENDS`. Enabling `ROUTIIUM_ROUTER_STRICT=1` converts router errors into 502s so callers notice misconfigured aliases immediately.
+- When strict mode is disabled (default), failed router lookups fall back to `ROUTIIUM_BACKENDS`. Enabling `ROUTIIUM_ROUTER_STRICT=1` preserves structured Router error statuses (for example `403 POLICY_DENY` or `409 NO_ROUTE`) so callers notice misconfigured aliases and policy denials immediately.
+
+### Strict vs non-strict routing policy
+
+| Setting | Router unavailable | Router policy denial | Judge enforcement guarantee | Recommended use |
+| --- | --- | --- | --- | --- |
+| `ROUTIIUM_ROUTER_STRICT=1` | Client receives structured router error | Client receives policy denial | Enforceable when Router returns zero-TTL judged plans | Judge/policy-sensitive production |
+| unset / `0` | Routiium may fall back to legacy routing | Routiium may fall back where safe | Not guaranteed; judge may be bypassed by fallback | Development or best-effort routing |
+
+
+### 4.1 LLM-as-Judge Router
+
+Routiium’s recommended LLM-as-judge pattern is to put the judge inside the remote Router/EduRouter. Routiium already sends every routed alias through `/route/plan`, so the Router can call a judge model, then return a normal `RoutePlan` for `allow`/`downgrade` decisions or a structured router error for `deny`.
+
+**Guarantee checklist: every routed request is judged**
+
+- Clients use judged aliases, not direct model names that bypass the Router.
+- `ROUTIIUM_ROUTER_URL` points at the judging Router.
+- `ROUTIIUM_ROUTER_STRICT=1` so Router failures do not silently fall back to legacy routing.
+- `ROUTIIUM_ROUTER_PRIVACY_MODE=full` when the judge needs the system prompt and recent turns.
+- The Router returns `cache.ttl_ms: 0` for judged decisions, or Routiium is launched with `ROUTIIUM_CACHE_TTL_MS=0`.
+
+**Bundled example Router profiles**
+
+```bash
+# Try safely: judge runs, but does not block or downgrade.
+ROUTER_JUDGE_MODE=shadow
+ROUTER_JUDGE_CONTEXT=full
+ROUTER_JUDGE_FAILURE=allow
+
+# Production enforce: judge can allow, downgrade, or deny.
+ROUTER_JUDGE_MODE=enforce
+ROUTER_JUDGE_CONTEXT=full
+ROUTER_JUDGE_FAILURE=deny
+
+# Soft-degrade enforce: judge outage routes to a safe model instead of failing.
+ROUTER_JUDGE_MODE=enforce
+ROUTER_JUDGE_FAILURE=safe_model
+ROUTER_JUDGE_SAFE_MODEL=gpt-4o-mini-2024-07-18
+```
+
+Judge provider configuration for the example Router:
+
+```bash
+ROUTER_JUDGE_BASE_URL=https://api.openai.com/v1
+ROUTER_JUDGE_MODEL=gpt-4o-mini
+ROUTER_JUDGE_API_KEY_ENV=OPENAI_API_KEY
+ROUTER_JUDGE_TIMEOUT_MS=800
+```
+
+Routiium side:
+
+```bash
+ROUTIIUM_ROUTER_URL=http://router:9090
+ROUTIIUM_ROUTER_STRICT=1
+ROUTIIUM_ROUTER_PRIVACY_MODE=full
+ROUTIIUM_CACHE_TTL_MS=0
+```
 
 ---
 
@@ -128,8 +200,7 @@ The router’s `RoutePlan.content_used` field (and the `X-Content-Used` response
      "mode": "remote",
      "url": "http://127.0.0.1:9090",
      "strict": false,
-     "cache_hits": 0,
-     "cache_misses": 0,
+     "cache_ttl_ms": 60000,
      "privacy_mode": "features"
    }
    ```
@@ -243,8 +314,7 @@ Expected output (remote router):
   "mode": "remote",
   "url": "http://router:9090",
   "strict": false,
-  "cache_hits": 42,
-  "cache_misses": 18,
+  "cache_ttl_ms": 60000,
   "privacy_mode": "features"
 }
 ```
@@ -321,7 +391,7 @@ docker exec routiium env | grep ROUTIIUM_ROUTER
 **Symptoms:**
 - Router returns 404 or error
 - Logs show "Router rejected alias"
-- With `ROUTIIUM_ROUTER_STRICT=1`: request fails with 502
+- With `ROUTIIUM_ROUTER_STRICT=1`: Routiium preserves the Router's structured status/body, such as `404 ALIAS_UNKNOWN` or `409 NO_ROUTE`
 
 **Diagnosis:**
 ```bash
@@ -368,8 +438,8 @@ time curl -X POST http://router:9090/route/plan \
     "caps":["text"]
   }'
 
-# 2. Check cache effectiveness
-curl http://localhost:8088/status | jq '.router | {cache_hits, cache_misses}'
+# 2. Check cache configuration
+curl http://localhost:8088/status | jq '.router | {strict, cache_ttl_ms, privacy_mode}'
 
 # 3. Monitor router performance
 curl http://localhost:8088/analytics/aggregate | \
@@ -464,10 +534,9 @@ Allows graceful fallback to legacy routing if router is unavailable.
 # Add to monitoring script
 curl -f http://router:9090/capabilities || alert "Router down"
 
-# Check cache efficiency
-cache_ratio=$(curl -s http://localhost:8088/status | \
-  jq -r '.router | .cache_hits / (.cache_hits + .cache_misses)')
-echo "Cache hit ratio: $cache_ratio"
+# Check Routiium router policy posture
+curl -s http://localhost:8088/status | \
+  jq '.router | {strict, cache_ttl_ms, privacy_mode}'
 ```
 
 **Alert on Fallback Usage:**
@@ -679,7 +748,7 @@ docker logs routiium 2>&1 | tail -20 | grep "falling back"
 # Enable strict mode
 docker exec routiium sh -c 'export ROUTIIUM_ROUTER_STRICT=1'
 
-# Request should fail with 502 when router is down
+# Request should fail instead of falling back when router is down
 curl -X POST http://localhost:8088/v1/chat/completions \
   -H "Authorization: Bearer sk_test.abc" \
   -H "Content-Type: application/json" \
@@ -688,7 +757,8 @@ curl -X POST http://localhost:8088/v1/chat/completions \
     "messages": [{"role":"user","content":"test"}]
   }' | jq
 
-# Expected: 502 Bad Gateway with error message
+# Expected: 502 Bad Gateway for connectivity failures, or the Router's structured
+# status/body for reachable policy errors such as 403 POLICY_DENY.
 ```
 
 ---
@@ -710,18 +780,13 @@ curl http://localhost:8088/analytics/events?limit=100 | jq '
 '
 ```
 
-**Cache efficiency analysis:**
+**Cache configuration check:**
 ```bash
-# Analyze cache hit rates over time
-curl http://localhost:8088/analytics/aggregate | jq '{
-  total_requests,
-  router_stats: {
-    cache_hits: (.router_cache_hits // 0),
-    cache_misses: (.router_cache_misses // 0),
-    hit_ratio: ((.router_cache_hits // 0) / ((.router_cache_hits // 0) + (.router_cache_misses // 0)))
-  }
-}'
+# Routiium exposes configured router cache TTL, not hit/miss counters.
+curl http://localhost:8088/status | jq '.router | {cache_ttl_ms, strict, privacy_mode}'
 ```
+
+Use request analytics and Router-side telemetry for cache hit-rate analysis.
 
 ### 9.2 Cost Analysis with Router
 
@@ -802,6 +867,11 @@ curl http://localhost:8088/analytics/events?limit=500 | jq '
 | `ROUTIIUM_ROUTER_MTLS` | unset | Enable mutual TLS for router calls (certs must already exist on the host). |
 | `ROUTIIUM_CACHE_TTL_MS` | `15000` | Cache horizon for router plans when using `HttpRouterClient`. |
 | `ROUTIIUM_BACKENDS` | unset | Semicolon-separated fallback rules (`prefix=edu,base=https://...,key_env=OPENAI_API_KEY,mode=responses`). |
+| `ROUTER_JUDGE_MODE` | `off` | Example Router judge mode (`off`, `shadow`, `enforce`). |
+| `ROUTER_JUDGE_CONTEXT` | `full` | Example Router judge context profile (`features`, `summary`, `full`). |
+| `ROUTER_JUDGE_FAILURE` | `deny` | Example Router behavior when the judge is unavailable (`allow`, `deny`, `safe_model`). |
+| `ROUTER_JUDGE_MODEL` | `gpt-4o-mini` | Example Router LLM judge model. |
+| `ROUTER_JUDGE_SAFE_MODEL` | `gpt-4o-mini-2024-07-18` | Safe model used by `ROUTER_JUDGE_FAILURE=safe_model`. |
 
 Keep provider keys (e.g., `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY`) available in the environment so router plans referencing `auth_env` succeed.
 

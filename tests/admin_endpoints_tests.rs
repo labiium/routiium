@@ -64,6 +64,9 @@ fn app_state_with_keys(
         router_client: None,
         router_config_path: None,
         router_url: None,
+        router_strict: false,
+        router_cache_ttl_ms: None,
+        router_privacy_mode: "features".to_string(),
         rate_limit_manager: None,
     }
 }

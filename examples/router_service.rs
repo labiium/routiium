@@ -14,14 +14,121 @@
 //! ```
 
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, Responder};
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 // Re-use types from routiium
 use routiium::router_client::{
-    CacheControl, Capabilities, CatalogModel, CostCard, ModelCatalog, ModelLimits, PolicyInfo,
-    PromptOverlays, RecentMetrics, RouteFeedback, RouteHints, RouteLimits, RoutePlan, RouteRequest,
-    SLOs, Stickiness, UpstreamConfig, UpstreamMode,
+    CacheControl, Capabilities, CatalogModel, CostCard, JudgeMetadata, ModelCatalog, ModelLimits,
+    PolicyInfo, PromptOverlays, RecentMetrics, RouteFeedback, RouteHints, RouteLimits, RoutePlan,
+    RouteRequest, SLOs, Stickiness, UpstreamConfig, UpstreamMode,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JudgeMode {
+    Off,
+    Shadow,
+    Enforce,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JudgeFailureBehavior {
+    Allow,
+    Deny,
+    SafeModel,
+}
+
+#[derive(Clone, Debug)]
+struct JudgeConfig {
+    mode: JudgeMode,
+    context: String,
+    failure: JudgeFailureBehavior,
+    base_url: String,
+    model: String,
+    api_key_env: String,
+    timeout_ms: u64,
+    safe_model: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct JudgeDecision {
+    verdict: String,
+    #[serde(default)]
+    risk_level: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+}
+
+impl JudgeDecision {
+    fn verdict_normalized(&self) -> &str {
+        match self.verdict.to_ascii_lowercase().as_str() {
+            "allow" => "allow",
+            "downgrade" => "downgrade",
+            "deny" => "deny",
+            _ => "invalid",
+        }
+    }
+
+    fn validate(self) -> Result<Self, String> {
+        if self.verdict_normalized() == "invalid" {
+            Err(format!("unsupported judge verdict: {}", self.verdict))
+        } else {
+            Ok(self)
+        }
+    }
+
+    fn is_deny(&self) -> bool {
+        self.verdict_normalized() == "deny"
+    }
+
+    fn is_downgrade(&self) -> bool {
+        self.verdict_normalized() == "downgrade"
+    }
+}
+
+impl JudgeConfig {
+    fn from_env() -> Self {
+        let mode = match env_string("ROUTER_JUDGE_MODE", "off")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "shadow" => JudgeMode::Shadow,
+            "enforce" => JudgeMode::Enforce,
+            _ => JudgeMode::Off,
+        };
+        let failure = match env_string("ROUTER_JUDGE_FAILURE", "deny")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "allow" | "fail_open" => JudgeFailureBehavior::Allow,
+            "safe_model" | "safe-model" | "safe" => JudgeFailureBehavior::SafeModel,
+            _ => JudgeFailureBehavior::Deny,
+        };
+        Self {
+            mode,
+            context: env_string("ROUTER_JUDGE_CONTEXT", "full"),
+            failure,
+            base_url: env_string("ROUTER_JUDGE_BASE_URL", "https://api.openai.com/v1"),
+            model: env_string("ROUTER_JUDGE_MODEL", "gpt-4o-mini"),
+            api_key_env: env_string("ROUTER_JUDGE_API_KEY_ENV", "OPENAI_API_KEY"),
+            timeout_ms: env_string("ROUTER_JUDGE_TIMEOUT_MS", "800")
+                .parse()
+                .unwrap_or(800),
+            safe_model: env_string("ROUTER_JUDGE_SAFE_MODEL", "gpt-4o-mini-2024-07-18"),
+        }
+    }
+}
+
+fn env_string(name: &str, default: &str) -> String {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
 
 /// Shared router state
 struct RouterState {
@@ -33,6 +140,10 @@ struct RouterState {
     feedback_log: Arc<Mutex<Vec<RouteFeedback>>>,
     /// Request counter for route IDs
     route_counter: Arc<Mutex<u64>>,
+    /// Optional LLM-as-judge configuration
+    judge_config: JudgeConfig,
+    /// Shared HTTP client for LLM judge calls.
+    judge_client: reqwest::Client,
 }
 
 impl RouterState {
@@ -186,6 +297,12 @@ impl RouterState {
             },
         ];
 
+        let judge_config = JudgeConfig::from_env();
+        let judge_client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(judge_config.timeout_ms))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Self {
             catalog: ModelCatalog {
                 revision: "cat_v1".to_string(),
@@ -194,6 +311,8 @@ impl RouterState {
             catalog_revision: Arc::new(Mutex::new(1)),
             feedback_log: Arc::new(Mutex::new(Vec::new())),
             route_counter: Arc::new(Mutex::new(1)),
+            judge_config,
+            judge_client,
         }
     }
 
@@ -233,6 +352,153 @@ async fn get_catalog(state: web::Data<RouterState>, req: HttpRequest) -> impl Re
     response
 }
 
+fn judge_metadata(config: &JudgeConfig, decision: &JudgeDecision) -> JudgeMetadata {
+    JudgeMetadata {
+        mode: Some(
+            match config.mode {
+                JudgeMode::Off => "off",
+                JudgeMode::Shadow => "shadow",
+                JudgeMode::Enforce => "enforce",
+            }
+            .to_string(),
+        ),
+        verdict: Some(decision.verdict.clone()),
+        risk_level: decision.risk_level.clone(),
+        reason: decision.reason.clone(),
+        target: decision.target.clone(),
+    }
+}
+
+fn judge_context(req: &RouteRequest, context: &str) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "alias": req.alias,
+        "api": req.api,
+        "caps": req.caps,
+        "stream": req.stream,
+        "params": req.params,
+        "estimates": req.estimates,
+        "tools": req.tools,
+        "content_attestation": req.content_attestation,
+    });
+
+    let include_full = context.eq_ignore_ascii_case("full");
+    let include_summary = include_full || context.eq_ignore_ascii_case("summary");
+    if let Some(obj) = value.as_object_mut() {
+        if include_summary {
+            obj.insert(
+                "conversation_summary".to_string(),
+                serde_json::json!(req.conversation.summary),
+            );
+        }
+        if include_full {
+            obj.insert(
+                "system_prompt".to_string(),
+                serde_json::json!(req.conversation.system_prompt),
+            );
+            obj.insert(
+                "recent_messages".to_string(),
+                serde_json::json!(req.conversation.recent_messages),
+            );
+        }
+    }
+    value
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionResponse {
+    choices: Vec<ChatChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatChoice {
+    message: ChatMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatMessage {
+    content: Option<String>,
+}
+
+async fn call_llm_judge(
+    config: &JudgeConfig,
+    client: &reqwest::Client,
+    req: &RouteRequest,
+) -> Result<JudgeDecision, String> {
+    let api_key = std::env::var(&config.api_key_env)
+        .map_err(|_| format!("missing {}", config.api_key_env))?;
+    let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
+    let prompt = serde_json::json!({
+        "role": "system",
+        "content": "You are a routing policy judge. Return only JSON with keys: verdict (allow|downgrade|deny), risk_level (low|medium|high), reason, target. Deny unsafe or policy-violating requests. Downgrade requests that should use a safer/cheaper model."
+    });
+    let request_context = serde_json::json!({
+        "role": "user",
+        "content": serde_json::to_string(&judge_context(req, &config.context)).unwrap_or_default()
+    });
+    let response = client
+        .post(url)
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({
+            "model": config.model,
+            "messages": [prompt, request_context],
+            "temperature": 0,
+            "response_format": {"type": "json_object"}
+        }))
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("judge returned {}", response.status()));
+    }
+    let parsed = response
+        .json::<ChatCompletionResponse>()
+        .await
+        .map_err(|err| err.to_string())?;
+    let content = parsed
+        .choices
+        .first()
+        .and_then(|choice| choice.message.content.as_deref())
+        .ok_or_else(|| "judge response did not include content".to_string())?;
+    serde_json::from_str::<JudgeDecision>(content)
+        .map_err(|err| err.to_string())?
+        .validate()
+}
+
+async fn run_judge(
+    config: &JudgeConfig,
+    client: &reqwest::Client,
+    req: &RouteRequest,
+) -> Result<JudgeDecision, String> {
+    if config.mode == JudgeMode::Off {
+        return Ok(JudgeDecision {
+            verdict: "allow".to_string(),
+            risk_level: Some("low".to_string()),
+            reason: Some("judge disabled".to_string()),
+            target: None,
+        });
+    }
+    call_llm_judge(config, client, req).await
+}
+
+fn resolve_judge_target(catalog: &ModelCatalog, target: &str) -> Option<(String, String)> {
+    let target = target.trim();
+    if target.eq_ignore_ascii_case("local") {
+        return Some((
+            "llama-3.1-70b-instruct".to_string(),
+            "local-vllm".to_string(),
+        ));
+    }
+    if target.eq_ignore_ascii_case("gpt-4o-mini") {
+        return Some(("gpt-4o-mini-2024-07-18".to_string(), "openai".to_string()));
+    }
+
+    catalog
+        .models
+        .iter()
+        .find(|model| model.id == target || model.aliases.iter().any(|alias| alias == target))
+        .map(|model| (model.id.clone(), model.provider.clone()))
+}
+
 /// POST /route/plan - Make routing decision
 async fn route_plan(state: web::Data<RouterState>, req: web::Json<RouteRequest>) -> impl Responder {
     let start = std::time::Instant::now();
@@ -243,16 +509,91 @@ async fn route_plan(state: web::Data<RouterState>, req: web::Json<RouteRequest>)
         route_req.alias, route_req.api, route_req.privacy_mode, route_req.caps
     );
 
+    let judge_decision = match run_judge(&state.judge_config, &state.judge_client, &route_req).await
+    {
+        Ok(decision) => decision,
+        Err(err) => match state.judge_config.failure {
+            JudgeFailureBehavior::Allow => JudgeDecision {
+                verdict: "allow".to_string(),
+                risk_level: Some("unknown".to_string()),
+                reason: Some(format!("judge unavailable; fail-open: {err}")),
+                target: None,
+            },
+            JudgeFailureBehavior::SafeModel => JudgeDecision {
+                verdict: "downgrade".to_string(),
+                risk_level: Some("unknown".to_string()),
+                reason: Some(format!("judge unavailable; safe-model fallback: {err}")),
+                target: Some(state.judge_config.safe_model.clone()),
+            },
+            JudgeFailureBehavior::Deny => {
+                return HttpResponse::ServiceUnavailable()
+                    .insert_header(("Router-Schema", "1.1"))
+                    .json(serde_json::json!({
+                        "error": {
+                            "code": "ROUTER_OVERLOADED",
+                            "message": format!("Judge unavailable: {err}"),
+                            "policy_rev": state.policy_revision()
+                        }
+                    }));
+            }
+        },
+    };
+    let judge = if state.judge_config.mode == JudgeMode::Off {
+        None
+    } else {
+        Some(judge_metadata(&state.judge_config, &judge_decision))
+    };
+
+    if state.judge_config.mode == JudgeMode::Enforce && judge_decision.is_deny() {
+        return HttpResponse::Forbidden()
+            .insert_header(("Router-Schema", "1.1"))
+            .insert_header(("X-Judge-Mode", "enforce"))
+            .insert_header(("X-Judge-Verdict", "deny"))
+            .json(serde_json::json!({
+                "error": {
+                    "code": "POLICY_DENY",
+                    "message": judge_decision.reason.unwrap_or_else(|| "Request denied by judge".to_string()),
+                    "policy_rev": state.policy_revision()
+                }
+            }));
+    }
+
     // Simple routing policy: map aliases to models
-    let (model_id, provider) = match route_req.alias.as_str() {
-        "labiium-001" | "edu-hint" => ("gpt-4o-mini-2024-07-18", "openai"),
-        "labiium-smart" | "edu-solution" => ("gpt-4o", "openai"),
-        "labiium-local" => ("llama-3.1-70b-instruct", "local-vllm"),
+    let (mut model_id, mut provider) = match route_req.alias.as_str() {
+        "labiium-001" | "edu-hint" => ("gpt-4o-mini-2024-07-18".to_string(), "openai".to_string()),
+        "labiium-smart" | "edu-solution" => ("gpt-4o".to_string(), "openai".to_string()),
+        "labiium-local" => (
+            "llama-3.1-70b-instruct".to_string(),
+            "local-vllm".to_string(),
+        ),
         _ => {
             // Default to gpt-4o-mini
-            ("gpt-4o-mini-2024-07-18", "openai")
+            ("gpt-4o-mini-2024-07-18".to_string(), "openai".to_string())
         }
     };
+
+    if state.judge_config.mode == JudgeMode::Enforce && judge_decision.is_downgrade() {
+        let target = judge_decision
+            .target
+            .as_deref()
+            .unwrap_or(&state.judge_config.safe_model);
+        let Some((target_model, target_provider)) = resolve_judge_target(&state.catalog, target)
+        else {
+            return HttpResponse::Conflict()
+                .insert_header(("Router-Schema", "1.1"))
+                .insert_header(("X-Judge-Mode", "enforce"))
+                .insert_header(("X-Judge-Verdict", "downgrade"))
+                .json(serde_json::json!({
+                    "error": {
+                        "code": "NO_ROUTE",
+                        "message": format!("Judge target is not in router catalog: {target}"),
+                        "policy_rev": state.policy_revision()
+                    }
+                }));
+        };
+        model_id = target_model;
+        provider = target_provider;
+    }
 
     // Find model in catalog for cost/SLO info
     let catalog_model = state
@@ -263,7 +604,7 @@ async fn route_plan(state: web::Data<RouterState>, req: web::Json<RouteRequest>)
         .cloned();
 
     // Build upstream config
-    let (base_url, auth_env) = match provider {
+    let (base_url, auth_env) = match provider.as_str() {
         "openai" => (
             "https://api.openai.com/v1".to_string(),
             Some("OPENAI_API_KEY".to_string()),
@@ -282,7 +623,7 @@ async fn route_plan(state: web::Data<RouterState>, req: web::Json<RouteRequest>)
         } else {
             UpstreamMode::Responses
         },
-        model_id: model_id.to_string(),
+        model_id: model_id.clone(),
         auth_env,
         headers: None,
     };
@@ -308,7 +649,7 @@ async fn route_plan(state: web::Data<RouterState>, req: web::Json<RouteRequest>)
             est_cost_micro,
             currency: Some(model.cost.currency.clone()),
             est_latency_ms: model.slos.recent.as_ref().and_then(|r| r.p50_ms),
-            provider: Some(provider.to_string()),
+            provider: Some(provider.clone()),
             penalty: None,
         }
     } else {
@@ -351,7 +692,11 @@ async fn route_plan(state: web::Data<RouterState>, req: web::Json<RouteRequest>)
         hints,
         fallbacks: vec![],
         cache: Some(CacheControl {
-            ttl_ms: 15000,
+            ttl_ms: if state.judge_config.mode == JudgeMode::Off {
+                15000
+            } else {
+                0
+            },
             etag: Some(format!(
                 "\"{}@{}\"",
                 state.catalog.revision,
@@ -382,6 +727,7 @@ async fn route_plan(state: web::Data<RouterState>, req: web::Json<RouteRequest>)
             .as_ref()
             .and_then(|c| c.included.clone())
             .or(Some("none".to_string())),
+        judge,
     };
 
     println!(
@@ -415,6 +761,15 @@ async fn route_plan(state: web::Data<RouterState>, req: web::Json<RouteRequest>)
                 .unwrap_or_else(|| "none".to_string()),
         ))
         .insert_header(("X-Route-Cache", "miss"))
+        .insert_header((
+            "X-Judge-Mode",
+            match state.judge_config.mode {
+                JudgeMode::Off => "off",
+                JudgeMode::Shadow => "shadow",
+                JudgeMode::Enforce => "enforce",
+            },
+        ))
+        .insert_header(("X-Judge-Verdict", judge_decision.verdict.clone()))
         .insert_header((
             "Router-Latency",
             format!("{}ms", start.elapsed().as_millis()),

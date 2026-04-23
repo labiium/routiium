@@ -670,6 +670,34 @@ pub struct PolicyInfo {
     pub explain: Option<String>,
 }
 
+/// Optional LLM-judge metadata attached to a routing decision.
+///
+/// Routers can use this to disclose whether a per-request judge allowed,
+/// downgraded, or denied a request before selecting an upstream. Routiium does
+/// not make policy decisions from this field; it forwards it for observability.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JudgeMetadata {
+    /// Judge operating mode (for example: "shadow" or "enforce").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+
+    /// Judge verdict (for example: "allow", "downgrade", or "deny").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
+
+    /// Judge-assigned risk level.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_level: Option<String>,
+
+    /// Human-readable reason for audit/debug views.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    /// Judge-selected model or tier, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
 /// Complete routing plan from Router (v0.3)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutePlan {
@@ -718,6 +746,10 @@ pub struct RoutePlan {
     /// Declared content usage level
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_used: Option<String>,
+
+    /// Optional LLM-judge decision metadata for observability.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge: Option<JudgeMetadata>,
 }
 
 /// Token usage details for feedback
@@ -835,6 +867,16 @@ pub enum RouteError {
 
     #[error("Network error: {0}")]
     NetworkError(String),
+
+    #[error("Router rejected request ({status}): {message}")]
+    Rejected {
+        status: u16,
+        code: Option<String>,
+        message: String,
+        policy_rev: Option<String>,
+        retry_hint_ms: Option<u64>,
+        body: Option<serde_json::Value>,
+    },
 }
 
 /// Main RouterClient trait - thin, fast decision interface
@@ -988,6 +1030,37 @@ impl HttpRouterClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown error".to_string());
+            let parsed_body = serde_json::from_str::<serde_json::Value>(&body).ok();
+            let error_obj = parsed_body
+                .as_ref()
+                .and_then(|v| v.get("error"))
+                .or(parsed_body.as_ref());
+            let code = error_obj
+                .and_then(|v| v.get("code"))
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+            let message = error_obj
+                .and_then(|v| v.get("message"))
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| body.clone());
+            let policy_rev = error_obj
+                .and_then(|v| v.get("policy_rev"))
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+            let retry_hint_ms = error_obj
+                .and_then(|v| v.get("retry_hint_ms"))
+                .and_then(|v| v.as_u64());
+            if parsed_body.is_some() {
+                return Err(RouteError::Rejected {
+                    status: status.as_u16(),
+                    code,
+                    message,
+                    policy_rev,
+                    retry_hint_ms,
+                    body: parsed_body,
+                });
+            }
             return Err(RouteError::RouterError(format!(
                 "Router returned {}: {}",
                 status, body
@@ -1125,6 +1198,7 @@ impl LocalRouter for LocalPolicyRouter {
                         .to_string(),
                     )
                 }),
+            judge: None,
         })
     }
 }
@@ -1205,6 +1279,10 @@ impl RouterCache {
 
     /// Get cached plan if valid
     pub fn get(&self, req: &RouteRequest, policy_rev: Option<&str>) -> Option<RoutePlan> {
+        if self.default_ttl_ms == 0 {
+            return None;
+        }
+
         let key = Self::cache_key(req);
         let mut cache = self.cache.lock().ok()?;
 
@@ -1238,6 +1316,13 @@ impl RouterCache {
             .as_ref()
             .map(|c| c.ttl_ms)
             .unwrap_or(self.default_ttl_ms);
+
+        if self.default_ttl_ms == 0 || ttl_ms == 0 {
+            if let Ok(mut cache) = self.cache.lock() {
+                cache.remove(&key);
+            }
+            return;
+        }
 
         let expires_at = Instant::now() + Duration::from_millis(ttl_ms);
 
@@ -1989,6 +2074,7 @@ mod tests {
                     expires_at: None,
                 }),
                 content_used: Some("none".to_string()),
+                judge: None,
             })
         }
 
@@ -2133,6 +2219,7 @@ mod tests {
                 expires_at: None,
             }),
             content_used: Some("none".to_string()),
+            judge: None,
         };
 
         cache.put(&base_request, sample_plan.clone());
@@ -2143,6 +2230,13 @@ mod tests {
         // Different plan token should miss cache due to different key
         base_request.plan_token = Some("plan_b".to_string());
         assert!(cache.get(&base_request, Some("rev1")).is_none());
+
+        let zero_ttl_cache = RouterCache::new(0);
+        zero_ttl_cache.put(&base_request, sample_plan);
+        assert!(
+            zero_ttl_cache.get(&base_request, Some("rev1")).is_none(),
+            "zero default TTL must disable cache reads as well as writes"
+        );
     }
 
     #[tokio::test]
@@ -2199,11 +2293,17 @@ mod tests {
             .await
             .expect_err("router should return error");
         match err {
-            RouteError::RouterError(msg) => {
-                assert!(
-                    msg.contains("409"),
-                    "expected message to mention HTTP status: {msg}"
-                )
+            RouteError::Rejected {
+                status,
+                code,
+                message,
+                body,
+                ..
+            } => {
+                assert_eq!(status, 409);
+                assert_eq!(code.as_deref(), Some("ALIAS_UNKNOWN"));
+                assert_eq!(message, "alias not found");
+                assert!(body.is_some());
             }
             other => panic!("unexpected error variant: {:?}", other),
         }

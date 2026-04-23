@@ -1,23 +1,138 @@
+mod cli;
+
 use actix_web::{web, App, HttpServer};
+use cli::{Cli, Command, ServeArgs};
 use routiium::auth::ApiKeyManager;
 use routiium::mcp_client::McpClientManager;
 use routiium::mcp_config::McpConfig;
 use routiium::server::config_routes;
 use routiium::util::{
-    build_http_client_from_env, cors_config_from_env, env_bind_addr, init_tracing, AppState,
+    build_http_client_from_env, cors_config_from_env, env_bind_addr, init_tracing_with_env_source,
+    load_env, AppState,
 };
 use std::env;
+use std::path::Path;
 use std::sync::Arc;
 
 #[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    init_tracing();
+async fn main() -> anyhow::Result<()> {
+    if env::args_os().any(|arg| {
+        matches!(
+            arg.to_string_lossy().as_ref(),
+            "--help" | "-h" | "--version" | "-V"
+        )
+    }) {
+        let cli = Cli::parse_compat();
+        return dispatch(cli, None).await;
+    }
 
-    // Parse command line arguments
-    let args: Vec<String> = env::args().collect();
+    let env_source = load_env();
+    let cli = Cli::parse_compat();
+    dispatch(cli, Some(env_source)).await
+}
+
+async fn dispatch(cli: Cli, env_source: Option<String>) -> anyhow::Result<()> {
+    match cli
+        .command
+        .unwrap_or_else(|| Command::Serve(ServeArgs::default()))
+    {
+        Command::Serve(args) => {
+            init_tracing_with_env_source(env_source.as_deref().unwrap_or("none"));
+            serve(args).await.map_err(Into::into)
+        }
+        command => cli::run(command).await,
+    }
+}
+
+fn path_to_string(path: &Path) -> String {
+    path.to_string_lossy().trim().to_string()
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeConfig {
+    keys_backend: Option<String>,
+    mcp_config_path: Option<String>,
+    system_prompt_config_path: Option<String>,
+    routing_config_path: Option<String>,
+    router_config_path: Option<String>,
+    rate_limit_config_path: Option<String>,
+    router_url: Option<String>,
+    router_timeout_ms: u64,
+    router_mtls: bool,
+    router_cache_ttl_ms: u64,
+    router_strict: bool,
+    router_privacy_mode: String,
+}
+
+impl RuntimeConfig {
+    fn from_serve_args(args: ServeArgs) -> Self {
+        Self {
+            keys_backend: args.keys_backend,
+            mcp_config_path: args
+                .mcp_config
+                .as_deref()
+                .map(path_to_string)
+                .filter(|value| !value.is_empty()),
+            system_prompt_config_path: args
+                .system_prompt_config
+                .as_deref()
+                .map(path_to_string)
+                .filter(|value| !value.is_empty()),
+            routing_config_path: args
+                .routing_config
+                .as_deref()
+                .map(path_to_string)
+                .filter(|value| !value.is_empty()),
+            router_config_path: args
+                .router_config
+                .as_deref()
+                .map(path_to_string)
+                .filter(|value| !value.is_empty()),
+            rate_limit_config_path: args
+                .rate_limit_config
+                .as_deref()
+                .map(path_to_string)
+                .filter(|value| !value.is_empty()),
+            router_url: env_string("ROUTIIUM_ROUTER_URL"),
+            router_timeout_ms: env_string("ROUTIIUM_ROUTER_TIMEOUT_MS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(15),
+            router_mtls: env::var_os("ROUTIIUM_ROUTER_MTLS").is_some(),
+            router_cache_ttl_ms: env_string("ROUTIIUM_CACHE_TTL_MS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(15_000),
+            router_strict: env_truthy("ROUTIIUM_ROUTER_STRICT"),
+            router_privacy_mode: env_string("ROUTIIUM_ROUTER_PRIVACY_MODE")
+                .unwrap_or_else(|| "features".to_string()),
+        }
+    }
+}
+
+fn env_string(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_truthy(name: &str) -> bool {
+    matches!(
+        env::var(name)
+            .ok()
+            .as_deref()
+            .map(|v| v.trim().to_ascii_lowercase()),
+        Some(ref v) if v == "1" || v == "true" || v == "yes" || v == "on"
+    )
+}
+
+async fn serve(args: ServeArgs) -> std::io::Result<()> {
+    let runtime_config = RuntimeConfig::from_serve_args(args);
 
     // Initialize key backend and optional MCP config from CLI args
-    let backend_opt = ApiKeyManager::backend_from_args(&args);
+    let backend_opt = runtime_config
+        .keys_backend
+        .as_deref()
+        .and_then(ApiKeyManager::backend_from_arg_spec);
     let api_keys = match backend_opt {
         Some(backend) => match ApiKeyManager::from_backend(backend) {
             Ok(mgr) => {
@@ -42,49 +157,16 @@ async fn main() -> std::io::Result<()> {
     };
 
     // Optional MCP config path via --mcp-config=<path> or ROUTIIUM_MCP_CONFIG
-    let mcp_config_arg = args
-        .iter()
-        .find(|a| a.starts_with("--mcp-config="))
-        .and_then(|a| a.strip_prefix("--mcp-config=").map(|s| s.to_string()))
-        .or_else(|| {
-            env::var("ROUTIIUM_MCP_CONFIG")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        });
+    let mcp_config_arg = runtime_config.mcp_config_path.clone();
 
     // Optional system prompt config path via --system-prompt-config or ROUTIIUM_SYSTEM_PROMPT_CONFIG
-    let system_prompt_config_arg = args
-        .iter()
-        .find(|a| a.starts_with("--system-prompt-config="))
-        .and_then(|a| a.strip_prefix("--system-prompt-config="))
-        .map(|s| s.to_string())
-        .or_else(|| {
-            env::var("ROUTIIUM_SYSTEM_PROMPT_CONFIG")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        });
+    let system_prompt_config_arg = runtime_config.system_prompt_config_path.clone();
 
     // Optional routing config path via --routing-config or ROUTIIUM_ROUTING_CONFIG
-    let routing_config_arg = args
-        .iter()
-        .find(|a| a.starts_with("--routing-config="))
-        .and_then(|a| a.strip_prefix("--routing-config="))
-        .map(|s| s.to_string())
-        .or_else(|| {
-            env::var("ROUTIIUM_ROUTING_CONFIG")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        });
+    let routing_config_arg = runtime_config.routing_config_path.clone();
 
     // Check for --router-config flag (alias map for Router)
-    let router_config_arg = args
-        .iter()
-        .find(|a| a.starts_with("--router-config="))
-        .and_then(|a| a.strip_prefix("--router-config="))
-        .map(|s| s.to_string());
+    let router_config_arg = runtime_config.router_config_path.clone();
 
     let (mcp_manager_arc, mcp_config_path) = if let Some(mcp_config_path) = mcp_config_arg.clone() {
         tracing::info!("Loading MCP configuration from: {}", mcp_config_path);
@@ -115,9 +197,8 @@ async fn main() -> std::io::Result<()> {
     } else {
         tracing::info!("No MCP config provided, running without MCP support");
         tracing::info!(
-                "Usage: {} [--mcp-config=mcp.json] [--keys-backend=redis://...|sled:<path>|memory] [--system-prompt-config=system_prompt.json] [--routing-config=routing.json]",
-                args[0]
-            );
+            "Usage: routiium serve [--mcp-config mcp.json] [--keys-backend redis://...|sled:<path>|memory] [--system-prompt-config system_prompt.json] [--routing-config routing.json]"
+        );
         (None, None)
     };
 
@@ -217,17 +298,13 @@ async fn main() -> std::io::Result<()> {
                     None
                 }
             }
-        } else if let Ok(router_url) = env::var("ROUTIIUM_ROUTER_URL") {
+        } else if let Some(router_url) = runtime_config.router_url.clone() {
             tracing::info!("Connecting to remote router: {}", router_url);
-            let timeout_ms = env::var("ROUTIIUM_ROUTER_TIMEOUT_MS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(15);
 
             let config = routiium::router_client::HttpRouterConfig {
                 url: router_url.clone(),
-                timeout_ms,
-                mtls: env::var("ROUTIIUM_ROUTER_MTLS").is_ok(),
+                timeout_ms: runtime_config.router_timeout_ms,
+                mtls: runtime_config.router_mtls,
                 client: None,
             };
 
@@ -236,13 +313,9 @@ async fn main() -> std::io::Result<()> {
                     tracing::info!("Connected to remote router");
                     router_url_state = Some(router_url);
                     // Wrap with cache
-                    let cache_ttl = env::var("ROUTIIUM_CACHE_TTL_MS")
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(15000);
                     Some(Arc::new(routiium::router_client::CachedRouterClient::new(
                         Box::new(client),
-                        cache_ttl,
+                        runtime_config.router_cache_ttl_ms,
                     )))
                 }
                 Err(e) => {
@@ -292,14 +365,7 @@ async fn main() -> std::io::Result<()> {
 
     // Initialize rate limit manager
     // Check for --rate-limit-config CLI flag first, then ROUTIIUM_RATE_LIMIT_CONFIG env var.
-    let rate_limit_config_arg = args
-        .iter()
-        .find(|a| a.starts_with("--rate-limit-config="))
-        .and_then(|a| {
-            a.strip_prefix("--rate-limit-config=")
-                .map(|s| s.to_string())
-        })
-        .or_else(|| env::var("ROUTIIUM_RATE_LIMIT_CONFIG").ok());
+    let rate_limit_config_arg = runtime_config.rate_limit_config_path.clone();
 
     let rate_limit_manager = {
         let enabled = env::var("ROUTIIUM_RATE_LIMIT_ENABLED")
@@ -392,6 +458,9 @@ async fn main() -> std::io::Result<()> {
         router_client,
         router_config_path: router_config_path_state,
         router_url: router_url_state,
+        router_strict: runtime_config.router_strict,
+        router_cache_ttl_ms: Some(runtime_config.router_cache_ttl_ms),
+        router_privacy_mode: runtime_config.router_privacy_mode,
         rate_limit_manager,
     };
 

@@ -72,6 +72,17 @@ Benefits:
 - Multi-turn conversation stickiness
 - Dynamic catalog updates without restarts
 
+LLM-as-judge deployments should run the judge in the Router and use stricter settings:
+
+```bash
+ROUTIIUM_ROUTER_URL=http://router:9090
+ROUTIIUM_ROUTER_STRICT=1
+ROUTIIUM_ROUTER_PRIVACY_MODE=full
+ROUTIIUM_CACHE_TTL_MS=0
+```
+
+When the Router returns judge metadata, Routiium forwards `X-Judge-Mode`, `X-Judge-Verdict`, `X-Judge-Risk`, and `X-Judge-Target` response headers. When the Router denies a request, Routiium preserves structured Router errors such as `403 POLICY_DENY` instead of converting them to a generic proxy failure.
+
 ### 2. Legacy Prefix-based Routing
 Route by model prefix with static configuration:
 
@@ -229,8 +240,8 @@ Example response:
       "mode": "remote",
       "url": "http://router:9090",
       "strict": true,
-      "cache_hits": 42,
-      "cache_misses": 18
+      "cache_ttl_ms": 0,
+      "privacy_mode": "full"
     },
     "pricing": {
       "enabled": true,

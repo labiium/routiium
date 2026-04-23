@@ -70,9 +70,9 @@ pub use crate::chat_history_postgres::PostgresChatHistoryStore;
 pub use crate::chat_history_turso::TursoChatHistoryStore;
 pub use crate::pricing::{ModelPricing, PricingConfig};
 pub use crate::router_client::{
-    CachedRouterClient, FallbackConfig, HttpRouterClient, HttpRouterConfig, LocalPolicyRouter,
-    LocalRouter, PrivacyTier, RouteError, RouteFeedback, RouteHints, RouteLimits, RoutePlan,
-    RouteRequest, RouterCache, RouterClient, RouterMode, UpstreamConfig,
+    CachedRouterClient, FallbackConfig, HttpRouterClient, HttpRouterConfig, JudgeMetadata,
+    LocalPolicyRouter, LocalRouter, PrivacyTier, RouteError, RouteFeedback, RouteHints,
+    RouteLimits, RoutePlan, RouteRequest, RouterCache, RouterClient, RouterMode, UpstreamConfig,
     UpstreamMode as RouterUpstreamMode,
 };
 pub use crate::routing_config::{
