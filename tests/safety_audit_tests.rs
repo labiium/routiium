@@ -44,6 +44,7 @@ fn clear_env() {
         "ROUTIIUM_MANAGED_MODE",
         "ROUTIIUM_RESPONSE_GUARD",
         "ROUTIIUM_ROUTER_MODE",
+        "ROUTIIUM_REJECTION_MODE",
         "ROUTIIUM_ADMIN_TOKEN",
         "ROUTIIUM_SAFETY_AUDIT_PATH",
     ] {
@@ -90,7 +91,7 @@ async fn response_guard_block_is_available_in_safety_events() {
         }))
         .to_request();
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.status(), 200);
     assert_eq!(
         resp.headers()
             .get("x-response-guard-verdict")
@@ -99,7 +100,8 @@ async fn response_guard_block_is_available_in_safety_events() {
     );
     let body = test::read_body(resp).await;
     let body: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(body["error"]["code"], "response_guard_blocked");
+    assert_eq!(body["routiium_rejection"]["source"], "response_guard");
+    assert_eq!(body["routiium_rejection"]["action"], "reject");
 
     let unauth = test::TestRequest::get()
         .uri("/admin/safety/events")

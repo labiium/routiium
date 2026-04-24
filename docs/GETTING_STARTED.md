@@ -26,7 +26,8 @@ routiium status
 Defaults in this path:
 
 - `ROUTIIUM_ROUTER_MODE=embedded` gives you aliases like `auto`, `fast`, `balanced`, `safe`, and `premium`.
-- `ROUTIIUM_JUDGE_MODE=protect` blocks high-confidence exfiltration/dangerous-action requests and downgrades prompt-injection-like requests.
+- `ROUTIIUM_JUDGE_MODE=protect` rejects high-confidence exfiltration/dangerous-action requests and downgrades prompt-injection-like requests.
+- `ROUTIIUM_REJECTION_MODE=agent_result` returns an OpenAI-compatible rejected assistant result so agent loops can continue safely.
 - `ROUTIIUM_JUDGE_LLM=auto` uses an LLM judge when the configured judge key is present; deterministic checks always run.
 - `ROUTIIUM_RESPONSE_GUARD=protect` scans successful outputs for prompt/secret leakage.
 - `ROUTIIUM_STREAMING_SAFETY=chunk` scans streams and forces risky judged requests to non-streaming.

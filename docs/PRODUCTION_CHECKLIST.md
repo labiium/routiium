@@ -20,6 +20,7 @@ ROUTIIUM_CACHE_TTL_MS=0
 ROUTIIUM_JUDGE_MODE=protect
 ROUTIIUM_JUDGE_SENSITIVE_TARGET=secure
 ROUTIIUM_JUDGE_ON_DENY=block
+ROUTIIUM_REJECTION_MODE=agent_result
 ROUTIIUM_RESPONSE_GUARD=protect
 ROUTIIUM_STREAMING_SAFETY=chunk
 ROUTIIUM_SAFETY_AUDIT_PATH=./data/safety-audit.jsonl
@@ -68,4 +69,4 @@ routiium judge events --limit 50 --json
 
 ## 6. Treat tools as privileged actions
 
-MCP/browser/shell/database/cloud/payment tools should be available only to scoped keys and trusted workloads. Routiium's built-in judge marks risky tools as approval-required/high-risk; production deployments should deny by default unless an external approval workflow is explicitly added.
+MCP/browser/shell/database/cloud/payment tools should be available only to scoped keys and trusted workloads. Routiium's built-in judge rejects risky tool requests by default and returns an agent-readable rejection result unless `ROUTIIUM_REJECTION_MODE=http_error` is configured.

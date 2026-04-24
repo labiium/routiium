@@ -60,6 +60,7 @@ cargo run -- judge profile protect --out .env
 
 Default `protect` mode enforces high-confidence deterministic blocks, downgrades prompt-injection-like requests to a safer route, scans successful outputs with the response guard, and uses an LLM judge automatically when `OPENAI_API_KEY` is available. Use `shadow` to observe, `protect` for safe defaults, `enforce` for stricter policy, or `off` to disable.
 Custom judge prompts are supported through policy overlays; Routiium still keeps its built-in safety prompt immutable and routes sensitive-but-allowable requests to the built-in `secure` alias by default.
+For agentic applications, rejected unsafe actions return an OpenAI-compatible assistant result by default (`ROUTIIUM_REJECTION_MODE=agent_result`) so the loop can continue without fulfilling the unsafe request; set `http_error` for strict gateway-style 403s.
 
 ## Day-one workflow
 

@@ -102,6 +102,8 @@ The router’s `RoutePlan.content_used` field (and the `X-Content-Used` response
 
 Routiium now includes a built-in request judge in the embedded router. It runs deterministic checks for prompt injection, exfiltration, risky tools, dangerous actions, and suspicious URLs; its response guard scans outputs for prompt/secret leakage and dangerous guidance; when configured with a provider key, it can also call an isolated LLM judge with redacted context. Sensitive-but-allowable requests route to the built-in `secure` alias. Remote Router/EduRouter deployments can still return judge metadata through the same `RoutePlan.judge` field.
 
+By default, policy rejections are returned as OpenAI-compatible assistant results (`ROUTIIUM_REJECTION_MODE=agent_result`) so agentic loops can observe the denial reason and continue. Use `ROUTIIUM_REJECTION_MODE=http_error` if a deployment should surface safety policy rejections as HTTP 403 errors instead.
+
 **Guarantee checklist: every routed request is judged**
 
 - Keep embedded routing enabled, or point `ROUTIIUM_ROUTER_URL` at a judging Router.

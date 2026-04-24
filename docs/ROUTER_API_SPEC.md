@@ -168,6 +168,7 @@ Routers SHOULD reject requests with unknown `schema_version` unless they can dow
   "content_used": "none",
   "judge": {
     "id": "jdg_01HX…",
+    "action": "route",
     "mode": "protect",
     "verdict": "downgrade",
     "risk_level": "medium",
@@ -180,6 +181,8 @@ Routers SHOULD reject requests with unknown `schema_version` unless they can dow
   }
 }
 ```
+
+Legacy routers may still emit `action: "needs_approval"` or `verdict: "needs_approval"`; Routiium normalizes that to `action: "reject"` / `verdict: "deny"` for agent-facing rejection results.
 
 ### Response Headers
 

@@ -38,13 +38,15 @@ If `OPENAI_API_KEY` is present, `auto` can call the configured judge model. If n
 | `off` | No embedded judge decisions. Use only when another control plane enforces policy. |
 | `shadow` | Emit judge metadata but do not block/downgrade. |
 | `protect` | Default. Enforce high-confidence high/critical blocks, route medium prompt-injection-like or sensitive requests to `secure`. |
-| `enforce` | Stricter mode that also enforces medium-risk approvals/denials. |
+| `enforce` | Stricter mode that also rejects medium-risk denials. |
 
 ## Custom judge prompts and secure rerouting
 
 Operators can add policy overlays with `ROUTIIUM_JUDGE_POLICY_PATH` or `ROUTIIUM_JUDGE_PROMPT_FILE`. These prompts are appended after Routiium's immutable safety prompt, size-limited, secret-redacted, and fingerprinted in `x-judge-policy-fingerprint`. They can make behavior stricter or select aliases such as `secure`; they cannot disable the built-in prompt-injection, exfiltration, dangerous-action, or tool-risk rules.
 
 Hard denials block by default (`ROUTIIUM_JUDGE_ON_DENY=block`). If an operator explicitly sets `ROUTIIUM_JUDGE_ON_DENY=route`, Routiium routes denial-class requests to `ROUTIIUM_JUDGE_DENY_TARGET` with no-store route metadata and strips tools from denial-rerouted requests before forwarding.
+
+For agentic applications, Routiium defaults to `ROUTIIUM_REJECTION_MODE=agent_result`: unsafe actions are not fulfilled, no upstream tool/model call is made for rejected requests, and the client receives an OpenAI-compatible assistant result explaining the rejection and judge reason. Set `ROUTIIUM_REJECTION_MODE=http_error` when you want strict HTTP 403 policy errors instead.
 
 ## Web/search-as-judge policy
 

@@ -671,17 +671,13 @@ pub struct PolicyInfo {
 }
 
 /// Optional LLM-judge metadata attached to a routing decision.
-///
-/// Routers can use this to disclose whether a per-request judge allowed,
-/// downgraded, or denied a request before selecting an upstream. Routiium does
-/// not make policy decisions from this field; it forwards it for observability.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct JudgeMetadata {
     /// Stable judge decision identifier for request tracing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
 
-    /// Normalized action taken from the judge decision: allow, route, block, or needs_approval.
+    /// Normalized action taken from the judge decision: allow, route, block, or reject.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
 
@@ -689,7 +685,7 @@ pub struct JudgeMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
 
-    /// Judge verdict (for example: "allow", "downgrade", "deny", or "needs_approval").
+    /// Judge verdict (for example: "allow", "downgrade", or "deny").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verdict: Option<String>,
 
@@ -1596,8 +1592,8 @@ impl RouterClient for EmbeddedDefaultRouter {
         let decision =
             crate::safety_judge::judge_request(&self.safety, Some(&self.judge_client), req).await;
         if decision.should_block() {
-            let code = if decision.requires_approval {
-                "APPROVAL_REQUIRED"
+            let code = if matches!(decision.action, crate::safety_judge::SafetyAction::Reject) {
+                "POLICY_REJECT"
             } else {
                 "POLICY_DENY"
             };

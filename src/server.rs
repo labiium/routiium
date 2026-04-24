@@ -995,11 +995,157 @@ fn insert_response_guard_headers(
     builder.insert_header(("x-safety-policy-rev", decision.policy_rev.clone()));
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RejectionMode {
+    AgentResult,
+    HttpError,
+}
+
+fn rejection_mode_from_env() -> RejectionMode {
+    match std::env::var("ROUTIIUM_REJECTION_MODE")
+        .unwrap_or_else(|_| "agent_result".to_string())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "http_error" | "http-error" | "error" | "strict" | "403" => RejectionMode::HttpError,
+        _ => RejectionMode::AgentResult,
+    }
+}
+
+fn unix_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn short_uuid(prefix: &str) -> String {
+    let uuid = uuid::Uuid::new_v4().simple().to_string();
+    format!("{prefix}{}", &uuid[..16])
+}
+
+fn insert_judge_headers_from_value(
+    builder: &mut HttpResponseBuilder,
+    judge: Option<&serde_json::Value>,
+) {
+    let Some(judge) = judge else {
+        return;
+    };
+    for (field, header) in [
+        ("id", "x-judge-id"),
+        ("action", "x-judge-action"),
+        ("mode", "x-judge-mode"),
+        ("verdict", "x-judge-verdict"),
+        ("risk_level", "x-judge-risk"),
+        ("target", "x-judge-target"),
+        ("policy_rev", "x-safety-policy-rev"),
+        ("policy_fingerprint", "x-judge-policy-fingerprint"),
+    ] {
+        if let Some(value) = judge.get(field).and_then(|value| value.as_str()) {
+            builder.insert_header((header, value.to_string()));
+        }
+    }
+    if let Some(cacheable) = judge.get("cacheable").and_then(|value| value.as_bool()) {
+        builder.insert_header((
+            "x-safety-cache",
+            if cacheable { "cacheable" } else { "no-store" },
+        ));
+    }
+}
+
+fn rejection_text(reason: &str, categories: &[String]) -> String {
+    if categories.is_empty() {
+        format!("Request rejected by Routiium safety policy: {reason}")
+    } else {
+        format!(
+            "Request rejected by Routiium safety policy: {reason} Categories: {}.",
+            categories.join(", ")
+        )
+    }
+}
+
+fn agent_rejection_body(
+    api: &str,
+    model: &str,
+    text: &str,
+    metadata: serde_json::Value,
+) -> serde_json::Value {
+    let model = if model.trim().is_empty() {
+        "routiium-safety"
+    } else {
+        model
+    };
+    let created = unix_timestamp();
+    match api {
+        "chat" | "chat/completions" => serde_json::json!({
+            "id": short_uuid("chatcmpl_rej_"),
+            "object": "chat.completion",
+            "created": created,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": text
+                },
+                "finish_reason": "content_filter"
+            }],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            },
+            "routiium_rejection": metadata
+        }),
+        _ => serde_json::json!({
+            "id": short_uuid("resp_rej_"),
+            "object": "response",
+            "created": created,
+            "model": model,
+            "output_text": text,
+            "output": [{
+                "type": "assistant_message",
+                "id": short_uuid("msg_rej_"),
+                "content": text
+            }],
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0
+            },
+            "routiium_rejection": metadata
+        }),
+    }
+}
+
 fn response_guard_error_response(
     decision: &crate::safety_judge::ResponseGuardDecision,
     plan: Option<&RoutePlan>,
     resolved_model: &str,
+    api: &str,
 ) -> HttpResponse {
+    if rejection_mode_from_env() == RejectionMode::AgentResult {
+        let mut builder = HttpResponse::Ok();
+        if let Some(plan) = plan {
+            insert_route_headers(&mut builder, plan, resolved_model);
+        }
+        insert_response_guard_headers(&mut builder, decision);
+        builder.insert_header(("x-judge-action", "reject"));
+        let metadata = serde_json::json!({
+            "source": "response_guard",
+            "action": "reject",
+            "verdict": decision.verdict,
+            "risk_level": decision.risk_level,
+            "reason": decision.reason,
+            "categories": decision.categories,
+            "policy_rev": decision.policy_rev,
+            "safety_event_id": decision.id,
+        });
+        let text = rejection_text(&decision.reason, &decision.categories);
+        return builder.json(agent_rejection_body(api, resolved_model, &text, metadata));
+    }
+
     let mut builder = HttpResponse::Forbidden();
     if let Some(plan) = plan {
         insert_route_headers(&mut builder, plan, resolved_model);
@@ -1097,6 +1243,129 @@ fn router_plan_error_response(err: &RouteError) -> HttpResponse {
             }
         })),
     }
+}
+
+fn router_plan_rejection_response(
+    err: &RouteError,
+    api: &str,
+    requested_model: &str,
+) -> Option<HttpResponse> {
+    if rejection_mode_from_env() == RejectionMode::HttpError {
+        return None;
+    }
+
+    let RouteError::Rejected {
+        status,
+        code,
+        message,
+        policy_rev,
+        body,
+        ..
+    } = err
+    else {
+        return None;
+    };
+
+    if *status != 403 {
+        return None;
+    }
+
+    let body_error = body
+        .as_ref()
+        .and_then(|body| body.get("error"))
+        .or(body.as_ref());
+    let judge = body_error.and_then(|error| error.get("judge"));
+    let code_value = code
+        .as_deref()
+        .or_else(|| {
+            body_error
+                .and_then(|error| error.get("code"))
+                .and_then(|v| v.as_str())
+        })
+        .unwrap_or("POLICY_REJECT");
+    if judge.is_none()
+        && !matches!(
+            code_value,
+            "POLICY_DENY" | "POLICY_REJECT" | "APPROVAL_REQUIRED"
+        )
+    {
+        return None;
+    }
+
+    let reason = body_error
+        .and_then(|error| error.get("message"))
+        .and_then(|value| value.as_str())
+        .unwrap_or(message);
+    let categories = judge
+        .and_then(|judge| judge.get("categories"))
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let risk_level = judge
+        .and_then(|judge| judge.get("risk_level"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("high");
+    let action = judge
+        .and_then(|judge| judge.get("action"))
+        .and_then(|value| value.as_str())
+        .map(|action| {
+            if action == "needs_approval" {
+                "reject"
+            } else {
+                action
+            }
+        })
+        .unwrap_or("reject");
+    let verdict = judge
+        .and_then(|judge| judge.get("verdict"))
+        .and_then(|value| value.as_str())
+        .map(|verdict| {
+            if verdict == "needs_approval" {
+                "deny"
+            } else {
+                verdict
+            }
+        })
+        .unwrap_or("deny");
+    let judge_id = judge
+        .and_then(|judge| judge.get("id"))
+        .and_then(|value| value.as_str());
+    let policy_fingerprint = judge
+        .and_then(|judge| judge.get("policy_fingerprint"))
+        .and_then(|value| value.as_str());
+    let policy_rev = policy_rev.as_deref().or_else(|| {
+        judge
+            .and_then(|judge| judge.get("policy_rev"))
+            .and_then(|v| v.as_str())
+    });
+
+    let metadata = serde_json::json!({
+        "source": "request_judge",
+        "action": action,
+        "verdict": verdict,
+        "risk_level": risk_level,
+        "reason": reason,
+        "categories": categories,
+        "policy_rev": policy_rev,
+        "policy_fingerprint": policy_fingerprint,
+        "judge_id": judge_id,
+        "code": if code_value == "APPROVAL_REQUIRED" { "POLICY_REJECT" } else { code_value },
+    });
+    let text = rejection_text(reason, &categories);
+    let mut builder = HttpResponse::Ok();
+    insert_judge_headers_from_value(&mut builder, judge);
+    builder.insert_header(("x-judge-action", action.to_string()));
+    builder.insert_header(("x-judge-verdict", verdict.to_string()));
+    builder.insert_header(("x-judge-risk", risk_level.to_string()));
+    if let Some(policy_rev) = policy_rev {
+        builder.insert_header(("x-safety-policy-rev", policy_rev.to_string()));
+    }
+    Some(builder.json(agent_rejection_body(api, requested_model, &text, metadata)))
 }
 
 fn extract_conversation_id(value: &serde_json::Value) -> Option<String> {
@@ -2073,6 +2342,11 @@ async fn responses_passthrough(
         Ok(res) => res,
         Err(err) => {
             record_router_error_event(&state, &req, "responses", &requested_model, &err).await;
+            if let Some(response) =
+                router_plan_rejection_response(&err, "responses", &requested_model)
+            {
+                return response;
+            }
             return router_plan_error_response(&err);
         }
     };
@@ -2201,6 +2475,7 @@ async fn responses_passthrough(
                                 &response_guard,
                                 resolution.plan.as_ref(),
                                 &resolution.model_id,
+                                "responses",
                             );
                         }
 
@@ -2487,6 +2762,7 @@ async fn responses_passthrough(
                             &decision,
                             resolution.plan.as_ref(),
                             &resolution.model_id,
+                            "responses",
                         );
                     }
                     Some(decision)
@@ -3475,6 +3751,10 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
             "sensitive_target": safety_config.sensitive_target,
             "deny_target": safety_config.deny_target,
             "on_deny": safety_config.on_deny.as_str(),
+            "rejection_mode": match rejection_mode_from_env() {
+                RejectionMode::AgentResult => "agent_result",
+                RejectionMode::HttpError => "http_error",
+            },
             "policy_fingerprint": safety_config.policy_fingerprint,
             "web_judge": safety_config.web_judge.as_str(),
             "response_guard_mode": response_guard_mode.as_str(),
@@ -3876,6 +4156,9 @@ async fn chat_completions_passthrough(
         Ok(res) => res,
         Err(err) => {
             record_router_error_event(&state, &req, "chat", &requested_model, &err).await;
+            if let Some(response) = router_plan_rejection_response(&err, "chat", &requested_model) {
+                return response;
+            }
             return router_plan_error_response(&err);
         }
     };
@@ -4107,6 +4390,7 @@ async fn chat_completions_passthrough(
                             &response_guard,
                             resolution.plan.as_ref(),
                             &resolution.model_id,
+                            "chat",
                         );
                     }
                     record_chat_history(
@@ -4421,6 +4705,7 @@ async fn chat_completions_passthrough(
                             &decision,
                             resolution.plan.as_ref(),
                             &resolution.model_id,
+                            "chat",
                         );
                     }
                     Some(decision)

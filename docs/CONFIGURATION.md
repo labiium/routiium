@@ -67,6 +67,7 @@ Routiium consumes the `ROUTIIUM_JUDGE_*` variables for the embedded judge. The l
 | `ROUTIIUM_JUDGE_SENSITIVE_TARGET` | `secure` | Embedded route target for sensitive-but-allowable requests such as prompt injection or secrets in prompts. |
 | `ROUTIIUM_JUDGE_DENY_TARGET` | `secure` | Embedded route target when deny rerouting is explicitly enabled. |
 | `ROUTIIUM_JUDGE_ON_DENY` | `block` | `block` hard-denies dangerous requests; `route` explicitly reroutes denials to `ROUTIIUM_JUDGE_DENY_TARGET`. |
+| `ROUTIIUM_REJECTION_MODE` | `agent_result` | `agent_result` returns OpenAI-compatible rejected assistant results for agent loops; `http_error` returns strict HTTP 403 policy errors. |
 | `ROUTIIUM_JUDGE_POLICY_PATH` | unset | Optional JSON policy overlay for custom prompts and judge route targets. |
 | `ROUTIIUM_JUDGE_PROMPT_FILE` | unset | Optional operator prompt file appended after Routiium's immutable safety prompt. |
 | `ROUTIIUM_JUDGE_API_KEY_ENV` | `OPENAI_API_KEY` | Env var holding the judge provider key. |

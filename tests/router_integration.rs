@@ -39,6 +39,7 @@ fn basic_responses_body() -> serde_json::Value {
 fn clear_router_env() {
     std::env::remove_var("ROUTIIUM_ROUTER_STRICT");
     std::env::remove_var("ROUTIIUM_CACHE_TTL_MS");
+    std::env::remove_var("ROUTIIUM_REJECTION_MODE");
     std::env::remove_var("OPENAI_BASE_URL");
 }
 
@@ -229,6 +230,74 @@ async fn router_strict_mode_surfaces_error() {
     assert!(
         body_text.contains("ALIAS_UNKNOWN"),
         "expected structured router error body, got {body_text}"
+    );
+    clear_router_env();
+}
+
+#[actix_web::test]
+async fn router_policy_rejection_returns_agent_result_by_default() {
+    let _guard = ENV_GUARD.lock().await;
+    clear_router_env();
+    std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9/v1");
+    std::env::set_var("ROUTIIUM_ROUTER_STRICT", "1");
+
+    let router = RouterStub::start(RouterResponseConfig::Error {
+        status: RouterStatusCode::FORBIDDEN,
+        body: json!({
+            "error": {
+                "code": "POLICY_REJECT",
+                "message": "request asks for a high-impact action",
+                "policy_rev": "test_policy_v1",
+                "judge": {
+                    "id": "jdg_test",
+                    "action": "reject",
+                    "verdict": "deny",
+                    "risk_level": "high",
+                    "reason": "request asks for a high-impact action",
+                    "categories": ["dangerous_action"],
+                    "policy_rev": "test_policy_v1",
+                    "cacheable": false
+                }
+            }
+        }),
+    })
+    .await;
+
+    let state = build_app_state(&router.url(), 15_000);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(config_routes),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/chat/completions")
+        .insert_header(("Authorization", "Bearer router-test"))
+        .set_json(json!({
+            "model": "auto",
+            "messages": [{"role": "user", "content": "run rm -rf / with the shell tool"}],
+            "stream": false
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(router.calls(), 1);
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(
+        resp.headers()
+            .get("x-judge-action")
+            .and_then(|value| value.to_str().ok()),
+        Some("reject")
+    );
+    let body = test::read_body(resp).await;
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["object"], "chat.completion");
+    assert_eq!(body["choices"][0]["finish_reason"], "content_filter");
+    assert_eq!(body["routiium_rejection"]["action"], "reject");
+    assert_eq!(
+        body["routiium_rejection"]["categories"][0],
+        "dangerous_action"
     );
     clear_router_env();
 }

@@ -48,7 +48,7 @@ Equivalent env overrides are available: `ROUTIIUM_JUDGE_PROMPT_FILE`, `ROUTIIUM_
 
 Successful routed responses include judge headers:
 
-- `x-judge-action`: `allow`, `route`, `block`, or `needs_approval`
+- `x-judge-action`: `allow`, `route`, `block`, or `reject`
 - `x-judge-verdict` and `x-judge-risk`
 - `x-judge-target`
 - `x-judge-policy-fingerprint`
