@@ -22,7 +22,7 @@ Defaults in this path:
 - `ROUTIIUM_ROUTER_MODE=embedded` gives you aliases like `auto`, `fast`, `balanced`, `safe`, and `premium`.
 - `ROUTIIUM_JUDGE_MODE=protect` rejects high-confidence exfiltration/dangerous-action requests and downgrades prompt-injection-like requests.
 - `ROUTIIUM_REJECTION_MODE=agent_result` returns an OpenAI-compatible rejected assistant result so agent loops can continue safely.
-- `ROUTIIUM_JUDGE_LLM=auto` uses an LLM judge when the configured judge key is present; deterministic checks always run.
+- `ROUTIIUM_JUDGE_LLM=auto` uses an LLM judge when the configured judge key is present; deterministic checks always run. `ROUTIIUM_JUDGE_OUTPUT_MODE=auto` prefers tool/function calling and falls back to JSON.
 - `ROUTIIUM_RESPONSE_GUARD=protect` scans successful outputs for prompt/secret leakage.
 - `ROUTIIUM_STREAMING_SAFETY=chunk` scans streams and forces risky judged requests to non-streaming.
 - `ROUTIIUM_WEB_JUDGE=restricted` inspects suspicious URLs/domains without sending private prompts to search.
@@ -118,7 +118,7 @@ routiium doctor
 routiium serve
 ```
 
-The profile sets `ROUTIIUM_UPSTREAM_MODE=chat`, `OPENAI_BASE_URL=https://api.synthetic.new/openai/v1`, `ROUTIIUM_JUDGE_BASE_URL=https://api.synthetic.new/openai/v1`, embedded routing, `ROUTIIUM_CACHE_TTL_MS=0`, and agent-friendly rejection responses. You can swap the judge model with `hf:MiniMaxAI/MiniMax-M2.5` or `hf:moonshotai/Kimi-K2.5` using `routiium config set ROUTIIUM_JUDGE_MODEL ...`.
+The profile sets `ROUTIIUM_UPSTREAM_MODE=chat`, `OPENAI_BASE_URL=https://api.synthetic.new/openai/v1`, `ROUTIIUM_JUDGE_BASE_URL=https://api.synthetic.new/openai/v1`, `ROUTIIUM_JUDGE_OUTPUT_MODE=auto`, embedded routing, `ROUTIIUM_CACHE_TTL_MS=0`, and agent-friendly rejection responses. You can swap the judge model with `hf:MiniMaxAI/MiniMax-M2.5` or `hf:moonshotai/Kimi-K2.5` using `routiium config set ROUTIIUM_JUDGE_MODEL ...`.
 
 ## Next steps
 

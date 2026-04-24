@@ -1559,7 +1559,7 @@ fn init_profile_env(profile: InitProfile, config_dir: &Path) -> String {
     let bind = "BIND_ADDR=127.0.0.1:8088\nROUTIIUM_ADMIN_TOKEN=change-me-admin-token\n";
     match profile {
         InitProfile::Openai => format!(
-            "# Routiium safe-by-default OpenAI-compatible proxy profile\n{bind}OPENAI_API_KEY=sk-your-openai-key\nROUTIIUM_ROUTER_MODE=embedded\nROUTIIUM_JUDGE_MODE=protect\nROUTIIUM_RESPONSE_GUARD=protect\nROUTIIUM_STREAMING_SAFETY=chunk\nROUTIIUM_JUDGE_LLM=auto\nROUTIIUM_REJECTION_MODE=agent_result\nROUTIIUM_WEB_JUDGE=restricted\n# Optional: OPENAI_BASE_URL=https://api.openai.com/v1\n"
+            "# Routiium safe-by-default OpenAI-compatible proxy profile\n{bind}OPENAI_API_KEY=sk-your-openai-key\nROUTIIUM_ROUTER_MODE=embedded\nROUTIIUM_JUDGE_MODE=protect\nROUTIIUM_RESPONSE_GUARD=protect\nROUTIIUM_STREAMING_SAFETY=chunk\nROUTIIUM_JUDGE_LLM=auto\nROUTIIUM_JUDGE_OUTPUT_MODE=auto\nROUTIIUM_REJECTION_MODE=agent_result\nROUTIIUM_WEB_JUDGE=restricted\n# Optional: OPENAI_BASE_URL=https://api.openai.com/v1\n"
         ),
         InitProfile::Vllm => format!(
             "# Routiium local OpenAI-compatible upstream profile\n{bind}OPENAI_BASE_URL=http://127.0.0.1:8000/v1\nROUTIIUM_UPSTREAM_MODE=chat\nROUTIIUM_MANAGED_MODE=0\n"
@@ -1568,7 +1568,7 @@ fn init_profile_env(profile: InitProfile, config_dir: &Path) -> String {
             "# Routiium remote router profile\n{bind}OPENAI_API_KEY=sk-your-provider-key\nROUTIIUM_ROUTER_URL=http://127.0.0.1:9090\nROUTIIUM_ROUTER_STRICT=1\nROUTIIUM_ROUTER_PRIVACY_MODE=features\nROUTIIUM_CACHE_TTL_MS=15000\n"
         ),
         InitProfile::Judge => format!(
-            "# Routiium embedded router + LLM-as-judge protect profile\n{bind}OPENAI_API_KEY=sk-your-provider-key\nROUTIIUM_ROUTER_MODE=embedded\nROUTIIUM_ROUTER_STRICT=1\nROUTIIUM_ROUTER_PRIVACY_MODE=full\nROUTIIUM_CACHE_TTL_MS=0\nROUTIIUM_JUDGE_MODE=protect\nROUTIIUM_RESPONSE_GUARD=protect\nROUTIIUM_STREAMING_SAFETY=chunk\nROUTIIUM_JUDGE_LLM=auto\nROUTIIUM_JUDGE_MODEL=gpt-5-nano\nROUTIIUM_JUDGE_API_KEY_ENV=OPENAI_API_KEY\nROUTIIUM_JUDGE_POLICY_PATH={}\nROUTIIUM_JUDGE_SENSITIVE_TARGET=secure\nROUTIIUM_JUDGE_ON_DENY=block\nROUTIIUM_REJECTION_MODE=agent_result\nROUTIIUM_WEB_JUDGE=restricted\n",
+            "# Routiium embedded router + LLM-as-judge protect profile\n{bind}OPENAI_API_KEY=sk-your-provider-key\nROUTIIUM_ROUTER_MODE=embedded\nROUTIIUM_ROUTER_STRICT=1\nROUTIIUM_ROUTER_PRIVACY_MODE=full\nROUTIIUM_CACHE_TTL_MS=0\nROUTIIUM_JUDGE_MODE=protect\nROUTIIUM_RESPONSE_GUARD=protect\nROUTIIUM_STREAMING_SAFETY=chunk\nROUTIIUM_JUDGE_LLM=auto\nROUTIIUM_JUDGE_OUTPUT_MODE=auto\nROUTIIUM_JUDGE_MODEL=gpt-5-nano\nROUTIIUM_JUDGE_API_KEY_ENV=OPENAI_API_KEY\nROUTIIUM_JUDGE_POLICY_PATH={}\nROUTIIUM_JUDGE_SENSITIVE_TARGET=secure\nROUTIIUM_JUDGE_ON_DENY=block\nROUTIIUM_REJECTION_MODE=agent_result\nROUTIIUM_WEB_JUDGE=restricted\n",
             config_dir.join("judge-policy.json").display()
         ),
         InitProfile::Bedrock => {
@@ -1579,7 +1579,7 @@ fn init_profile_env(profile: InitProfile, config_dir: &Path) -> String {
             )
         },
         InitProfile::Synthetic => format!(
-            "# Routiium Synthetic OpenAI-compatible profile for judge testing\n{bind}OPENAI_API_KEY=syn-your-synthetic-key\nOPENAI_BASE_URL=https://api.synthetic.new/openai/v1\nROUTIIUM_UPSTREAM_MODE=chat\nROUTIIUM_ROUTER_MODE=embedded\nROUTIIUM_ROUTER_STRICT=1\nROUTIIUM_ROUTER_PRIVACY_MODE=full\nROUTIIUM_CACHE_TTL_MS=0\nROUTIIUM_JUDGE_MODE=protect\nROUTIIUM_JUDGE_LLM=auto\nROUTIIUM_JUDGE_BASE_URL=https://api.synthetic.new/openai/v1\nROUTIIUM_JUDGE_MODEL=hf:zai-org/GLM-5.1\nROUTIIUM_JUDGE_MAX_TOKENS=1024\nROUTIIUM_JUDGE_API_KEY_ENV=OPENAI_API_KEY\nROUTIIUM_JUDGE_SENSITIVE_TARGET=secure\nROUTIIUM_JUDGE_ON_DENY=block\nROUTIIUM_REJECTION_MODE=agent_result\nROUTIIUM_RESPONSE_GUARD=protect\nROUTIIUM_STREAMING_SAFETY=chunk\nROUTIIUM_WEB_JUDGE=restricted\n"
+            "# Routiium Synthetic OpenAI-compatible profile for judge testing\n{bind}OPENAI_API_KEY=syn-your-synthetic-key\nOPENAI_BASE_URL=https://api.synthetic.new/openai/v1\nROUTIIUM_UPSTREAM_MODE=chat\nROUTIIUM_ROUTER_MODE=embedded\nROUTIIUM_ROUTER_STRICT=1\nROUTIIUM_ROUTER_PRIVACY_MODE=full\nROUTIIUM_CACHE_TTL_MS=0\nROUTIIUM_JUDGE_MODE=protect\nROUTIIUM_JUDGE_LLM=auto\nROUTIIUM_JUDGE_OUTPUT_MODE=auto\nROUTIIUM_JUDGE_BASE_URL=https://api.synthetic.new/openai/v1\nROUTIIUM_JUDGE_MODEL=hf:zai-org/GLM-5.1\nROUTIIUM_JUDGE_MAX_TOKENS=1024\nROUTIIUM_JUDGE_API_KEY_ENV=OPENAI_API_KEY\nROUTIIUM_JUDGE_SENSITIVE_TARGET=secure\nROUTIIUM_JUDGE_ON_DENY=block\nROUTIIUM_REJECTION_MODE=agent_result\nROUTIIUM_RESPONSE_GUARD=protect\nROUTIIUM_STREAMING_SAFETY=chunk\nROUTIIUM_WEB_JUDGE=restricted\n"
         ),
     }
 }
@@ -1938,6 +1938,7 @@ fn judge_profile_env(mode: JudgeMode) -> BTreeMap<String, String> {
             ("ROUTIIUM_CACHE_TTL_MS".to_string(), "0".to_string()),
             ("ROUTIIUM_JUDGE_MODE".to_string(), "shadow".to_string()),
             ("ROUTIIUM_JUDGE_LLM".to_string(), "auto".to_string()),
+            ("ROUTIIUM_JUDGE_OUTPUT_MODE".to_string(), "auto".to_string()),
             ("ROUTIIUM_JUDGE_MAX_TOKENS".to_string(), "1024".to_string()),
             ("ROUTIIUM_RESPONSE_GUARD".to_string(), "shadow".to_string()),
             ("ROUTIIUM_STREAMING_SAFETY".to_string(), "chunk".to_string()),
@@ -1962,6 +1963,7 @@ fn judge_profile_env(mode: JudgeMode) -> BTreeMap<String, String> {
             ("ROUTIIUM_CACHE_TTL_MS".to_string(), "0".to_string()),
             ("ROUTIIUM_JUDGE_MODE".to_string(), "protect".to_string()),
             ("ROUTIIUM_JUDGE_LLM".to_string(), "auto".to_string()),
+            ("ROUTIIUM_JUDGE_OUTPUT_MODE".to_string(), "auto".to_string()),
             ("ROUTIIUM_JUDGE_MODEL".to_string(), "gpt-5-nano".to_string()),
             ("ROUTIIUM_JUDGE_MAX_TOKENS".to_string(), "1024".to_string()),
             ("ROUTIIUM_RESPONSE_GUARD".to_string(), "protect".to_string()),
@@ -1991,6 +1993,7 @@ fn judge_profile_env(mode: JudgeMode) -> BTreeMap<String, String> {
             ("ROUTIIUM_CACHE_TTL_MS".to_string(), "0".to_string()),
             ("ROUTIIUM_JUDGE_MODE".to_string(), "enforce".to_string()),
             ("ROUTIIUM_JUDGE_LLM".to_string(), "auto".to_string()),
+            ("ROUTIIUM_JUDGE_OUTPUT_MODE".to_string(), "auto".to_string()),
             ("ROUTIIUM_JUDGE_MODEL".to_string(), "gpt-5-nano".to_string()),
             ("ROUTIIUM_JUDGE_MAX_TOKENS".to_string(), "1024".to_string()),
             ("ROUTIIUM_RESPONSE_GUARD".to_string(), "enforce".to_string()),
@@ -2367,6 +2370,7 @@ mod tests {
         assert!(contents.contains("OPENAI_BASE_URL=https://api.synthetic.new/openai/v1"));
         assert!(contents.contains("ROUTIIUM_JUDGE_MODEL=hf:zai-org/GLM-5.1"));
         assert!(contents.contains("ROUTIIUM_CACHE_TTL_MS=0"));
+        assert!(contents.contains("ROUTIIUM_JUDGE_OUTPUT_MODE=auto"));
         assert!(contents.contains("ROUTIIUM_JUDGE_MAX_TOKENS=1024"));
     }
 

@@ -26,6 +26,7 @@ OPENAI_BASE_URL=https://api.synthetic.new/openai/v1
 ROUTIIUM_UPSTREAM_MODE=chat
 ROUTIIUM_JUDGE_BASE_URL=https://api.synthetic.new/openai/v1
 ROUTIIUM_JUDGE_MODEL=hf:zai-org/GLM-5.1
+ROUTIIUM_JUDGE_OUTPUT_MODE=auto
 ROUTIIUM_JUDGE_MAX_TOKENS=1024
 ROUTIIUM_CACHE_TTL_MS=0
 ```
@@ -100,7 +101,8 @@ Routiium consumes the `ROUTIIUM_JUDGE_*` variables for the embedded judge. The l
 | `ROUTIIUM_JUDGE_PROMPT_FILE` | unset | Optional operator prompt file appended after Routiium's immutable safety prompt. |
 | `ROUTIIUM_JUDGE_API_KEY_ENV` | `OPENAI_API_KEY` | Env var holding the judge provider key. |
 | `ROUTIIUM_JUDGE_TIMEOUT_MS` | `800` | Judge timeout. |
-| `ROUTIIUM_JUDGE_MAX_TOKENS` | `1024` | Maximum tokens for the JSON LLM-judge response. Reasoning-heavy judge models may need this headroom. |
+| `ROUTIIUM_JUDGE_OUTPUT_MODE` | `auto` | `auto` prefers tool/function calling and falls back to JSON; `tool` requires a judge tool call; `json` uses JSON response mode only. |
+| `ROUTIIUM_JUDGE_MAX_TOKENS` | `1024` | Maximum tokens for the JSON or tool-call LLM-judge response. Reasoning-heavy judge models may need this headroom. |
 | `ROUTIIUM_WEB_JUDGE` | `restricted` | `off`, `restricted`, or `full`; restricted does URL/domain checks without sending private prompts to search. |
 | `ROUTIIUM_RESPONSE_GUARD` | inherits judge mode | `off`, `shadow`, `protect`, or `enforce`; scans successful outputs for prompt/secret leakage and dangerous-action guidance. |
 | `ROUTIIUM_STREAMING_SAFETY` | `chunk` | `off`, `chunk`, `buffer`, or `force_non_stream`; risky judged streams are forced to non-streaming so the response guard can inspect the whole body. |

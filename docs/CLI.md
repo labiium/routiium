@@ -44,7 +44,7 @@ routiium serve --config ~/.config/routiium/config.env
 
 Config precedence is: CLI flags > existing process environment > explicit config file (`--config`, `ROUTIIUM_CONFIG`, `ENV_FILE`, `ENVFILE`, or `DOTENV_PATH`) > local `.envfile`/`.env` > per-user config.
 
-The `synthetic` profile is designed for OpenAI-compatible Synthetic/Hugging Face model endpoints and judge testing. It sets `OPENAI_BASE_URL` and `ROUTIIUM_JUDGE_BASE_URL` to `https://api.synthetic.new/openai/v1`, uses `ROUTIIUM_UPSTREAM_MODE=chat`, enables embedded routing/judging, and defaults `ROUTIIUM_JUDGE_MODEL` to `hf:zai-org/GLM-5.1` and `ROUTIIUM_JUDGE_MAX_TOKENS=1024` so reasoning-heavy models still return JSON content. Replace the placeholder key with your own Synthetic key.
+The `synthetic` profile is designed for OpenAI-compatible Synthetic/Hugging Face model endpoints and judge testing. It sets `OPENAI_BASE_URL` and `ROUTIIUM_JUDGE_BASE_URL` to `https://api.synthetic.new/openai/v1`, uses `ROUTIIUM_UPSTREAM_MODE=chat`, enables embedded routing/judging, and defaults `ROUTIIUM_JUDGE_MODEL` to `hf:zai-org/GLM-5.1`, `ROUTIIUM_JUDGE_OUTPUT_MODE=auto`, and `ROUTIIUM_JUDGE_MAX_TOKENS=1024` so reasoning-heavy models still return JSON content. Replace the placeholder key with your own Synthetic key.
 
 ## `routiium init`
 

@@ -40,7 +40,7 @@ Equivalent env overrides are available: `ROUTIIUM_JUDGE_PROMPT_FILE`, `ROUTIIUM_
 
 - The built-in judge prompt is immutable and always tells the judge to treat request content as untrusted data.
 - Operator prompts are size-limited, secret-redacted before LLM judge calls, and appended as stricter policy guidance only.
-- The LLM judge receives redacted structured context, not raw trusted system prompts.
+- The LLM judge receives redacted structured context, not raw trusted system prompts. Routiium prefers a forced `routiium_judge_decision` tool/function call and falls back to JSON unless `ROUTIIUM_JUDGE_OUTPUT_MODE=tool` or `json` pins one protocol.
 - Denials block by default. Use `on_deny=route` only when you have reviewed the secure alias/provider and want sensitive denials to continue without tools.
 - Routed denials and all content-sensitive judge decisions set `cache.ttl_ms=0` / `x-safety-cache: no-store`.
 

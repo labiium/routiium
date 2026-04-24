@@ -54,7 +54,7 @@ For agentic applications, Routiium defaults to `ROUTIIUM_REJECTION_MODE=agent_re
 
 ## LLM judge isolation
 
-When the optional LLM judge runs, Routiium sends a redacted JSON context rather than raw trusted prompts. System prompt content is represented by fingerprints/presence flags, secrets are replaced with `[REDACTED_SECRET]`, and the judge has no tools. The judge must return structured JSON; invalid/unavailable judge responses fail closed for non-low-risk requests.
+When the optional LLM judge runs, Routiium sends a redacted JSON context rather than raw trusted prompts. System prompt content is represented by fingerprints/presence flags, secrets are replaced with `[REDACTED_SECRET]`. The preferred protocol is a forced `routiium_judge_decision` tool/function call (`ROUTIIUM_JUDGE_OUTPUT_MODE=auto`); Routiium falls back to structured JSON for providers without tool support. Tool-call arguments and JSON content are both schema-normalized, enum-validated, and treated as untrusted model output. Invalid/unavailable judge responses fail closed for non-low-risk requests.
 
 ## Response guard and streaming safety
 
