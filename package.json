@@ -53,7 +53,10 @@
     "admin:typecheck": "npm --prefix apps/admin run typecheck",
     "admin:audit": "npm --prefix apps/admin audit --audit-level=high",
     "admin:pack": "cd apps/admin && npm pack --dry-run",
-    "admin:publish": "cd apps/admin && npm publish --access public"
+    "admin:publish": "cd apps/admin && npm publish --access public",
+    "package:trust:github:dry-run": "npm trust github routiium --repo labiium/routiium --file publish-npm.yml --dry-run",
+    "package:trust:github": "npm trust github routiium --repo labiium/routiium --file publish-npm.yml",
+    "package:trust:list": "npm trust list routiium"
   },
   "engines": {
     "node": ">=18.17.0",

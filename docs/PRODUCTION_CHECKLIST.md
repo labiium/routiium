@@ -78,3 +78,10 @@ MCP/browser/shell/database/cloud/payment tools should be available only to scope
 - [ ] Managed mode has a persistent API key store; startup must fail if managed mode cannot initialize the store.
 - [ ] `ROUTIIUM_ALLOW_MCP_CONFIG_UPDATE` is unset unless runtime MCP edits are required and admin access is strongly protected.
 - [ ] `/convert?include_internal_config=true` is not exposed publicly; it requires admin auth by default.
+
+## npm release publishing
+
+- [ ] `npm run package:trust:github:dry-run` returns the expected `routiium` / `labiium/routiium` / `publish-npm.yml` tuple.
+- [ ] npm Trusted Publishing is configured for package `routiium`; prefer no long-lived `NPM_TOKEN` secret.
+- [ ] The release tag matches both `package.json` and `Cargo.toml`, for example `v0.2.0`.
+- [ ] GitHub release binaries are produced before npm publish so `npm install -g routiium` can download native assets.

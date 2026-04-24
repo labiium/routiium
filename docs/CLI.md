@@ -11,6 +11,24 @@ routiium --version
 
 The npm package exposes the `routiium` binary globally. Its postinstall step downloads a prebuilt release binary for Linux, macOS, or Windows when available. If there is no matching release asset, it builds the Rust binary from the packaged source with `cargo build --release --locked`. Set `ROUTIIUM_BINARY=/path/to/routiium` to force a custom binary, `ROUTIIUM_NPM_BINARY_URL` to test a release asset, or `ROUTIIUM_NPM_SKIP_DOWNLOAD=1` to force the local Cargo fallback.
 
+## npm trusted publishing / OIDC
+
+The npm release workflow uses GitHub Actions OIDC trusted publishing and does not require `NPM_TOKEN` once trust is configured on npm. Configure trust before a tag release:
+
+```bash
+npm run package:trust:github:dry-run
+npm run package:trust:github
+npm run package:trust:list
+```
+
+Expected trust tuple:
+
+- package: `routiium`
+- repository: `labiium/routiium`
+- workflow file: `publish-npm.yml`
+
+The workflow grants `id-token: write`, uses a GitHub-hosted runner, and runs `npm publish --access public`. npm automatically exchanges the GitHub OIDC token during publish and generates provenance for public packages published from public repositories.
+
 ## Security-sensitive defaults
 
 - Admin commands and admin HTTP APIs require `ROUTIIUM_ADMIN_TOKEN`; unset tokens fail closed unless `ROUTIIUM_INSECURE_ADMIN=1` is explicitly set for throwaway local development.
