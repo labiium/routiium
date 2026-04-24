@@ -49,12 +49,14 @@ struct UpstreamResolution {
     key_env: Option<String>,
     headers: Option<HashMap<String, String>>,
     model_id: String,
+    pricing_model: Option<String>,
     plan: Option<RoutePlan>,
     source: UpstreamSource,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UpstreamSource {
+    YamlConfig,
     RouterPlan,
     RoutingConfig,
     BackendsEnv,
@@ -71,11 +73,181 @@ fn mode_label(mode: crate::util::UpstreamMode) -> &'static str {
 
 fn source_label(source: UpstreamSource) -> &'static str {
     match source {
+        UpstreamSource::YamlConfig => "yaml_config",
         UpstreamSource::RouterPlan => "router",
         UpstreamSource::RoutingConfig => "routing_config",
         UpstreamSource::BackendsEnv => "backends_env",
         UpstreamSource::Default => "default",
     }
+}
+
+fn yaml_alias_for_body(
+    state: &AppState,
+    body: &serde_json::Value,
+) -> Option<std::sync::Arc<crate::app_config::EffectiveAliasConfig>> {
+    let model = body.get("model").and_then(|value| value.as_str())?;
+    state
+        .runtime_config
+        .as_ref()
+        .and_then(|config| config.read().ok().and_then(|config| config.alias(model)))
+}
+
+fn apply_yaml_system_prompt(
+    alias: Option<&crate::app_config::EffectiveAliasConfig>,
+    api: &str,
+    body: &mut serde_json::Value,
+) -> bool {
+    let Some(policy) = alias.and_then(|alias| alias.system_prompt_policy.as_ref()) else {
+        return false;
+    };
+    if !policy.enabled {
+        return false;
+    }
+    let prompts = system_prompt_texts(policy);
+    if prompts.is_empty() {
+        return false;
+    };
+    if api == "chat" {
+        inject_system_prompts_chat_json(body, &prompts, &policy.mode)
+    } else {
+        inject_system_prompts_responses_json(body, &prompts, &policy.mode)
+    }
+}
+
+fn alias_response_guard_mode(
+    alias: Option<&crate::app_config::EffectiveAliasConfig>,
+) -> crate::safety_judge::SafetyMode {
+    alias
+        .and_then(|alias| alias.response_guard_policy.as_ref())
+        .map(|policy| crate::safety_judge::SafetyMode::from_config_value(&policy.mode))
+        .unwrap_or_else(crate::safety_judge::response_guard_mode_from_env)
+}
+
+fn alias_streaming_safety_mode(
+    alias: Option<&crate::app_config::EffectiveAliasConfig>,
+) -> crate::safety_judge::StreamingSafetyMode {
+    alias
+        .and_then(|alias| alias.response_guard_policy.as_ref())
+        .map(|policy| {
+            crate::safety_judge::StreamingSafetyMode::from_config_value(&policy.streaming_safety)
+        })
+        .unwrap_or_else(crate::safety_judge::streaming_safety_mode_from_env)
+}
+
+fn guard_response_bytes_for_alias(
+    bytes: &[u8],
+    alias: Option<&crate::app_config::EffectiveAliasConfig>,
+) -> crate::safety_judge::ResponseGuardDecision {
+    crate::safety_judge::guard_response_bytes_with_mode(bytes, alias_response_guard_mode(alias))
+}
+
+fn system_prompt_texts(policy: &crate::app_config::SystemPromptPolicyConfig) -> Vec<&str> {
+    policy
+        .prompt
+        .as_deref()
+        .into_iter()
+        .chain(policy.prompts.iter().map(String::as_str))
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+        .collect()
+}
+
+fn inject_system_prompts_responses_json(
+    body: &mut serde_json::Value,
+    prompts: &[&str],
+    mode: &str,
+) -> bool {
+    let Some(messages) = body.get_mut("input").and_then(|value| value.as_array_mut()) else {
+        return false;
+    };
+    let system_msgs = prompts
+        .iter()
+        .map(|prompt| {
+            serde_json::json!({
+                "role": "system",
+                "content": prompt
+            })
+        })
+        .collect::<Vec<_>>();
+    match mode {
+        "append" => {
+            let insert_at = messages
+                .iter()
+                .rposition(|m| m.get("role").and_then(|role| role.as_str()) == Some("system"))
+                .map(|pos| pos + 1)
+                .unwrap_or(messages.len());
+            for (offset, system_msg) in system_msgs.into_iter().enumerate() {
+                messages.insert(insert_at + offset, system_msg);
+            }
+        }
+        "replace" => {
+            messages.retain(|m| m.get("role").and_then(|role| role.as_str()) != Some("system"));
+            for (offset, system_msg) in system_msgs.into_iter().enumerate() {
+                messages.insert(offset, system_msg);
+            }
+        }
+        _ => {
+            for (offset, system_msg) in system_msgs.into_iter().enumerate() {
+                messages.insert(offset, system_msg);
+            }
+        }
+    }
+    true
+}
+
+fn inject_system_prompts_chat_json(
+    payload: &mut serde_json::Value,
+    prompts: &[&str],
+    mode: &str,
+) -> bool {
+    let Some(messages) = payload.get_mut("messages").and_then(|v| v.as_array_mut()) else {
+        return false;
+    };
+
+    let is_system = |msg: &serde_json::Value| {
+        msg.get("role")
+            .and_then(|v| v.as_str())
+            .map(|role| role == "system")
+            .unwrap_or(false)
+    };
+    let system_messages = prompts
+        .iter()
+        .map(|prompt| {
+            serde_json::json!({
+                "role": "system",
+                "content": prompt
+            })
+        })
+        .collect::<Vec<_>>();
+
+    match mode {
+        "append" => {
+            let insert_at = messages
+                .iter()
+                .rposition(is_system)
+                .map(|pos| pos + 1)
+                .unwrap_or(messages.len());
+            for (offset, system_message) in system_messages.into_iter().enumerate() {
+                messages.insert(insert_at + offset, system_message);
+            }
+        }
+        "replace" => {
+            messages.retain(|m| !is_system(m));
+            for (offset, system_message) in system_messages.into_iter().enumerate() {
+                messages.insert(offset, system_message);
+            }
+        }
+        _ => {
+            for (offset, system_message) in system_messages.into_iter().enumerate() {
+                messages.insert(offset, system_message);
+            }
+        }
+    }
+    true
+}
+
+fn inject_system_prompt_chat_json(payload: &mut serde_json::Value, prompt: &str, mode: &str) {
+    let _ = inject_system_prompts_chat_json(payload, &[prompt], mode);
 }
 
 fn request_client_ip(req: &HttpRequest) -> String {
@@ -242,6 +414,98 @@ fn api_key_status(info: &crate::auth::ApiKeyInfo, now_secs: u64) -> &'static str
     } else {
         "active"
     }
+}
+
+fn runtime_config_summary(state: &AppState) -> serde_json::Value {
+    let Some(config) = state.runtime_config.as_ref() else {
+        return serde_json::json!({
+            "enabled": false,
+            "path": serde_json::Value::Null,
+            "alias_count": 0
+        });
+    };
+    let Ok(config) = config.read() else {
+        return serde_json::json!({
+            "enabled": true,
+            "error": "runtime config lock poisoned"
+        });
+    };
+
+    let mut aliases = config.raw.model_aliases.keys().cloned().collect::<Vec<_>>();
+    aliases.sort();
+    let alias_policies = aliases
+        .iter()
+        .filter_map(|alias| config.alias(alias))
+        .map(|alias| {
+            serde_json::json!({
+                "alias": alias.alias.as_str(),
+                "provider": alias.provider_id.as_str(),
+                "model": alias.model.as_str(),
+                "policy_rev": alias.policy_rev.as_str(),
+                "policy_fingerprint": alias.policy_fingerprint.as_str(),
+                "judge_policy": alias.judge_policy_id.as_deref(),
+                "response_guard_policy": alias.response_guard_policy_id.as_deref(),
+                "tool_result_policy": alias.tool_result_policy_id.as_deref(),
+                "system_prompt_policy": alias.system_prompt_policy_id.as_deref(),
+                "mcp_bundle": alias.mcp_bundle_id.as_deref(),
+                "rate_limit_policy": alias.rate_limit_policy.as_deref(),
+                "pricing_model": alias.pricing_model.as_deref()
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut providers = config.raw.providers.keys().cloned().collect::<Vec<_>>();
+    providers.sort();
+    let mut mcp_bundles = config.raw.mcp_bundles.keys().cloned().collect::<Vec<_>>();
+    mcp_bundles.sort();
+    let mut judge_policies = config
+        .raw
+        .judge_policies
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    judge_policies.sort();
+    let mut tool_result_policies = config
+        .raw
+        .tool_result_policies
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    tool_result_policies.sort();
+    let mut system_prompt_policies = config
+        .raw
+        .system_prompt_policies
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    system_prompt_policies.sort();
+    let mut response_guard_policies = config
+        .raw
+        .response_guard_policies
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    response_guard_policies.sort();
+
+    serde_json::json!({
+        "enabled": true,
+        "path": config.path.as_deref(),
+        "alias_count": config.alias_count(),
+        "aliases": aliases,
+        "alias_policies": alias_policies,
+        "provider_count": providers.len(),
+        "providers": providers,
+        "mcp_server_count": config.raw.mcp_servers.len(),
+        "mcp_bundle_count": mcp_bundles.len(),
+        "mcp_bundles": mcp_bundles,
+        "judge_policy_count": judge_policies.len(),
+        "judge_policies": judge_policies,
+        "response_guard_policy_count": response_guard_policies.len(),
+        "response_guard_policies": response_guard_policies,
+        "tool_result_policy_count": tool_result_policies.len(),
+        "tool_result_policies": tool_result_policies,
+        "system_prompt_policy_count": system_prompt_policies.len(),
+        "system_prompt_policies": system_prompt_policies
+    })
 }
 
 fn log_request_start(
@@ -563,7 +827,10 @@ async fn record_analytics_event(
 
     let cost = token_usage.as_ref().and_then(|usage| {
         state.pricing.calculate_cost(
-            &resolution.model_id,
+            resolution
+                .pricing_model
+                .as_deref()
+                .unwrap_or(&resolution.model_id),
             usage.prompt_tokens,
             usage.completion_tokens,
             usage.cached_tokens,
@@ -796,6 +1063,68 @@ async fn resolve_upstream(
         .to_string();
     let strict_mode = state.router_strict || env_truthy("ROUTIIUM_ROUTER_STRICT");
 
+    if let Some(alias) = yaml_alias_for_body(state, body) {
+        let route_request = extract_route_request(
+            requested_model.as_str(),
+            api,
+            body,
+            router_privacy_mode_from_str(&state.router_privacy_mode),
+        );
+        let judge_config =
+            crate::safety_judge::SafetyJudgeConfig::from_app_policy(alias.judge_policy.as_ref());
+        let decision =
+            crate::safety_judge::judge_request(&judge_config, Some(&state.http), &route_request)
+                .await;
+        if decision.should_block() {
+            let body = serde_json::json!({
+                "error": {
+                    "code": "POLICY_DENY",
+                    "message": decision.reason,
+                    "policy_rev": alias.policy_rev,
+                    "policy_fingerprint": alias.policy_fingerprint,
+                    "judge": decision.metadata()
+                }
+            });
+            return Err(RouteError::Rejected {
+                status: 403,
+                code: Some("POLICY_DENY".to_string()),
+                message: body["error"]["message"]
+                    .as_str()
+                    .unwrap_or("request rejected by YAML judge policy")
+                    .to_string(),
+                policy_rev: Some(alias.policy_rev.clone()),
+                retry_hint_ms: None,
+                body: Some(body),
+            });
+        }
+        let mut plan = alias.route_plan(Some(decision.metadata()));
+        if judge_route_requires_tool_stripping(&plan) {
+            strip_high_risk_tools(body);
+            if let Some(judge) = plan.judge.as_mut() {
+                let mut categories = judge.categories.take().unwrap_or_default();
+                if !categories
+                    .iter()
+                    .any(|category| category == "tools_stripped")
+                {
+                    categories.push("tools_stripped".to_string());
+                }
+                judge.categories = Some(categories);
+                judge.cacheable = Some(false);
+            }
+        }
+        let upstream = plan.upstream.clone();
+        return Ok(UpstreamResolution {
+            base_url: upstream.base_url,
+            mode: map_router_mode(upstream.mode),
+            key_env: upstream.auth_env,
+            headers: upstream.headers,
+            model_id: alias.model.clone(),
+            pricing_model: alias.pricing_model.clone(),
+            plan: Some(plan),
+            source: UpstreamSource::YamlConfig,
+        });
+    }
+
     if let Some(router) = state.router_client.as_ref() {
         if !requested_model.is_empty() {
             let privacy_mode = router_privacy_mode_from_str(&state.router_privacy_mode);
@@ -824,6 +1153,7 @@ async fn resolve_upstream(
                         key_env: plan.upstream.auth_env.clone(),
                         headers: plan.upstream.headers.clone(),
                         model_id,
+                        pricing_model: None,
                         plan: Some(plan),
                         source: UpstreamSource::RouterPlan,
                     });
@@ -888,6 +1218,7 @@ async fn resolve_upstream(
                 key_env: route.key_env.clone(),
                 headers: None,
                 model_id: resolved_model,
+                pricing_model: None,
                 plan: None,
                 source: UpstreamSource::RoutingConfig,
             });
@@ -935,6 +1266,7 @@ async fn resolve_upstream(
         key_env,
         headers: None,
         model_id: resolved_model,
+        pricing_model: None,
         plan: None,
         source,
     })
@@ -958,6 +1290,7 @@ async fn check_rate_limits_for_key(
     key_id: Option<&str>,
     path: &str,
     model: Option<&str>,
+    fallback_policy_id: Option<&str>,
 ) -> Result<Option<crate::rate_limit::RateLimitCheckResult>, HttpResponse> {
     let Some(ref rl_manager) = state.rate_limit_manager else {
         return Ok(None);
@@ -965,7 +1298,10 @@ async fn check_rate_limits_for_key(
     let Some(kid) = key_id else {
         return Ok(None);
     };
-    match rl_manager.check_rate_limit(kid, path, model).await {
+    match rl_manager
+        .check_rate_limit_with_policy(kid, path, model, fallback_policy_id)
+        .await
+    {
         Ok(result) => {
             if !result.allowed {
                 let rejected = result.rejected_bucket.as_ref().unwrap();
@@ -1059,6 +1395,15 @@ fn insert_route_headers(builder: &mut HttpResponseBuilder, plan: &RoutePlan, res
                 if cacheable { "cacheable" } else { "no-store" },
             ));
         }
+        if let Some(selector_action) = judge.selector_action.as_deref() {
+            builder.insert_header(("x-judge-selector-action", selector_action.to_string()));
+        }
+        if let Some(selector_scope) = judge.selector_scope.as_deref() {
+            builder.insert_header(("x-judge-selector-scope", selector_scope.to_string()));
+        }
+        if let Some(selector_rules) = judge.selector_rules.as_ref() {
+            builder.insert_header(("x-judge-selector-rules", selector_rules.join(",")));
+        }
     }
 }
 
@@ -1120,9 +1465,24 @@ fn insert_judge_headers_from_value(
         ("target", "x-judge-target"),
         ("policy_rev", "x-safety-policy-rev"),
         ("policy_fingerprint", "x-judge-policy-fingerprint"),
+        ("selector_action", "x-judge-selector-action"),
+        ("selector_scope", "x-judge-selector-scope"),
     ] {
         if let Some(value) = judge.get(field).and_then(|value| value.as_str()) {
             builder.insert_header((header, value.to_string()));
+        }
+    }
+    if let Some(rules) = judge
+        .get("selector_rules")
+        .and_then(|value| value.as_array())
+    {
+        let joined = rules
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        if !joined.is_empty() {
+            builder.insert_header(("x-judge-selector-rules", joined));
         }
     }
     if let Some(cacheable) = judge.get("cacheable").and_then(|value| value.as_bool()) {
@@ -1576,8 +1936,11 @@ fn merge_mcp_tools_into_chat_payload(
 
         tools_array.push(serde_json::json!({
             "type": "function",
+            "source": "mcp",
+            "groups": [tool.server_name.clone()],
             "function": {
                 "name": combined_name,
+                "source": "mcp",
                 "description": tool.description.as_deref().unwrap_or("MCP tool"),
                 "parameters": tool.input_schema.clone()
             }
@@ -1610,51 +1973,56 @@ fn merge_mcp_tools_into_responses_payload(
         tools_array.push(serde_json::json!({
             "type": "function",
             "name": combined_name,
+            "source": "mcp",
+            "groups": [tool.server_name.clone()],
             "description": tool.description.as_deref().unwrap_or("MCP tool"),
             "parameters": tool.input_schema.clone()
         }));
     }
 }
 
-fn inject_system_prompt_chat_json(payload: &mut serde_json::Value, prompt: &str, mode: &str) {
-    let Some(messages) = payload.get_mut("messages").and_then(|v| v.as_array_mut()) else {
-        return;
+fn filter_mcp_tools_for_alias(
+    mcp_tools: Vec<crate::mcp_client::McpTool>,
+    alias: Option<&crate::app_config::EffectiveAliasConfig>,
+) -> Vec<crate::mcp_client::McpTool> {
+    let Some(bundle) = alias.and_then(|alias| alias.mcp_bundle.as_ref()) else {
+        return mcp_tools;
     };
-
-    let is_system = |msg: &serde_json::Value| {
-        msg.get("role")
-            .and_then(|v| v.as_str())
-            .map(|role| role == "system")
-            .unwrap_or(false)
-    };
-
-    let system_message = serde_json::json!({
-        "role": "system",
-        "content": prompt
-    });
-
-    match mode {
-        "append" => {
-            let mut last_system_pos: Option<usize> = None;
-            for (idx, msg) in messages.iter().enumerate() {
-                if is_system(msg) {
-                    last_system_pos = Some(idx);
-                }
-            }
-            if let Some(pos) = last_system_pos {
-                messages.insert(pos + 1, system_message);
-            } else {
-                messages.push(system_message);
-            }
-        }
-        "replace" => {
-            messages.retain(|m| !is_system(m));
-            messages.insert(0, system_message);
-        }
-        _ => {
-            messages.insert(0, system_message);
-        }
+    if bundle.servers.is_empty() {
+        return Vec::new();
     }
+    mcp_tools
+        .into_iter()
+        .filter(|tool| {
+            bundle
+                .servers
+                .iter()
+                .any(|server| server == &tool.server_name)
+        })
+        .filter(|tool| {
+            let combined = format!("{}_{}", tool.server_name, tool.name);
+            let included = bundle.include_tools.is_empty()
+                || bundle
+                    .include_tools
+                    .iter()
+                    .any(|pattern| glob_match_simple(pattern, &combined));
+            let excluded = bundle
+                .exclude_tools
+                .iter()
+                .any(|pattern| glob_match_simple(pattern, &combined));
+            included && !excluded
+        })
+        .collect()
+}
+
+fn glob_match_simple(pattern: &str, value: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return value.starts_with(prefix);
+    }
+    pattern == value
 }
 
 #[cfg(test)]
@@ -1907,6 +2275,7 @@ mod tests {
             key_env: None,
             headers: None,
             model_id: "gpt-4o-mini-2024-07-18".to_string(),
+            pricing_model: None,
             plan: None,
             source: UpstreamSource::RoutingConfig,
         };
@@ -1975,6 +2344,7 @@ mod tests {
             key_env: None,
             headers: None,
             model_id: "gpt-4o-mini".to_string(),
+            pricing_model: None,
             plan: None,
             source: UpstreamSource::RouterPlan,
         };
@@ -2184,17 +2554,19 @@ struct SafetySseGuard<S> {
     inner: S,
     rolling_text: String,
     emitted_block: bool,
+    response_guard_mode: crate::safety_judge::SafetyMode,
 }
 
 impl<S> SafetySseGuard<S>
 where
     S: futures_util::stream::Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
 {
-    fn new(inner: S) -> Self {
+    fn new(inner: S, response_guard_mode: crate::safety_judge::SafetyMode) -> Self {
         Self {
             inner,
             rolling_text: String::new(),
             emitted_block: false,
+            response_guard_mode,
         }
     }
 }
@@ -2227,7 +2599,10 @@ where
                         .collect();
                 }
 
-                let decision = crate::safety_judge::guard_response_text(&this.rolling_text);
+                let decision = crate::safety_judge::guard_response_text_with_mode(
+                    &this.rolling_text,
+                    this.response_guard_mode,
+                );
                 if decision.should_block() {
                     this.emitted_block = true;
                     tracing::warn!(
@@ -2277,43 +2652,48 @@ async fn responses_passthrough(
         .to_string();
     let conversation_hint = extract_conversation_id(&body).filter(|s| !s.trim().is_empty());
     let mut system_prompt_applied = false;
+    let yaml_alias = yaml_alias_for_body(&state, &body);
 
     // Apply system prompt injection if configured
-    let system_prompt_guard = state.system_prompt_config.read().await;
-    let model = body.get("model").and_then(|v| v.as_str());
+    if apply_yaml_system_prompt(yaml_alias.as_deref(), "responses", &mut body) {
+        system_prompt_applied = true;
+    } else {
+        let system_prompt_guard = state.system_prompt_config.read().await;
+        let model = body.get("model").and_then(|v| v.as_str());
+        if let Some(prompt) = system_prompt_guard.get_prompt(model, Some("responses")) {
+            // Inject system prompt into messages (Responses API uses "input" not "messages")
+            if let Some(messages) = body.get_mut("input").and_then(|v| v.as_array_mut()) {
+                system_prompt_applied = true;
+                let system_msg = serde_json::json!({
+                    "role": "system",
+                    "content": prompt
+                });
 
-    if let Some(prompt) = system_prompt_guard.get_prompt(model, Some("responses")) {
-        // Inject system prompt into messages (Responses API uses "input" not "messages")
-        if let Some(messages) = body.get_mut("input").and_then(|v| v.as_array_mut()) {
-            system_prompt_applied = true;
-            let system_msg = serde_json::json!({
-                "role": "system",
-                "content": prompt
-            });
-
-            match system_prompt_guard.injection_mode.as_str() {
-                "append" => {
-                    let last_system_pos = messages
-                        .iter()
-                        .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"));
-                    if let Some(pos) = last_system_pos {
-                        messages.insert(pos + 1, system_msg);
-                    } else {
-                        messages.push(system_msg);
+                match system_prompt_guard.injection_mode.as_str() {
+                    "append" => {
+                        let last_system_pos = messages.iter().rposition(|m| {
+                            m.get("role").and_then(|r| r.as_str()) == Some("system")
+                        });
+                        if let Some(pos) = last_system_pos {
+                            messages.insert(pos + 1, system_msg);
+                        } else {
+                            messages.push(system_msg);
+                        }
                     }
-                }
-                "replace" => {
-                    messages.retain(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"));
-                    messages.insert(0, system_msg);
-                }
-                _ => {
-                    // Default: prepend
-                    messages.insert(0, system_msg);
+                    "replace" => {
+                        messages
+                            .retain(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"));
+                        messages.insert(0, system_msg);
+                    }
+                    _ => {
+                        // Default: prepend
+                        messages.insert(0, system_msg);
+                    }
                 }
             }
         }
+        drop(system_prompt_guard);
     }
-    drop(system_prompt_guard);
 
     // Convert Chat API-formatted tools to Responses API flat format
     // The Python SDK sends tools in Chat API format (nested function object),
@@ -2348,10 +2728,20 @@ async fn responses_passthrough(
     if let Some(mgr) = state.mcp_manager.as_ref() {
         let manager = mgr.read().await;
         match manager.list_all_tools().await {
-            Ok(mcp_tools) => merge_mcp_tools_into_responses_payload(&mut body, &mcp_tools),
+            Ok(mcp_tools) => {
+                let filtered = filter_mcp_tools_for_alias(mcp_tools, yaml_alias.as_deref());
+                merge_mcp_tools_into_responses_payload(&mut body, &filtered)
+            }
             Err(err) => warn!("Failed to fetch MCP tools for /v1/responses: {}", err),
         }
     }
+
+    let _tool_result_guard = crate::safety_judge::guard_tool_results_with_policy(
+        &mut body,
+        yaml_alias
+            .as_deref()
+            .and_then(|alias| alias.tool_result_policy.as_ref()),
+    );
 
     // Determine managed (internal upstream key) vs passthrough mode
     let managed_mode = managed_mode_from_env();
@@ -2449,6 +2839,9 @@ async fn responses_passthrough(
         api_key_id.as_deref(),
         req.path(),
         body.get("model").and_then(|v| v.as_str()),
+        yaml_alias
+            .as_deref()
+            .and_then(|alias| alias.rate_limit_policy.as_deref()),
     )
     .await
     {
@@ -2474,19 +2867,24 @@ async fn responses_passthrough(
             return router_plan_error_response(&err);
         }
     };
+    let response_guard_mode = alias_response_guard_mode(yaml_alias.as_deref());
+    let streaming_safety_mode = alias_streaming_safety_mode(yaml_alias.as_deref());
 
-    let streaming_safety =
-        if stream && crate::safety_judge::should_force_non_stream(resolution.plan.as_ref()) {
-            if let Some(obj) = body.as_object_mut() {
-                obj.insert("stream".to_string(), serde_json::json!(false));
-            }
-            stream = false;
-            Some("forced_non_stream")
-        } else if stream {
-            Some(crate::safety_judge::streaming_safety_mode_from_env().as_str())
-        } else {
-            None
-        };
+    let streaming_safety = if stream
+        && crate::safety_judge::should_force_non_stream_with_mode(
+            resolution.plan.as_ref(),
+            streaming_safety_mode,
+        ) {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("stream".to_string(), serde_json::json!(false));
+        }
+        stream = false;
+        Some("forced_non_stream")
+    } else if stream {
+        Some(streaming_safety_mode.as_str())
+    } else {
+        None
+    };
 
     log_request_start("responses", &req, &requested_model, &resolution, stream);
 
@@ -2560,7 +2958,7 @@ async fn responses_passthrough(
                         let response_bytes =
                             serde_json::to_vec(&responses_response).unwrap_or_default();
                         let response_guard =
-                            crate::safety_judge::guard_response_bytes(&response_bytes);
+                            guard_response_bytes_for_alias(&response_bytes, yaml_alias.as_deref());
                         if response_guard.should_block() {
                             tracing::warn!(
                                 target: "routiium::safety",
@@ -2749,9 +3147,9 @@ async fn responses_passthrough(
                         dyn futures_util::stream::Stream<Item = Result<Bytes, std::io::Error>>
                             + Send,
                     >,
-                > = match crate::safety_judge::streaming_safety_mode_from_env() {
+                > = match streaming_safety_mode {
                     crate::safety_judge::StreamingSafetyMode::Off => stream,
-                    _ => Box::pin(SafetySseGuard::new(stream)),
+                    _ => Box::pin(SafetySseGuard::new(stream, response_guard_mode)),
                 };
 
                 let mut response = HttpResponse::Ok();
@@ -2847,7 +3245,7 @@ async fn responses_passthrough(
                     .and_then(crate::analytics_middleware::extract_token_usage);
 
                 let response_guard = if status.is_success() {
-                    let decision = crate::safety_judge::guard_response_bytes(&bytes);
+                    let decision = guard_response_bytes_for_alias(&bytes, yaml_alias.as_deref());
                     if decision.should_block() {
                         tracing::warn!(
                             target: "routiium::safety",
@@ -3340,6 +3738,7 @@ async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl
                 "stats": chat_history_stats
             }
         },
+        "runtime_config": runtime_config_summary(&state),
         "system_prompt": {
             "config_path": state.system_prompt_config_path,
             "reloadable": state.system_prompt_config_path.is_some(),
@@ -3647,6 +4046,10 @@ pub fn config_routes(cfg: &mut web::ServiceConfig) {
             .route("/keys/set_expiration", web::post().to(set_key_expiration))
             .route("/reload/mcp", web::post().to(reload_mcp))
             .route(
+                "/reload/runtime-config",
+                web::post().to(reload_runtime_config),
+            )
+            .route(
                 "/reload/system_prompt",
                 web::post().to(reload_system_prompt),
             )
@@ -3775,6 +4178,7 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
         "/keys/revoke",
         "/keys/set_expiration",
         "/reload/mcp",
+        "/reload/runtime-config",
         "/reload/system_prompt",
         "/reload/routing",
         "/reload/all",
@@ -3871,6 +4275,7 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
             "cache_ttl_ms": state.router_cache_ttl_ms,
             "privacy_mode": state.router_privacy_mode
         },
+        "runtime_config": runtime_config_summary(&state),
         "judge": {
             "enabled": safety_config.mode != crate::safety_judge::SafetyMode::Off,
             "mode": safety_config.mode.as_str(),
@@ -3924,6 +4329,7 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
                 "cache_ttl_ms": state.router_cache_ttl_ms,
                 "privacy_mode": state.router_privacy_mode
             },
+            "runtime_config": runtime_config_summary(&state),
             "analytics": {
                 "enabled": analytics_enabled,
                 "stats": analytics_stats
@@ -3991,7 +4397,7 @@ async fn list_models(state: web::Data<AppState>, req: HttpRequest) -> impl Respo
     }
 
     // Try to get models from Router catalog if available
-    let models = if let Some(router_client) = &state.router_client {
+    let mut models = if let Some(router_client) = &state.router_client {
         match router_client.get_catalog().await {
             Ok(catalog) => {
                 // Convert Router catalog models to OpenAI format
@@ -4018,6 +4424,7 @@ async fn list_models(state: web::Data<AppState>, req: HttpRequest) -> impl Respo
         // No Router client, use static model list
         get_default_models()
     };
+    merge_runtime_alias_models(&state, &mut models);
 
     let response = ModelsResponse {
         object: "list".to_string(),
@@ -4025,6 +4432,40 @@ async fn list_models(state: web::Data<AppState>, req: HttpRequest) -> impl Respo
     };
 
     HttpResponse::Ok().json(response)
+}
+
+fn merge_runtime_alias_models(state: &AppState, models: &mut Vec<Model>) {
+    let Some(runtime_config) = state.runtime_config.as_ref() else {
+        return;
+    };
+    let Ok(config) = runtime_config.read() else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut seen = models
+        .iter()
+        .map(|model| model.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let mut aliases = config.raw.model_aliases.keys().cloned().collect::<Vec<_>>();
+    aliases.sort();
+    for alias in aliases {
+        if !seen.insert(alias.clone()) {
+            continue;
+        }
+        let owned_by = config
+            .alias(&alias)
+            .map(|effective| effective.provider_id.clone())
+            .unwrap_or_else(|| "routiium-yaml".to_string());
+        models.push(Model {
+            id: alias,
+            object: "model".to_string(),
+            created: now,
+            owned_by,
+        });
+    }
 }
 
 /// Get default model list when Router catalog is unavailable
@@ -4144,16 +4585,21 @@ async fn chat_completions_passthrough(
     let conversation_hint = query.conversation_id.filter(|s| !s.trim().is_empty());
     let previous_response_hint = query.previous_response_id.filter(|s| !s.trim().is_empty());
     let mut system_prompt_applied = false;
+    let yaml_alias = yaml_alias_for_body(&state, &body);
 
     // Apply system prompt injection if configured
-    let system_prompt_guard = state.system_prompt_config.read().await;
-    let model = body.get("model").and_then(|v| v.as_str());
-
-    if let Some(prompt) = system_prompt_guard.get_prompt(model, Some("chat")) {
+    if apply_yaml_system_prompt(yaml_alias.as_deref(), "chat", &mut body) {
         system_prompt_applied = true;
-        inject_system_prompt_chat_json(&mut body, &prompt, &system_prompt_guard.injection_mode);
+    } else {
+        let system_prompt_guard = state.system_prompt_config.read().await;
+        let model = body.get("model").and_then(|v| v.as_str());
+
+        if let Some(prompt) = system_prompt_guard.get_prompt(model, Some("chat")) {
+            system_prompt_applied = true;
+            inject_system_prompt_chat_json(&mut body, &prompt, &system_prompt_guard.injection_mode);
+        }
+        drop(system_prompt_guard);
     }
-    drop(system_prompt_guard);
 
     // Remove explicit null content fields (tool call responses don't require them)
     if let Some(messages) = body.get_mut("messages").and_then(|v| v.as_array_mut()) {
@@ -4176,13 +4622,23 @@ async fn chat_completions_passthrough(
     if let Some(mgr) = state.mcp_manager.as_ref() {
         let manager = mgr.read().await;
         match manager.list_all_tools().await {
-            Ok(mcp_tools) => merge_mcp_tools_into_chat_payload(&mut body, &mcp_tools),
+            Ok(mcp_tools) => {
+                let filtered = filter_mcp_tools_for_alias(mcp_tools, yaml_alias.as_deref());
+                merge_mcp_tools_into_chat_payload(&mut body, &filtered)
+            }
             Err(err) => warn!(
                 "Failed to fetch MCP tools for /v1/chat/completions: {}",
                 err
             ),
         }
     }
+
+    let _tool_result_guard = crate::safety_judge::guard_tool_results_with_policy(
+        &mut body,
+        yaml_alias
+            .as_deref()
+            .and_then(|alias| alias.tool_result_policy.as_ref()),
+    );
 
     // Determine managed (internal upstream key) vs passthrough mode
     let managed_mode = managed_mode_from_env();
@@ -4280,6 +4736,9 @@ async fn chat_completions_passthrough(
         api_key_id.as_deref(),
         req.path(),
         body.get("model").and_then(|v| v.as_str()),
+        yaml_alias
+            .as_deref()
+            .and_then(|alias| alias.rate_limit_policy.as_deref()),
     )
     .await
     {
@@ -4304,19 +4763,24 @@ async fn chat_completions_passthrough(
             return router_plan_error_response(&err);
         }
     };
+    let response_guard_mode = alias_response_guard_mode(yaml_alias.as_deref());
+    let streaming_safety_mode = alias_streaming_safety_mode(yaml_alias.as_deref());
 
-    let streaming_safety =
-        if stream && crate::safety_judge::should_force_non_stream(resolution.plan.as_ref()) {
-            if let Some(obj) = body.as_object_mut() {
-                obj.insert("stream".to_string(), serde_json::json!(false));
-            }
-            stream = false;
-            Some("forced_non_stream")
-        } else if stream {
-            Some(crate::safety_judge::streaming_safety_mode_from_env().as_str())
-        } else {
-            None
-        };
+    let streaming_safety = if stream
+        && crate::safety_judge::should_force_non_stream_with_mode(
+            resolution.plan.as_ref(),
+            streaming_safety_mode,
+        ) {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("stream".to_string(), serde_json::json!(false));
+        }
+        stream = false;
+        Some("forced_non_stream")
+    } else if stream {
+        Some(streaming_safety_mode.as_str())
+    } else {
+        None
+    };
 
     log_request_start("chat", &req, &requested_model, &resolution, stream);
 
@@ -4417,9 +4881,9 @@ async fn chat_completions_passthrough(
                         }
                         Err(err) => Err(std::io::Error::other(err.to_string())),
                     });
-                    let mapped = match crate::safety_judge::streaming_safety_mode_from_env() {
+                    let mapped = match streaming_safety_mode {
                         crate::safety_judge::StreamingSafetyMode::Off => mapped.boxed(),
-                        _ => SafetySseGuard::new(mapped.boxed()).boxed(),
+                        _ => SafetySseGuard::new(mapped.boxed(), response_guard_mode).boxed(),
                     };
 
                     let mut response = HttpResponse::Ok();
@@ -4493,7 +4957,8 @@ async fn chat_completions_passthrough(
                     let token_usage =
                         crate::analytics_middleware::extract_token_usage(&response_json);
                     let response_bytes = serde_json::to_vec(&chat_response).unwrap_or_default();
-                    let response_guard = crate::safety_judge::guard_response_bytes(&response_bytes);
+                    let response_guard =
+                        guard_response_bytes_for_alias(&response_bytes, yaml_alias.as_deref());
                     if response_guard.should_block() {
                         tracing::warn!(
                             target: "routiium::safety",
@@ -4699,9 +5164,9 @@ async fn chat_completions_passthrough(
                 } else {
                     base_stream.boxed()
                 };
-                let stream = match crate::safety_judge::streaming_safety_mode_from_env() {
+                let stream = match streaming_safety_mode {
                     crate::safety_judge::StreamingSafetyMode::Off => stream,
-                    _ => SafetySseGuard::new(stream).boxed(),
+                    _ => SafetySseGuard::new(stream, response_guard_mode).boxed(),
                 };
 
                 let mut response = HttpResponse::Ok();
@@ -4808,7 +5273,7 @@ async fn chat_completions_passthrough(
                     .and_then(crate::analytics_middleware::extract_token_usage);
 
                 let response_guard = if status.is_success() {
-                    let decision = crate::safety_judge::guard_response_bytes(&bytes);
+                    let decision = guard_response_bytes_for_alias(&bytes, yaml_alias.as_deref());
                     if decision.should_block() {
                         tracing::warn!(
                             target: "routiium::safety",
@@ -5343,6 +5808,20 @@ async fn reload_mcp(state: web::Data<AppState>, req: HttpRequest) -> impl Respon
             );
         }
     };
+    if let Some(runtime_config) = state.runtime_config.as_ref() {
+        if runtime_config
+            .read()
+            .ok()
+            .and_then(|config| config.path.clone())
+            .as_deref()
+            == Some(config_path.as_str())
+        {
+            return error_response(
+                http::StatusCode::BAD_REQUEST,
+                "MCP is sourced from the unified YAML runtime config; use /reload/runtime-config",
+            );
+        }
+    }
 
     tracing::info!("Reloading MCP configuration from: {}", config_path);
 
@@ -5394,6 +5873,162 @@ async fn reload_mcp(state: web::Data<AppState>, req: HttpRequest) -> impl Respon
             http::StatusCode::SERVICE_UNAVAILABLE,
             "MCP manager not initialized",
         )
+    }
+}
+
+async fn reload_runtime_config_inner(state: &AppState) -> Result<serde_json::Value, HttpResponse> {
+    let runtime_config = state.runtime_config.as_ref().ok_or_else(|| {
+        error_response(
+            http::StatusCode::BAD_REQUEST,
+            "No unified YAML runtime config path configured - cannot reload",
+        )
+    })?;
+    let config_path = runtime_config
+        .read()
+        .map_err(|_| {
+            error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Runtime config lock poisoned",
+            )
+        })?
+        .path
+        .clone()
+        .ok_or_else(|| {
+            error_response(
+                http::StatusCode::BAD_REQUEST,
+                "Runtime config has no source path - cannot reload",
+            )
+        })?;
+
+    tracing::info!(
+        "Reloading unified YAML runtime config from: {}",
+        config_path
+    );
+
+    let new_config = crate::app_config::RoutiiumConfig::load_yaml(&config_path).map_err(|err| {
+        tracing::error!("Failed to load unified YAML runtime config: {}", err);
+        error_response(
+            http::StatusCode::BAD_REQUEST,
+            &format!("Failed to load unified YAML runtime config: {}", err),
+        )
+    })?;
+    let rate_limit_policy_count = apply_runtime_rate_limit_policies(state, &new_config).await?;
+
+    let mcp_config = new_config
+        .mcp_config()
+        .unwrap_or_else(|| crate::mcp_config::McpConfig {
+            mcp_servers: std::collections::HashMap::new(),
+        });
+    let new_mcp_manager = crate::mcp_client::McpClientManager::new(mcp_config)
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                "Failed to initialize MCP manager from runtime config: {}",
+                err
+            );
+            error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!(
+                    "Failed to initialize MCP manager from runtime config: {}",
+                    err
+                ),
+            )
+        })?;
+    let connected_servers = new_mcp_manager.connected_servers();
+    let server_count = connected_servers.len();
+    if let Some(manager_arc) = &state.mcp_manager {
+        let mut manager_guard = manager_arc.write().await;
+        *manager_guard = new_mcp_manager;
+    } else if server_count > 0 {
+        return Err(error_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "Runtime config defines MCP servers but MCP manager is not initialized",
+        ));
+    }
+
+    {
+        let mut config_guard = runtime_config.write().map_err(|_| {
+            error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Runtime config lock poisoned",
+            )
+        })?;
+        *config_guard = new_config;
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "message": "Unified YAML runtime config reloaded",
+        "config_path": config_path,
+        "runtime_config": runtime_config_summary(state),
+        "mcp": {
+            "servers": connected_servers,
+            "count": server_count
+        },
+        "rate_limit": {
+            "yaml_policy_count": rate_limit_policy_count
+        },
+        "reload_scope": {
+            "hot_reloaded": [
+                "model_aliases",
+                "providers",
+                "judge_policies",
+                "response_guard_policies",
+                "tool_result_policies",
+                "system_prompt_policies",
+                "mcp_servers",
+                "mcp_bundles",
+                "rate_limit_policies"
+            ],
+            "restart_required": [
+                "server.bind_addr",
+                "server.managed_mode",
+                "server.admin_token_env",
+                "server.http_timeout_seconds"
+            ]
+        }
+    }))
+}
+
+async fn apply_runtime_rate_limit_policies(
+    state: &AppState,
+    config: &crate::app_config::CompiledRuntimeConfig,
+) -> Result<usize, HttpResponse> {
+    let Some(manager) = state.rate_limit_manager.as_ref() else {
+        if config.raw.rate_limit_policies.is_empty() {
+            return Ok(0);
+        }
+        return Err(error_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "Runtime config defines rate_limit_policies but rate limit manager is not initialized",
+        ));
+    };
+
+    let mut count = 0usize;
+    for (id, def) in &config.raw.rate_limit_policies {
+        let policy = crate::rate_limit::RateLimitPolicy {
+            id: id.clone(),
+            buckets: def.buckets.clone(),
+        };
+        manager.create_policy(policy).await.map_err(|err| {
+            error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to apply YAML rate limit policy {id}: {err}"),
+            )
+        })?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Reload unified YAML runtime configuration from file at runtime.
+async fn reload_runtime_config(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
+    match reload_runtime_config_inner(&state).await {
+        Ok(value) => HttpResponse::Ok().json(value),
+        Err(resp) => resp,
     }
 }
 
@@ -5497,54 +6132,87 @@ async fn reload_all(state: web::Data<AppState>, req: HttpRequest) -> impl Respon
         return resp;
     }
     let mut results = serde_json::json!({
+        "runtime_config": { "success": false, "message": "Not attempted" },
         "mcp": { "success": false, "message": "Not attempted" },
         "system_prompt": { "success": false, "message": "Not attempted" },
         "routing": { "success": false, "message": "Not attempted" }
     });
 
+    let runtime_config_path = state
+        .runtime_config
+        .as_ref()
+        .and_then(|config| config.read().ok().and_then(|config| config.path.clone()));
+    if state.runtime_config.is_some() {
+        match reload_runtime_config_inner(&state).await {
+            Ok(value) => {
+                results["runtime_config"] = value;
+            }
+            Err(resp) => {
+                let status = resp.status().as_u16();
+                results["runtime_config"] = serde_json::json!({
+                    "success": false,
+                    "status": status,
+                    "message": "Failed to reload unified YAML runtime config"
+                });
+            }
+        }
+    } else {
+        results["runtime_config"] = serde_json::json!({
+            "success": false,
+            "message": "No unified YAML runtime config path configured"
+        });
+    }
+
     // Reload MCP if path is configured
     if let Some(mcp_path) = &state.mcp_config_path {
-        tracing::info!("Reloading MCP configuration from: {}", mcp_path);
+        if runtime_config_path.as_deref() == Some(mcp_path.as_str()) {
+            results["mcp"] = serde_json::json!({
+                "success": true,
+                "message": "MCP is sourced from unified YAML runtime config and was handled by runtime_config reload"
+            });
+        } else {
+            tracing::info!("Reloading MCP configuration from: {}", mcp_path);
 
-        match crate::mcp_config::McpConfig::load_from_file(mcp_path) {
-            Ok(config) => match crate::mcp_client::McpClientManager::new(config).await {
-                Ok(new_manager) => {
-                    let connected_servers = new_manager.connected_servers();
-                    let server_count = connected_servers.len();
+            match crate::mcp_config::McpConfig::load_from_file(mcp_path) {
+                Ok(config) => match crate::mcp_client::McpClientManager::new(config).await {
+                    Ok(new_manager) => {
+                        let connected_servers = new_manager.connected_servers();
+                        let server_count = connected_servers.len();
 
-                    if let Some(manager_arc) = &state.mcp_manager {
-                        let mut manager_guard = manager_arc.write().await;
-                        *manager_guard = new_manager;
+                        if let Some(manager_arc) = &state.mcp_manager {
+                            let mut manager_guard = manager_arc.write().await;
+                            *manager_guard = new_manager;
 
-                        results["mcp"] = serde_json::json!({
-                            "success": true,
-                            "message": "MCP configuration reloaded",
-                            "servers": connected_servers,
-                            "count": server_count
-                        });
+                            results["mcp"] = serde_json::json!({
+                                "success": true,
+                                "message": "MCP configuration reloaded",
+                                "servers": connected_servers,
+                                "count": server_count
+                            });
 
-                        tracing::info!("MCP configuration reloaded successfully");
-                    } else {
+                            tracing::info!("MCP configuration reloaded successfully");
+                        } else {
+                            results["mcp"] = serde_json::json!({
+                                "success": false,
+                                "message": "MCP manager not initialized"
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to initialize MCP client manager: {}", e);
                         results["mcp"] = serde_json::json!({
                             "success": false,
-                            "message": "MCP manager not initialized"
+                            "message": format!("Failed to initialize MCP manager: {}", e)
                         });
                     }
-                }
+                },
                 Err(e) => {
-                    tracing::error!("Failed to initialize MCP client manager: {}", e);
+                    tracing::error!("Failed to load MCP config: {}", e);
                     results["mcp"] = serde_json::json!({
                         "success": false,
-                        "message": format!("Failed to initialize MCP manager: {}", e)
+                        "message": format!("Failed to load MCP config: {}", e)
                     });
                 }
-            },
-            Err(e) => {
-                tracing::error!("Failed to load MCP config: {}", e);
-                results["mcp"] = serde_json::json!({
-                    "success": false,
-                    "message": format!("Failed to load MCP config: {}", e)
-                });
             }
         }
     } else {

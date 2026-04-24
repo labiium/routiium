@@ -10,7 +10,7 @@
 //!
 //! Then test with Routiium:
 //! ```bash
-//! ROUTIIUM_ROUTER_URL=http://localhost:9090 routiium
+//! ROUTIIUM_ROUTER_URL=http://localhost:9090 routiium serve
 //! ```
 
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, Responder};
@@ -381,6 +381,10 @@ fn judge_metadata(config: &JudgeConfig, decision: &JudgeDecision) -> JudgeMetada
         policy_rev: None,
         policy_fingerprint: None,
         cacheable: None,
+        selector_scope: None,
+        selector_action: None,
+        selector_rules: None,
+        selector_reason: None,
     }
 }
 
@@ -872,7 +876,7 @@ async fn main() -> std::io::Result<()> {
     println!();
     println!("Test with:");
     println!("  curl http://localhost:9090/catalog/models | jq");
-    println!("  ROUTIIUM_ROUTER_URL=http://localhost:9090 routiium");
+    println!("  ROUTIIUM_ROUTER_URL=http://localhost:9090 routiium serve");
     println!();
 
     HttpServer::new(move || {

@@ -20,6 +20,7 @@ Note: Keep the mapping rules aligned with OpenAI docs; the Responses API evolves
 
 pub mod analytics;
 pub mod analytics_middleware;
+pub mod app_config;
 pub mod auth;
 pub mod bedrock;
 pub mod chat_history;
@@ -38,6 +39,7 @@ pub mod chat_history_postgres;
 pub mod chat_history_turso;
 
 pub mod conversion;
+pub mod judge_selector;
 pub mod mcp_client;
 pub mod mcp_config;
 pub mod models;

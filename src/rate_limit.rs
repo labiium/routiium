@@ -1878,6 +1878,14 @@ impl RateLimitManager {
     /// 5. Default from file config
     /// 6. `None` (unlimited)
     pub async fn resolve_policy(&self, key_id: &str) -> Result<Option<RateLimitPolicy>> {
+        self.resolve_policy_with_fallback(key_id, None).await
+    }
+
+    pub async fn resolve_policy_with_fallback(
+        &self,
+        key_id: &str,
+        fallback_policy_id: Option<&str>,
+    ) -> Result<Option<RateLimitPolicy>> {
         // 1. In-memory emergency blocks (fastest path)
         {
             let blocks = self.emergency_blocks.read().unwrap();
@@ -1913,14 +1921,21 @@ impl RateLimitManager {
             }
         }
 
-        // 5. Default from store
+        // 5. Request/alias fallback policy
+        if let Some(policy_id) = fallback_policy_id {
+            if let Some(p) = self.get_cached_policy(policy_id).await? {
+                return Ok(Some(p));
+            }
+        }
+
+        // 6. Default from store
         if let Some(default_id) = self.store.get_default_policy_id().await? {
             if let Some(p) = self.get_cached_policy(&default_id).await? {
                 return Ok(Some(p));
             }
         }
 
-        // 6. Default from file config
+        // 7. Default from file config
         let file_default_id = {
             let fc = self.file_config.read().unwrap();
             fc.as_ref().and_then(|cfg| cfg.default_policy.clone())
@@ -1961,8 +1976,21 @@ impl RateLimitManager {
         endpoint: &str,
         model: Option<&str>,
     ) -> Result<RateLimitCheckResult> {
+        self.check_rate_limit_with_policy(key_id, endpoint, model, None)
+            .await
+    }
+
+    pub async fn check_rate_limit_with_policy(
+        &self,
+        key_id: &str,
+        endpoint: &str,
+        model: Option<&str>,
+        fallback_policy_id: Option<&str>,
+    ) -> Result<RateLimitCheckResult> {
         let ts = now_secs();
-        let policy = self.resolve_policy(key_id).await?;
+        let policy = self
+            .resolve_policy_with_fallback(key_id, fallback_policy_id)
+            .await?;
 
         let Some(policy) = policy else {
             // Unlimited — record minimal event.

@@ -54,6 +54,7 @@ Common flags:
 | Flag | Env fallback | Description |
 | --- | --- | --- |
 | `--config PATH` | `ROUTIIUM_CONFIG` | Env/config file to load before serving. Defaults to the XDG user config and local `.env` discovery. |
+| `--config-yaml PATH` | `ROUTIIUM_CONFIG_YAML` | Unified YAML runtime config for aliases, providers, prompts, MCP bundles, and safety policies. |
 | `--keys-backend redis://...\|sled:<path>\|memory` | backend-specific env vars | API key store override. |
 | `--mcp-config PATH` | `ROUTIIUM_MCP_CONFIG` | MCP server definitions. |
 | `--system-prompt-config PATH` | `ROUTIIUM_SYSTEM_PROMPT_CONFIG` | System prompt rules. |
@@ -75,6 +76,28 @@ routiium config get ROUTIIUM_JUDGE_MODE
 routiium config list
 routiium serve --config ~/.config/routiium/config.env
 ```
+
+For multi-alias deployments, manage the unified YAML runtime config:
+
+```bash
+routiium config yaml init --out routiium.yaml
+routiium config yaml validate --path routiium.yaml
+routiium config yaml view --path routiium.yaml
+routiium config yaml alias list --path routiium.yaml
+routiium config yaml alias get tutor-fast --path routiium.yaml
+routiium config yaml alias add web-safe --path routiium.yaml --provider openai --model gpt-5-mini --judge-policy every_tool_call --response-guard-policy strict_outputs --mcp-bundle web
+routiium config yaml alias set web-safe tool_result_policy warn_all --path routiium.yaml
+routiium config yaml response-guard-policy set strict_outputs '{mode: enforce, streaming_safety: force_non_stream}' --path routiium.yaml
+routiium config yaml rate-limit-policy set standard '{buckets: [{name: requests, requests: 60, window_seconds: 60}]}' --path routiium.yaml
+routiium config yaml system-prompt-policy set no_system_prompt '{enabled: false}' --path routiium.yaml
+routiium config yaml provider set local '{base_url: "http://127.0.0.1:8000/v1", api_key_env: OPENAI_API_KEY, mode: chat}' --path routiium.yaml
+routiium serve --config-yaml routiium.yaml
+```
+
+Use YAML when each alias needs different upstream providers, MCP bundles, system prompt append/replace behavior, judge policy, response-guard behavior, rate-limit fallback, pricing model, or tool-result guard behavior.
+Use `none`, `null`, or an empty value with `alias set` to clear optional alias fields.
+Policy sections support `list`, `get`, `set`, and `remove` for `provider`, `judge-policy`, `response-guard-policy`, `rate-limit-policy`, `tool-result-policy`, `system-prompt-policy`, `mcp-bundle`, and `mcp-server`.
+After editing a running deployment, call `POST /reload/runtime-config` with the admin bearer token to reload YAML aliases and MCP servers without restarting.
 
 Config precedence is: CLI flags > existing process environment > explicit config file (`--config`, `ROUTIIUM_CONFIG`, `ENV_FILE`, `ENVFILE`, or `DOTENV_PATH`) > local `.envfile`/`.env` > per-user config.
 

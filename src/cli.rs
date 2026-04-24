@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use regex::Regex;
 use reqwest::header::{HeaderMap, AUTHORIZATION};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -68,6 +69,14 @@ pub struct ServeArgs {
     /// Env/config file to load before serving. Defaults to ROUTIIUM_CONFIG, then the XDG user config, then local .env files.
     #[arg(long, value_name = "PATH", env = "ROUTIIUM_CONFIG")]
     pub config: Option<PathBuf>,
+
+    /// Unified YAML runtime configuration file.
+    #[arg(
+        long = "config-yaml",
+        value_name = "PATH",
+        env = "ROUTIIUM_CONFIG_YAML"
+    )]
+    pub config_yaml: Option<PathBuf>,
 
     /// API key backend: redis://..., sled:<path>, or memory.
     #[arg(long, value_name = "BACKEND", value_parser = parse_key_backend_spec)]
@@ -148,6 +157,156 @@ pub enum ConfigCommand {
     Get(ConfigGetArgs),
     /// List config keys and values.
     List(ConfigListArgs),
+    /// Manage unified YAML runtime config.
+    #[command(subcommand)]
+    Yaml(ConfigYamlCommand),
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum ConfigYamlCommand {
+    /// Create a starter YAML runtime config.
+    Init(ConfigYamlInitArgs),
+    /// Validate a YAML runtime config.
+    Validate(ConfigYamlPathArgs),
+    /// View a redacted YAML runtime config.
+    View(ConfigYamlPathArgs),
+    /// Manage YAML aliases.
+    #[command(subcommand)]
+    Alias(ConfigYamlAliasCommand),
+    /// Manage YAML provider entries.
+    #[command(subcommand)]
+    Provider(ConfigYamlMapCommand),
+    /// Manage YAML judge policy entries.
+    #[command(subcommand)]
+    JudgePolicy(ConfigYamlMapCommand),
+    /// Manage YAML response guard policy entries.
+    #[command(subcommand)]
+    ResponseGuardPolicy(ConfigYamlMapCommand),
+    /// Manage YAML rate-limit policy entries.
+    #[command(subcommand)]
+    RateLimitPolicy(ConfigYamlMapCommand),
+    /// Manage YAML tool-result guard policy entries.
+    #[command(subcommand)]
+    ToolResultPolicy(ConfigYamlMapCommand),
+    /// Manage YAML system-prompt policy entries.
+    #[command(subcommand)]
+    SystemPromptPolicy(ConfigYamlMapCommand),
+    /// Manage YAML MCP bundle entries.
+    #[command(subcommand)]
+    McpBundle(ConfigYamlMapCommand),
+    /// Manage YAML MCP server entries.
+    #[command(subcommand)]
+    McpServer(ConfigYamlMapCommand),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ConfigYamlInitArgs {
+    #[arg(long, value_name = "PATH", default_value = "routiium.yaml")]
+    pub out: PathBuf,
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ConfigYamlPathArgs {
+    #[arg(long, value_name = "PATH", default_value = "routiium.yaml")]
+    pub path: PathBuf,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum ConfigYamlAliasCommand {
+    /// List configured aliases.
+    List(ConfigYamlPathArgs),
+    /// Show one configured alias.
+    Get(ConfigYamlAliasGetArgs),
+    /// Add a configured alias.
+    Add(ConfigYamlAliasAddArgs),
+    /// Set one field on a configured alias.
+    Set(ConfigYamlAliasSetArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ConfigYamlAliasGetArgs {
+    pub alias: String,
+    #[arg(long, value_name = "PATH", default_value = "routiium.yaml")]
+    pub path: PathBuf,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ConfigYamlAliasAddArgs {
+    pub alias: String,
+    #[arg(long, value_name = "PATH", default_value = "routiium.yaml")]
+    pub path: PathBuf,
+    #[arg(long)]
+    pub provider: Option<String>,
+    #[arg(long)]
+    pub model: String,
+    #[arg(long)]
+    pub judge_policy: Option<String>,
+    #[arg(long)]
+    pub tool_result_policy: Option<String>,
+    #[arg(long)]
+    pub system_prompt_policy: Option<String>,
+    #[arg(long)]
+    pub response_guard_policy: Option<String>,
+    #[arg(long)]
+    pub mcp_bundle: Option<String>,
+    #[arg(long)]
+    pub rate_limit_policy: Option<String>,
+    #[arg(long)]
+    pub pricing_model: Option<String>,
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ConfigYamlAliasSetArgs {
+    pub alias: String,
+    pub field: String,
+    pub value: String,
+    #[arg(long, value_name = "PATH", default_value = "routiium.yaml")]
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum ConfigYamlMapCommand {
+    /// List entry ids in this section.
+    List(ConfigYamlPathArgs),
+    /// Show one entry from this section.
+    Get(ConfigYamlMapGetArgs),
+    /// Create or replace one entry from an inline YAML value.
+    Set(ConfigYamlMapSetArgs),
+    /// Remove one entry from this section.
+    Remove(ConfigYamlMapRemoveArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ConfigYamlMapGetArgs {
+    pub id: String,
+    #[arg(long, value_name = "PATH", default_value = "routiium.yaml")]
+    pub path: PathBuf,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ConfigYamlMapSetArgs {
+    pub id: String,
+    /// Inline YAML for the entry, for example: '{mode: protect}'.
+    pub value: String,
+    #[arg(long, value_name = "PATH", default_value = "routiium.yaml")]
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ConfigYamlMapRemoveArgs {
+    pub id: String,
+    #[arg(long, value_name = "PATH", default_value = "routiium.yaml")]
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -656,6 +815,350 @@ fn run_config(command: ConfigCommand) -> Result<()> {
             }
             Ok(())
         }
+        ConfigCommand::Yaml(command) => run_config_yaml(command),
+    }
+}
+
+fn run_config_yaml(command: ConfigYamlCommand) -> Result<()> {
+    match command {
+        ConfigYamlCommand::Init(args) => {
+            write_new_file(&args.out, routiium::app_config::sample_yaml(), args.force)?;
+            println!("Created YAML runtime config: {}", args.out.display());
+            println!("Next: routiium serve --config-yaml {}", args.out.display());
+            Ok(())
+        }
+        ConfigYamlCommand::Validate(args) => {
+            let compiled = routiium::app_config::RoutiiumConfig::load_yaml(&args.path);
+            match compiled {
+                Ok(config) => {
+                    if args.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({
+                                "ok": true,
+                                "path": args.path,
+                                "aliases": config.alias_count(),
+                            }))?
+                        );
+                    } else {
+                        println!(
+                            "YAML config {}: valid ({} aliases)",
+                            args.path.display(),
+                            config.alias_count()
+                        );
+                    }
+                    Ok(())
+                }
+                Err(err) => {
+                    if args.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({
+                                "ok": false,
+                                "path": args.path,
+                                "error": err.to_string(),
+                            }))?
+                        );
+                    } else {
+                        println!("YAML config {}: invalid", args.path.display());
+                        println!("error: {err}");
+                    }
+                    Err(err)
+                }
+            }
+        }
+        ConfigYamlCommand::View(args) => {
+            let compiled = routiium::app_config::RoutiiumConfig::load_yaml(&args.path)?;
+            let mut value = serde_json::to_value(&compiled.raw)?;
+            redact_config_value(&mut value);
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                println!("{}", serde_yaml::to_string(&value)?);
+            }
+            Ok(())
+        }
+        ConfigYamlCommand::Alias(ConfigYamlAliasCommand::List(args)) => {
+            let compiled = routiium::app_config::RoutiiumConfig::load_yaml(&args.path)?;
+            let aliases = compiled
+                .raw
+                .model_aliases
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({ "aliases": aliases }))?
+                );
+            } else {
+                for alias in aliases {
+                    println!("{alias}");
+                }
+            }
+            Ok(())
+        }
+        ConfigYamlCommand::Alias(ConfigYamlAliasCommand::Get(args)) => {
+            let compiled = routiium::app_config::RoutiiumConfig::load_yaml(&args.path)?;
+            let alias = compiled
+                .raw
+                .model_aliases
+                .get(&args.alias)
+                .ok_or_else(|| anyhow!("alias {} is not configured", args.alias))?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(alias)?);
+            } else {
+                println!("{}", serde_yaml::to_string(alias)?);
+            }
+            Ok(())
+        }
+        ConfigYamlCommand::Alias(ConfigYamlAliasCommand::Add(args)) => {
+            let mut config = read_yaml_runtime_config(&args.path)?;
+            if config.model_aliases.contains_key(&args.alias) && !args.force {
+                return Err(anyhow!(
+                    "alias {} already exists; pass --force to replace it",
+                    args.alias
+                ));
+            }
+            config.model_aliases.insert(
+                args.alias.clone(),
+                routiium::app_config::ModelAliasConfig {
+                    provider: args.provider,
+                    model: args.model,
+                    judge_policy: args.judge_policy,
+                    tool_result_policy: args.tool_result_policy,
+                    system_prompt_policy: args.system_prompt_policy,
+                    system_prompt: None,
+                    response_guard_policy: args.response_guard_policy,
+                    mcp_bundle: args.mcp_bundle,
+                    rate_limit_policy: args.rate_limit_policy,
+                    pricing_model: args.pricing_model,
+                    extension_policies: Vec::new(),
+                },
+            );
+            write_yaml_runtime_config(&args.path, &config)?;
+            println!(
+                "Updated YAML alias {} in {}",
+                args.alias,
+                args.path.display()
+            );
+            Ok(())
+        }
+        ConfigYamlCommand::Alias(ConfigYamlAliasCommand::Set(args)) => {
+            let mut config = read_yaml_runtime_config(&args.path)?;
+            let alias = config
+                .model_aliases
+                .get_mut(&args.alias)
+                .ok_or_else(|| anyhow!("alias {} is not configured", args.alias))?;
+            match args.field.as_str() {
+                "provider" => alias.provider = yaml_optional_value(&args.value),
+                "model" => {
+                    if args.value.trim().is_empty() {
+                        return Err(anyhow!("model cannot be empty"));
+                    }
+                    alias.model = args.value;
+                }
+                "judge_policy" => alias.judge_policy = yaml_optional_value(&args.value),
+                "tool_result_policy" => alias.tool_result_policy = yaml_optional_value(&args.value),
+                "system_prompt_policy" => {
+                    alias.system_prompt_policy = yaml_optional_value(&args.value)
+                }
+                "response_guard_policy" => {
+                    alias.response_guard_policy = yaml_optional_value(&args.value)
+                }
+                "mcp_bundle" => alias.mcp_bundle = yaml_optional_value(&args.value),
+                "rate_limit_policy" => alias.rate_limit_policy = yaml_optional_value(&args.value),
+                "pricing_model" => alias.pricing_model = yaml_optional_value(&args.value),
+                other => {
+                    return Err(anyhow!(
+                        "unsupported alias field {other}; expected one of provider, model, judge_policy, tool_result_policy, system_prompt_policy, response_guard_policy, mcp_bundle, rate_limit_policy, pricing_model"
+                    ))
+                }
+            }
+            write_yaml_runtime_config(&args.path, &config)?;
+            println!(
+                "Updated YAML alias {}.{} in {}",
+                args.alias,
+                args.field,
+                args.path.display()
+            );
+            Ok(())
+        }
+        ConfigYamlCommand::Provider(command) => run_config_yaml_map(
+            "provider",
+            command,
+            |config| &config.providers,
+            |config| &mut config.providers,
+        ),
+        ConfigYamlCommand::JudgePolicy(command) => run_config_yaml_map(
+            "judge_policy",
+            command,
+            |config| &config.judge_policies,
+            |config| &mut config.judge_policies,
+        ),
+        ConfigYamlCommand::ResponseGuardPolicy(command) => run_config_yaml_map(
+            "response_guard_policy",
+            command,
+            |config| &config.response_guard_policies,
+            |config| &mut config.response_guard_policies,
+        ),
+        ConfigYamlCommand::RateLimitPolicy(command) => run_config_yaml_map(
+            "rate_limit_policy",
+            command,
+            |config| &config.rate_limit_policies,
+            |config| &mut config.rate_limit_policies,
+        ),
+        ConfigYamlCommand::ToolResultPolicy(command) => run_config_yaml_map(
+            "tool_result_policy",
+            command,
+            |config| &config.tool_result_policies,
+            |config| &mut config.tool_result_policies,
+        ),
+        ConfigYamlCommand::SystemPromptPolicy(command) => run_config_yaml_map(
+            "system_prompt_policy",
+            command,
+            |config| &config.system_prompt_policies,
+            |config| &mut config.system_prompt_policies,
+        ),
+        ConfigYamlCommand::McpBundle(command) => run_config_yaml_map(
+            "mcp_bundle",
+            command,
+            |config| &config.mcp_bundles,
+            |config| &mut config.mcp_bundles,
+        ),
+        ConfigYamlCommand::McpServer(command) => run_config_yaml_map(
+            "mcp_server",
+            command,
+            |config| &config.mcp_servers,
+            |config| &mut config.mcp_servers,
+        ),
+    }
+}
+
+fn run_config_yaml_map<T, GetMap, GetMapMut>(
+    section: &str,
+    command: ConfigYamlMapCommand,
+    get_map: GetMap,
+    get_map_mut: GetMapMut,
+) -> Result<()>
+where
+    T: Clone + serde::Serialize + serde::de::DeserializeOwned,
+    GetMap: Fn(&routiium::app_config::RoutiiumConfig) -> &std::collections::HashMap<String, T>,
+    GetMapMut:
+        Fn(&mut routiium::app_config::RoutiiumConfig) -> &mut std::collections::HashMap<String, T>,
+{
+    match command {
+        ConfigYamlMapCommand::List(args) => {
+            let compiled = routiium::app_config::RoutiiumConfig::load_yaml(&args.path)?;
+            let mut ids = get_map(&compiled.raw).keys().cloned().collect::<Vec<_>>();
+            ids.sort();
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({ "section": section, "ids": ids }))?
+                );
+            } else {
+                for id in ids {
+                    println!("{id}");
+                }
+            }
+            Ok(())
+        }
+        ConfigYamlMapCommand::Get(args) => {
+            let compiled = routiium::app_config::RoutiiumConfig::load_yaml(&args.path)?;
+            let entry = get_map(&compiled.raw)
+                .get(&args.id)
+                .ok_or_else(|| anyhow!("{section} {} is not configured", args.id))?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(entry)?);
+            } else {
+                println!("{}", serde_yaml::to_string(entry)?);
+            }
+            Ok(())
+        }
+        ConfigYamlMapCommand::Set(args) => {
+            let mut config = read_yaml_runtime_config(&args.path)?;
+            let value: T = serde_yaml::from_str(&args.value)
+                .with_context(|| format!("parsing inline YAML for {section} {}", args.id))?;
+            get_map_mut(&mut config).insert(args.id.clone(), value);
+            write_yaml_runtime_config(&args.path, &config)?;
+            println!(
+                "Updated YAML {section} {} in {}",
+                args.id,
+                args.path.display()
+            );
+            Ok(())
+        }
+        ConfigYamlMapCommand::Remove(args) => {
+            let mut config = read_yaml_runtime_config(&args.path)?;
+            if get_map_mut(&mut config).remove(&args.id).is_none() {
+                return Err(anyhow!("{section} {} is not configured", args.id));
+            }
+            write_yaml_runtime_config(&args.path, &config)?;
+            println!(
+                "Removed YAML {section} {} from {}",
+                args.id,
+                args.path.display()
+            );
+            Ok(())
+        }
+    }
+}
+
+fn read_yaml_runtime_config(path: &Path) -> Result<routiium::app_config::RoutiiumConfig> {
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_yaml::from_str(&contents).with_context(|| format!("parsing YAML {}", path.display()))
+}
+
+fn write_yaml_runtime_config(
+    path: &Path,
+    config: &routiium::app_config::RoutiiumConfig,
+) -> Result<()> {
+    config
+        .clone()
+        .compile(Some(path.display().to_string()))
+        .with_context(|| format!("validating YAML {}", path.display()))?;
+    let contents = serde_yaml::to_string(config)?;
+    fs::write(path, contents).with_context(|| format!("writing {}", path.display()))
+}
+
+fn yaml_optional_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("none")
+        || trimmed.eq_ignore_ascii_case("null")
+    {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn redact_config_value(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let lowered = key.to_ascii_lowercase();
+                if lowered.contains("key")
+                    || lowered.contains("token")
+                    || lowered.contains("secret")
+                    || lowered.contains("password")
+                {
+                    if child.is_string() {
+                        *child = Value::String("[REDACTED]".to_string());
+                    }
+                } else {
+                    redact_config_value(child);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_config_value(item);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -736,6 +1239,10 @@ async fn run_doctor(args: DoctorArgs) -> Result<()> {
             "ROUTIIUM_ROUTER_CONFIG",
             env_value(&file_env, "ROUTIIUM_ROUTER_CONFIG"),
         ),
+        (
+            "ROUTIIUM_CONFIG_YAML",
+            env_value(&file_env, "ROUTIIUM_CONFIG_YAML"),
+        ),
     ] {
         if let Some(path) = path.filter(|p| !p.trim().is_empty()) {
             checks.push(check(
@@ -756,6 +1263,26 @@ async fn run_doctor(args: DoctorArgs) -> Result<()> {
                 ),
             ));
         }
+    }
+    if let Some(path) =
+        env_value(&file_env, "ROUTIIUM_CONFIG_YAML").filter(|path| !path.trim().is_empty())
+    {
+        let path_ref = Path::new(&path);
+        let (status, detail) = if path_ref.exists() {
+            match routiium::app_config::RoutiiumConfig::load_yaml(path_ref) {
+                Ok(compiled) => (
+                    CheckStatus::Ok,
+                    format!("{} parsed ({} aliases)", path, compiled.alias_count()),
+                ),
+                Err(err) => (
+                    CheckStatus::Error,
+                    format!("{} failed YAML validation: {}", path, err),
+                ),
+            }
+        } else {
+            (CheckStatus::Error, format!("{} missing", path))
+        };
+        checks.push(check("runtime_yaml", status, detail));
     }
 
     let has_openai = env_value(&file_env, "OPENAI_API_KEY")
@@ -1131,6 +1658,19 @@ async fn run_judge(command: JudgeCommand) -> Result<()> {
                         .as_str()
                         .unwrap_or("unknown")
                 );
+                if let Some(selector_action) = plan["judge"]["selector_action"].as_str() {
+                    println!("  selector: {selector_action}");
+                    if let Some(selector_rules) = plan["judge"]["selector_rules"].as_array() {
+                        let rules = selector_rules
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        if !rules.is_empty() {
+                            println!("  selector rules: {rules}");
+                        }
+                    }
+                }
             } else {
                 println!(
                     "judge rejected request: {}",
@@ -1256,6 +1796,8 @@ fn run_judge_policy(command: JudgePolicyCommand) -> Result<()> {
                     Err(err) => errors.push(format!("cannot read prompt_file: {err}")),
                 }
             }
+            validate_judge_selector_policy(&value, &mut errors, &mut warnings);
+            validate_tool_result_guard_policy(&value, &mut errors, &mut warnings);
             let ok = errors.is_empty();
             if args.json {
                 println!(
@@ -1612,10 +2154,124 @@ fn judge_policy_template(prompt_out: &Path) -> String {
   "safe_target": "safe",
   "sensitive_target": "secure",
   "deny_target": "secure",
-  "on_deny": "block"
+  "on_deny": "block",
+  "judge_selector": {{
+    "scope": "baseline_always",
+    "default": "judge",
+    "on_error": "judge",
+    "rules": []
+  }},
+  "tool_result_guard": {{
+    "mode": "off",
+    "selection": "exclusive",
+    "tools": [],
+    "tool_regex": []
+  }}
 }}
 "#
     )
+}
+
+fn validate_tool_result_guard_policy(
+    value: &Value,
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
+    let Some(guard) = value.get("tool_result_guard") else {
+        return;
+    };
+    let Some(guard) = guard.as_object() else {
+        errors.push("tool_result_guard must be an object".to_string());
+        return;
+    };
+    if let Some(mode) = guard.get("mode").and_then(Value::as_str) {
+        if !matches!(mode, "off" | "warn" | "omit") {
+            errors.push("tool_result_guard.mode must be off, warn, or omit".to_string());
+        }
+        if mode == "warn" {
+            warnings.push("tool_result_guard.mode=warn leaves suspicious tool output in context behind a warning; use omit when the tutor must not see blocked content".to_string());
+        }
+    }
+    if let Some(selection) = guard.get("selection").and_then(Value::as_str) {
+        if !matches!(selection, "inclusive" | "exclusive") {
+            errors.push("tool_result_guard.selection must be inclusive or exclusive".to_string());
+        }
+    }
+    if let Some(regexes) = guard.get("tool_regex").and_then(Value::as_array) {
+        for pattern in regexes.iter().filter_map(Value::as_str) {
+            if let Err(err) = Regex::new(pattern) {
+                errors.push(format!(
+                    "tool_result_guard.tool_regex has invalid regex {pattern:?}: {err}"
+                ));
+            }
+        }
+    }
+}
+
+fn validate_judge_selector_policy(
+    value: &Value,
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
+    let Some(selector) = value.get("judge_selector") else {
+        return;
+    };
+    let Some(selector) = selector.as_object() else {
+        errors.push("judge_selector must be an object".to_string());
+        return;
+    };
+    if let Some(scope) = selector.get("scope").and_then(Value::as_str) {
+        if !matches!(scope, "baseline_always" | "gate_all") {
+            errors.push("judge_selector.scope must be baseline_always or gate_all".to_string());
+        }
+        if scope == "gate_all" {
+            warnings.push("judge_selector.scope=gate_all can skip immutable built-in safety checks for unmatched requests".to_string());
+        }
+    }
+    for key in ["default", "on_error"] {
+        if let Some(action) = selector.get(key).and_then(Value::as_str) {
+            if !matches!(action, "judge" | "skip" | "deny") {
+                errors.push(format!("judge_selector.{key} must be judge, skip, or deny"));
+            }
+        }
+    }
+    if let Some(groups) = selector.get("tool_groups").and_then(Value::as_object) {
+        for (group_name, group) in groups {
+            if let Some(regexes) = group.get("name_regex").and_then(Value::as_array) {
+                for pattern in regexes.iter().filter_map(Value::as_str) {
+                    if let Err(err) = Regex::new(pattern) {
+                        errors.push(format!(
+                            "judge_selector.tool_groups.{group_name}.name_regex has invalid regex {pattern:?}: {err}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(rules) = selector.get("rules").and_then(Value::as_array) {
+        for (index, rule) in rules.iter().enumerate() {
+            if let Some(action) = rule.get("action").and_then(Value::as_str) {
+                if !matches!(action, "judge" | "skip" | "deny") {
+                    errors.push(format!(
+                        "judge_selector.rules[{index}].action must be judge, skip, or deny"
+                    ));
+                }
+            }
+            if let Some(regexes) = rule
+                .get("when")
+                .and_then(|when| when.get("content_regex_any"))
+                .and_then(Value::as_array)
+            {
+                for pattern in regexes.iter().filter_map(Value::as_str) {
+                    if let Err(err) = Regex::new(pattern) {
+                        errors.push(format!(
+                            "judge_selector.rules[{index}].when.content_regex_any has invalid regex {pattern:?}: {err}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn judge_prompt_template() -> &'static str {

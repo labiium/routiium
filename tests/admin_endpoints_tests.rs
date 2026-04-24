@@ -69,6 +69,7 @@ fn app_state_with_keys(
         router_privacy_mode: "features".to_string(),
         rate_limit_manager: None,
         safety_audit: routiium::safety_audit::SafetyAuditManager::from_env(),
+        runtime_config: None,
     }
 }
 

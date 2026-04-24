@@ -71,6 +71,7 @@ fn path_to_string(path: &Path) -> String {
 
 #[derive(Debug, Clone)]
 struct RuntimeConfig {
+    config_yaml_path: Option<String>,
     keys_backend: Option<String>,
     mcp_config_path: Option<String>,
     system_prompt_config_path: Option<String>,
@@ -88,6 +89,12 @@ struct RuntimeConfig {
 impl RuntimeConfig {
     fn from_serve_args(args: ServeArgs) -> Self {
         Self {
+            config_yaml_path: args
+                .config_yaml
+                .as_deref()
+                .map(path_to_string)
+                .filter(|value| !value.is_empty())
+                .or_else(|| env_string("ROUTIIUM_CONFIG_YAML")),
             keys_backend: args.keys_backend,
             mcp_config_path: args
                 .mcp_config
@@ -159,8 +166,69 @@ fn embedded_router_enabled() -> bool {
         .unwrap_or(true)
 }
 
+fn apply_yaml_server_env(config: &routiium::app_config::CompiledRuntimeConfig) {
+    let server = &config.raw.server;
+    if env_string("BIND_ADDR").is_none() {
+        if let Some(bind_addr) = server
+            .bind_addr
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            env::set_var("BIND_ADDR", bind_addr);
+        }
+    }
+    if env_string("ROUTIIUM_MANAGED_MODE").is_none() {
+        if let Some(managed_mode) = server.managed_mode {
+            env::set_var(
+                "ROUTIIUM_MANAGED_MODE",
+                if managed_mode { "true" } else { "false" },
+            );
+        }
+    }
+    if env_string("ROUTIIUM_HTTP_TIMEOUT_SECONDS").is_none() {
+        if let Some(seconds) = server.http_timeout_seconds {
+            env::set_var("ROUTIIUM_HTTP_TIMEOUT_SECONDS", seconds.to_string());
+        }
+    }
+    if env_string("ROUTIIUM_ADMIN_TOKEN").is_none() {
+        if let Some(env_name) = server
+            .admin_token_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if let Some(token) = env_string(env_name) {
+                env::set_var("ROUTIIUM_ADMIN_TOKEN", token);
+            }
+        }
+    }
+}
+
 async fn serve(args: ServeArgs) -> std::io::Result<()> {
     let runtime_config = RuntimeConfig::from_serve_args(args);
+
+    let yaml_config = match runtime_config.config_yaml_path.as_deref() {
+        Some(path) => match routiium::app_config::RoutiiumConfig::load_yaml(path) {
+            Ok(config) => {
+                tracing::info!(
+                    "YAML runtime config loaded from {} ({} aliases)",
+                    path,
+                    config.alias_count()
+                );
+                Some(Arc::new(std::sync::RwLock::new(config)))
+            }
+            Err(err) => {
+                tracing::error!("Failed to load YAML runtime config {}: {}", path, err);
+                return Err(std::io::Error::other(err.to_string()));
+            }
+        },
+        None => None,
+    };
+    if let Some(config) = yaml_config.as_ref() {
+        if let Ok(config) = config.read() {
+            apply_yaml_server_env(&config);
+        }
+    }
 
     // Initialize key backend and optional MCP config from CLI args
     let backend_opt = runtime_config
@@ -207,7 +275,33 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
     // Check for --router-config flag (alias map for Router)
     let router_config_arg = runtime_config.router_config_path.clone();
 
-    let (mcp_manager_arc, mcp_config_path) = if let Some(mcp_config_path) = mcp_config_arg.clone() {
+    let yaml_mcp_config = yaml_config.as_ref().map(|config| {
+        config
+            .read()
+            .ok()
+            .and_then(|config| config.mcp_config())
+            .unwrap_or_else(|| McpConfig {
+                mcp_servers: std::collections::HashMap::new(),
+            })
+    });
+    let (mcp_manager_arc, mcp_config_path) = if let Some(config) = yaml_mcp_config {
+        tracing::info!(
+            "Loading MCP configuration from YAML runtime config ({} servers)",
+            config.mcp_servers.len()
+        );
+        match McpClientManager::new(config).await {
+            Ok(manager) => (
+                Some(Arc::new(tokio::sync::RwLock::new(manager))),
+                runtime_config.config_yaml_path.clone(),
+            ),
+            Err(e) => {
+                tracing::error!("Failed to initialize YAML MCP client manager: {}", e);
+                return Err(std::io::Error::other(format!(
+                    "YAML MCP configuration could not be initialized: {e}"
+                )));
+            }
+        }
+    } else if let Some(mcp_config_path) = mcp_config_arg.clone() {
         tracing::info!("Loading MCP configuration from: {}", mcp_config_path);
         match McpConfig::load_from_file(&mcp_config_path) {
             Ok(config) => {
@@ -445,8 +539,17 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
         let has_backend = env::var("ROUTIIUM_RATE_LIMIT_BACKEND").is_ok()
             || env::var("ROUTIIUM_REDIS_URL").is_ok();
         let has_config = rate_limit_config_arg.is_some();
+        let has_yaml_policies = yaml_config
+            .as_ref()
+            .and_then(|config| {
+                config
+                    .read()
+                    .ok()
+                    .map(|config| !config.raw.rate_limit_policies.is_empty())
+            })
+            .unwrap_or(false);
 
-        if enabled && (has_backend || has_config) {
+        if enabled && (has_backend || has_config || has_yaml_policies) {
             match routiium::rate_limit::RateLimitManager::from_env() {
                 Ok(mgr) => {
                     let config_path = rate_limit_config_arg.clone();
@@ -456,6 +559,26 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
                         tracing::info!("Loading rate limit config from: {}", path);
                         if let Err(e) = mgr.load_file_config(&path).await {
                             tracing::warn!("Failed to load rate limit config: {}", e);
+                        }
+                    }
+                    if let Some(config) = yaml_config.as_ref().and_then(|config| {
+                        config
+                            .read()
+                            .ok()
+                            .map(|config| config.raw.rate_limit_policies.clone())
+                    }) {
+                        for (id, def) in config {
+                            let policy = routiium::rate_limit::RateLimitPolicy {
+                                id: id.clone(),
+                                buckets: def.buckets,
+                            };
+                            if let Err(e) = mgr.create_policy(policy).await {
+                                tracing::warn!(
+                                    "Failed to register YAML rate limit policy {}: {}",
+                                    id,
+                                    e
+                                );
+                            }
                         }
                     }
                     // Apply default env-based policy if present and no file config set it.
@@ -531,6 +654,7 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
         router_privacy_mode: effective_router_privacy_mode,
         rate_limit_manager,
         safety_audit: routiium::safety_audit::SafetyAuditManager::from_env(),
+        runtime_config: yaml_config,
     };
 
     // Startup mode announcement (managed vs passthrough)

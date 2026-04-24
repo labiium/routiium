@@ -134,13 +134,31 @@ docker build -t routiium .
 docker run --rm -p 8088:8088 -e OPENAI_API_KEY=sk-your-key routiium
 ```
 
+To run with the unified YAML runtime config:
+
+```bash
+cp routiium.yaml.example routiium.yaml
+docker run --rm -p 8088:8088 \
+  -e OPENAI_API_KEY=sk-your-key \
+  -e ROUTIIUM_ADMIN_TOKEN=change-me-admin-token \
+  -v "$PWD/routiium.yaml:/config/routiium.yaml:ro" \
+  routiium serve --config-yaml /config/routiium.yaml
+```
+
+The YAML file is a deployment profile, not an OpenAI-only or append-only requirement. It can define any OpenAI-compatible provider, disable system prompt injection per alias, use multiple system prompts, define inline prompts per alias, or use `prepend`, `append`, and `replace` prompt policies.
+It can also assign per-alias judge, response-guard, tool-result guard, MCP bundle, rate-limit fallback, and pricing-model policies. Reload a mounted YAML profile with `POST /reload/runtime-config` using the admin bearer token.
+
 Or use the included Compose setup:
 
 ```bash
 cp .env.example .env
-# edit .env
+# edit .env and set OPENAI_API_KEY plus ROUTIIUM_ADMIN_TOKEN
+# optional: cp routiium.yaml.example routiium.yaml and set ROUTIIUM_CONFIG_YAML_HOST=./routiium.yaml
 docker compose up --build
 ```
+
+The Compose file mounts `${ROUTIIUM_CONFIG_YAML_HOST:-./routiium.yaml.example}` to `/config/routiium.yaml` and sets `ROUTIIUM_CONFIG_YAML=/config/routiium.yaml` in the container.
+Unset `ROUTIIUM_CONFIG_YAML_HOST` to use the example profile, or point it at your own YAML file.
 
 ## Admin panel
 

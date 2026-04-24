@@ -244,7 +244,7 @@ services:
   routiium:
     build: .
     env_file: .env
-    command: ["--router-config=/app/router_aliases.json","--system-prompt-config=/app/system_prompt.json"]
+    command: ["serve","--router-config=/app/router_aliases.json","--system-prompt-config=/app/system_prompt.json"]
     volumes:
       - routiium-data:/data
       - ./system_prompt.json:/app/system_prompt.json:ro
@@ -277,10 +277,34 @@ services:
       ROUTIIUM_ROUTER_PRIVACY_MODE: "features"
       ROUTIIUM_ROUTER_STRICT: "1"
       ROUTIIUM_CACHE_TTL_MS: "60000"
-    command: ["--system-prompt-config=/app/system_prompt.json"]
+    command: ["serve","--system-prompt-config=/app/system_prompt.json"]
     volumes:
       - routiium-data:/data
       - ./system_prompt.json:/app/system_prompt.json:ro
+```
+
+### 6.3 Unified YAML Runtime Config in Docker
+
+The root `docker-compose.yml` mounts `${ROUTIIUM_CONFIG_YAML_HOST:-./routiium.yaml.example}` to `/config/routiium.yaml` and sets `ROUTIIUM_CONFIG_YAML=/config/routiium.yaml`.
+The checked-in YAML is a starter profile, not a requirement to use OpenAI or appended system prompts. You can define OpenAI-compatible providers, disable prompt injection per alias, use multiple system prompts, define inline prompts per alias, or use `prepend`, `append`, and `replace` system prompt policies.
+The same alias can also choose judge, response-guard, tool-result guard, MCP bundle, rate-limit fallback, and pricing-model policies. Use `POST /reload/runtime-config` with the admin token to reload a mounted YAML profile and reconnect YAML MCP servers without restarting.
+
+For a local editable config:
+
+```bash
+cp routiium.yaml.example routiium.yaml
+routiium config yaml validate --path routiium.yaml
+ROUTIIUM_CONFIG_YAML_HOST=./routiium.yaml docker compose up --build
+```
+
+For raw Docker:
+
+```bash
+docker run --rm -p 8088:8088 \
+  -e OPENAI_API_KEY="$OPENAI_API_KEY" \
+  -e ROUTIIUM_ADMIN_TOKEN="$ROUTIIUM_ADMIN_TOKEN" \
+  -v "$PWD/routiium.yaml:/config/routiium.yaml:ro" \
+  routiium serve --config-yaml /config/routiium.yaml
 ```
 
 To containerize the example router, you can reuse the Rust builder pattern:

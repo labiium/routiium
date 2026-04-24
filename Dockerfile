@@ -42,6 +42,7 @@ COPY --from=builder /build/target/release/routiium /usr/local/bin/routiium
 COPY mcp.json.example /opt/routiium/examples/mcp.json
 COPY system_prompt.json.example /opt/routiium/examples/system_prompt.json
 COPY routing.json.example /opt/routiium/examples/routing.json
+COPY routiium.yaml.example /opt/routiium/examples/routiium.yaml
 
 # Run as non-root
 USER app
@@ -53,14 +54,14 @@ ENV RUST_LOG=info \
     ROUTIIUM_ANALYTICS_JSONL_PATH=/data/analytics.jsonl \
     ROUTIIUM_CHAT_HISTORY_JSONL_PATH=/data/chat_history.jsonl
 
-# Persist sled data outside the container
-VOLUME ["/data"]
+# Persist sled data outside the container. Mount runtime YAML at /config/routiium.yaml when used.
+VOLUME ["/data", "/config"]
 
 # The service listens on 8088 by default
 EXPOSE 8088
 
-# Entrypoint: pass CLI args to select backend or MCP config, e.g.:
-#   docker run ... routiium --keys-backend=redis://127.0.0.1/
-#   docker run ... routiium --mcp-config=mcp.json
+# Entrypoint: pass CLI args after `serve`, e.g.:
+#   docker run ... routiium serve --keys-backend=redis://127.0.0.1/
+#   docker run ... routiium serve --config-yaml=/config/routiium.yaml
 ENTRYPOINT ["routiium"]
-CMD []
+CMD ["serve"]

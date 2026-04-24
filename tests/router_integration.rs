@@ -149,6 +149,10 @@ async fn router_judge_headers_are_forwarded() {
         policy_rev: None,
         policy_fingerprint: None,
         cacheable: None,
+        selector_scope: None,
+        selector_action: None,
+        selector_rules: None,
+        selector_reason: None,
     });
     let router = RouterStub::start(RouterResponseConfig::Plan(Box::new(plan))).await;
     let state = build_app_state(&router.url(), 60_000);

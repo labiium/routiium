@@ -83,5 +83,5 @@ MCP/browser/shell/database/cloud/payment tools should be available only to scope
 
 - [ ] `npm run package:trust:github:dry-run` returns the expected `routiium` / `labiium/routiium` / `publish-npm.yml` tuple.
 - [ ] npm Trusted Publishing is configured for package `routiium`; prefer no long-lived `NPM_TOKEN` secret.
-- [ ] The release tag matches both `package.json` and `Cargo.toml`, for example `v0.2.0`.
+- [ ] The release tag matches both `package.json` and `Cargo.toml`, for example `v0.3.0`.
 - [ ] GitHub release binaries are produced before npm publish so `npm install -g routiium` can download native assets.

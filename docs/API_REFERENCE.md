@@ -495,6 +495,7 @@ Reloads the MCP configuration file and reconnects servers.
 Auth: Admin bearer when `ROUTIIUM_ADMIN_TOKEN` is configured; otherwise protect via network ACLs.
 
 Prerequisite: The server must have been started with an MCP config path.
+If MCP is sourced from unified YAML, use `/reload/runtime-config` instead.
 
 Response (success):
 ```json
@@ -506,11 +507,40 @@ Response (success):
 }
 ```
 
+### POST /reload/runtime-config
+
+Reloads the unified YAML runtime config supplied with `--config-yaml` or `ROUTIIUM_CONFIG_YAML`.
+This updates aliases, providers, judge policies, response-guard policies, tool-result policies, system-prompt policies, rate-limit policies, MCP bundles, and YAML MCP servers after validation.
+The YAML `server` section is startup-only for fields such as bind address, managed mode, admin-token env indirection, and HTTP timeout; changing those fields requires a restart.
+
+Auth: Admin bearer when `ROUTIIUM_ADMIN_TOKEN` is configured; otherwise protect via network ACLs.
+
+Response (success):
+```json
+{
+  "success": true,
+  "message": "Unified YAML runtime config reloaded",
+  "config_path": "routiium.yaml",
+  "runtime_config": {
+    "enabled": true,
+    "alias_count": 2
+  },
+  "mcp": {
+    "servers": [],
+    "count": 0
+  },
+  "reload_scope": {
+    "hot_reloaded": ["model_aliases", "providers", "rate_limit_policies"],
+    "restart_required": ["server.bind_addr", "server.managed_mode"]
+  }
+}
+```
+
 ### POST /reload/system_prompt
 
 Reloads system prompt configuration.
 
-Auth: None (protect via network ACL)
+Auth: Admin bearer when `ROUTIIUM_ADMIN_TOKEN` is configured; otherwise protect via network ACLs
 
 Prerequisite: The server must have been started with a system prompt config path.
 
@@ -531,7 +561,7 @@ Response (success):
 
 Reloads `routing.json` configuration.
 
-Auth: None (protect via network ACL)
+Auth: Admin bearer when `ROUTIIUM_ADMIN_TOKEN` is configured; otherwise protect via network ACLs
 
 Response (success):
 ```json
@@ -548,13 +578,17 @@ Response (success):
 
 ### POST /reload/all
 
-Reloads both MCP and system prompt configurations (when configured).
+Reloads runtime YAML, MCP, system prompt, and routing configurations when configured.
 
-Auth: None (protect via network ACL)
+Auth: Admin bearer when `ROUTIIUM_ADMIN_TOKEN` is configured; otherwise protect via network ACLs
 
 Response (example):
 ```json
 {
+  "runtime_config": {
+    "success": true,
+    "message": "Unified YAML runtime config reloaded"
+  },
   "mcp": {
     "success": true,
     "message": "MCP configuration reloaded",
@@ -618,7 +652,7 @@ Notes:
 
 High-level analytics stats.
 
-Auth: None (protect via network ACL)
+Auth: Admin bearer when `ROUTIIUM_ADMIN_TOKEN` is configured; otherwise protect via network ACLs
 
 Response: Stats JSON with cost tracking information
 
@@ -647,7 +681,7 @@ Example response:
 
 Query raw events in a time range.
 
-Auth: None (protect via network ACL)
+Auth: Admin bearer when `ROUTIIUM_ADMIN_TOKEN` is configured; otherwise protect via network ACLs
 
 Query parameters:
 - start (u64, optional) – default now - 3600
@@ -714,7 +748,7 @@ curl -s "http://localhost:PORT/analytics/events?start=1730000000&end=1730007200&
 
 Aggregated metrics over a time range.
 
-Auth: None (protect via network ACL)
+Auth: Admin bearer when `ROUTIIUM_ADMIN_TOKEN` is configured; otherwise protect via network ACLs
 
 Query parameters:
 - start (u64, optional) – default now - 3600
@@ -764,7 +798,7 @@ Example response:
 
 Export events for a time range.
 
-Auth: None (protect via network ACL)
+Auth: Admin bearer when `ROUTIIUM_ADMIN_TOKEN` is configured; otherwise protect via network ACLs
 
 Query parameters:
 - start (u64, optional) – default now - 86400
@@ -793,7 +827,7 @@ curl -s -OJ "http://localhost:PORT/analytics/export?format=csv&start=1730000000&
 
 Clears all analytics data.
 
-Auth: None (protect via network ACL)
+Auth: Admin bearer when `ROUTIIUM_ADMIN_TOKEN` is configured; otherwise protect via network ACLs
 
 Response:
 ```json

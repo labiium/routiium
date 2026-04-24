@@ -44,6 +44,10 @@ If `OPENAI_API_KEY` is present, `auto` can call the configured judge model. If n
 
 Operators can add policy overlays with `ROUTIIUM_JUDGE_POLICY_PATH` or `ROUTIIUM_JUDGE_PROMPT_FILE`. These prompts are appended after Routiium's immutable safety prompt, size-limited, secret-redacted, and fingerprinted in `x-judge-policy-fingerprint`. They can make behavior stricter or select aliases such as `secure`; they cannot disable the built-in prompt-injection, exfiltration, dangerous-action, or tool-risk rules.
 
+Operators can also add a `judge_selector` policy. The default `baseline_always` scope keeps immutable deterministic checks active and uses selectors only to decide whether extra LLM/custom judge work should run. The explicit `gate_all` scope can skip the whole request judge for unmatched requests; use it only when a separate control plane enforces baseline safety.
+
+Tool result guarding is a separate pre-upstream sanitizer for agentic loops. `tool_result_guard.mode=warn` keeps suspicious tool output with a strong warning; `mode=omit` replaces the suspicious output before it reaches the tutor/model. Use `selection=inclusive` to apply only to configured tools or `selection=exclusive` to apply to all tools except a whitelist.
+
 Hard denials block by default (`ROUTIIUM_JUDGE_ON_DENY=block`). If an operator explicitly sets `ROUTIIUM_JUDGE_ON_DENY=route`, Routiium routes denial-class requests to `ROUTIIUM_JUDGE_DENY_TARGET` with no-store route metadata and strips tools from denial-rerouted requests before forwarding.
 
 For agentic applications, Routiium defaults to `ROUTIIUM_REJECTION_MODE=agent_result`: unsafe actions are not fulfilled, no upstream tool/model call is made for rejected requests, and the client receives an OpenAI-compatible assistant result explaining the rejection and judge reason. Set `ROUTIIUM_REJECTION_MODE=http_error` when you want strict HTTP 403 policy errors instead.

@@ -6,6 +6,7 @@ services:
         image: routiium:local
         environment:
             BIND_ADDR: "0.0.0.0:8088"
+            ROUTIIUM_CONFIG_YAML: "/config/routiium.yaml"
             ROUTIIUM_SLED_PATH: "/data/keys.db"
             ROUTIIUM_ANALYTICS_JSONL_PATH: "/data/analytics.jsonl"
             ROUTIIUM_ADMIN_TOKEN: "${ROUTIIUM_ADMIN_TOKEN:-}"
@@ -20,6 +21,7 @@ services:
             - "${ROUTIIUM_PORT:-8088}:8088"
         volumes:
             - routiium-data:/data
+            - ${ROUTIIUM_CONFIG_YAML_HOST:-./routiium.yaml.example}:/config/routiium.yaml:ro
         read_only: true
         tmpfs:
             - /tmp:rw,noexec,nosuid,size=64m

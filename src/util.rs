@@ -250,6 +250,9 @@ pub struct AppState {
     pub rate_limit_manager: Option<std::sync::Arc<crate::rate_limit::RateLimitManager>>,
     /// Safety audit trail for judge/router/response-guard decisions.
     pub safety_audit: std::sync::Arc<crate::safety_audit::SafetyAuditManager>,
+    /// Unified YAML runtime configuration, when configured.
+    pub runtime_config:
+        Option<std::sync::Arc<std::sync::RwLock<crate::app_config::CompiledRuntimeConfig>>>,
 }
 
 /// Build an HTTP client honoring proxy and timeout environment variables.
@@ -355,6 +358,7 @@ impl Default for AppState {
             router_privacy_mode: "features".to_string(),
             rate_limit_manager: None,
             safety_audit: crate::safety_audit::SafetyAuditManager::from_env(),
+            runtime_config: None,
         }
     }
 }
@@ -401,6 +405,7 @@ impl AppState {
             router_privacy_mode: "features".to_string(),
             rate_limit_manager: None,
             safety_audit: crate::safety_audit::SafetyAuditManager::from_env(),
+            runtime_config: None,
         }
     }
 
@@ -448,6 +453,7 @@ impl AppState {
             router_privacy_mode: "features".to_string(),
             rate_limit_manager: None,
             safety_audit: crate::safety_audit::SafetyAuditManager::from_env(),
+            runtime_config: None,
         }
     }
     /// Read the OpenAI API key from environment if present. Optional for /proxy.

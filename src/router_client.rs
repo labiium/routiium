@@ -411,6 +411,18 @@ pub struct ToolSignal {
     /// Hash of JSON schema (SHA-256)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub json_schema_hash: Option<String>,
+
+    /// OpenAI/Responses tool type, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_type: Option<String>,
+
+    /// Best-effort origin for the tool definition, such as client, mcp, or builtin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+
+    /// Optional deployer-defined grouping hints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
 }
 
 /// Request to Router for routing decision (v0.3)
@@ -720,6 +732,22 @@ pub struct JudgeMetadata {
     /// Whether this decision can be cached without including request content in the key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cacheable: Option<bool>,
+
+    /// Judge selector scope used for this decision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector_scope: Option<String>,
+
+    /// Judge selector action: judge, skip, or deny.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector_action: Option<String>,
+
+    /// Selector rule identifiers that matched this request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector_rules: Option<Vec<String>>,
+
+    /// Human-readable selector reason for audit/debug views.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector_reason: Option<String>,
 }
 
 /// Complete routing plan from Router (v0.3)
@@ -2070,6 +2098,11 @@ fn extract_tools(payload: &serde_json::Value) -> Vec<ToolSignal> {
 
     if let Some(tool_array) = payload.get("tools").and_then(|t| t.as_array()) {
         for tool in tool_array {
+            let tool_type = tool
+                .get("type")
+                .and_then(|value| value.as_str())
+                .unwrap_or("function")
+                .to_string();
             if let Some(name) = tool
                 .get("function")
                 .and_then(|f| f.get("name"))
@@ -2085,12 +2118,47 @@ fn extract_tools(payload: &serde_json::Value) -> Vec<ToolSignal> {
                 tools.push(ToolSignal {
                     name: name.to_string(),
                     json_schema_hash: schema_hash,
+                    source: Some(tool_source(&tool_type, tool)),
+                    tool_type: Some(tool_type),
+                    groups: tool
+                        .get("groups")
+                        .and_then(|groups| groups.as_array())
+                        .map(|groups| {
+                            groups
+                                .iter()
+                                .filter_map(|group| group.as_str().map(ToOwned::to_owned))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 });
             }
         }
     }
 
     tools
+}
+
+fn tool_source(tool_type: &str, tool: &serde_json::Value) -> String {
+    if let Some(source) = tool
+        .get("source")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            tool.get("function")
+                .and_then(|function| function.get("source"))
+                .and_then(|value| value.as_str())
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return source.to_ascii_lowercase();
+    }
+    if matches!(
+        tool_type,
+        "web_search" | "web_search_preview" | "computer_use_preview"
+    ) {
+        return "builtin".to_string();
+    }
+    "client".to_string()
 }
 
 /// Simple hash function (not cryptographically secure, just for fingerprinting)
