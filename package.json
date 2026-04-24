@@ -1,6 +1,6 @@
 {
   "name": "routiium",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "OpenAI-compatible LLM gateway with safe-by-default routing, judging, and managed keys.",
   "license": "Apache-2.0",
   "homepage": "https://github.com/labiium/routiium#readme",

@@ -345,21 +345,21 @@ impl RoutiiumConfig {
                     ));
                 }
             }
-            let policy_fingerprint = alias_policy_fingerprint(
-                alias,
-                model_alias,
-                &provider_id,
-                judge_policy_id.as_deref(),
-                judge_policy.as_ref(),
-                tool_result_policy_id.as_deref(),
-                tool_result_policy.as_ref(),
-                system_prompt_policy_id.as_deref(),
-                system_prompt_policy.as_ref(),
-                response_guard_policy_id.as_deref(),
-                response_guard_policy.as_ref(),
-                mcp_bundle_id.as_deref(),
-                mcp_bundle.as_ref(),
-            )?;
+            let policy_fingerprint = alias_policy_fingerprint(serde_json::json!({
+                "alias": alias,
+                "provider_id": provider_id,
+                "model_alias": model_alias,
+                "judge_policy_id": judge_policy_id.as_deref(),
+                "judge_policy": judge_policy.as_ref(),
+                "tool_result_policy_id": tool_result_policy_id.as_deref(),
+                "tool_result_policy": tool_result_policy.as_ref(),
+                "system_prompt_policy_id": system_prompt_policy_id.as_deref(),
+                "system_prompt_policy": system_prompt_policy.as_ref(),
+                "response_guard_policy_id": response_guard_policy_id.as_deref(),
+                "response_guard_policy": response_guard_policy.as_ref(),
+                "mcp_bundle_id": mcp_bundle_id.as_deref(),
+                "mcp_bundle": mcp_bundle.as_ref()
+            }))?;
             let policy_rev = format!(
                 "yaml:{}:{}",
                 alias.replace(|c: char| !c.is_ascii_alphanumeric(), "_"),
@@ -400,36 +400,7 @@ impl RoutiiumConfig {
     }
 }
 
-fn alias_policy_fingerprint(
-    alias: &str,
-    model_alias: &ModelAliasConfig,
-    provider_id: &str,
-    judge_policy_id: Option<&str>,
-    judge_policy: Option<&JudgePolicyConfig>,
-    tool_result_policy_id: Option<&str>,
-    tool_result_policy: Option<&ToolResultPolicyConfig>,
-    system_prompt_policy_id: Option<&str>,
-    system_prompt_policy: Option<&SystemPromptPolicyConfig>,
-    response_guard_policy_id: Option<&str>,
-    response_guard_policy: Option<&ResponseGuardPolicyConfig>,
-    mcp_bundle_id: Option<&str>,
-    mcp_bundle: Option<&McpBundleConfig>,
-) -> Result<String> {
-    let value = serde_json::json!({
-        "alias": alias,
-        "provider_id": provider_id,
-        "model_alias": model_alias,
-        "judge_policy_id": judge_policy_id,
-        "judge_policy": judge_policy,
-        "tool_result_policy_id": tool_result_policy_id,
-        "tool_result_policy": tool_result_policy,
-        "system_prompt_policy_id": system_prompt_policy_id,
-        "system_prompt_policy": system_prompt_policy,
-        "response_guard_policy_id": response_guard_policy_id,
-        "response_guard_policy": response_guard_policy,
-        "mcp_bundle_id": mcp_bundle_id,
-        "mcp_bundle": mcp_bundle
-    });
+fn alias_policy_fingerprint(value: serde_json::Value) -> Result<String> {
     let canonical = serde_json::to_string(&value)?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     canonical.hash(&mut hasher);

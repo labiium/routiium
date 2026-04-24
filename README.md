@@ -99,16 +99,16 @@ Routiium now exposes a `clap`-based CLI:
 | Command | Purpose |
 | --- | --- |
 | `routiium serve` | Run the HTTP gateway. Existing root flags still work as a compatibility alias. |
-| `routiium config init --profile <openai|vllm|router|judge|bedrock|synthetic>` | Create or update `~/.config/routiium/config.env` with starter settings. |
-| `routiium config set|get|list|path` | Manage the per-user config file without hand-editing env files. |
-| `routiium init --profile <openai|vllm|router|judge|bedrock|synthetic>` | Generate starter `.env` and profile config for repo-local/deploy workflows. |
+| `routiium config init --profile <profile>` | Create or update `~/.config/routiium/config.env` with starter settings. Profiles: `openai`, `vllm`, `router`, `judge`, `bedrock`, `synthetic`. |
+| `routiium config set`, `get`, `list`, `path` | Manage the per-user config file without hand-editing env files. |
+| `routiium init --profile <profile>` | Generate starter `.env` and profile config for repo-local/deploy workflows. Profiles: `openai`, `vllm`, `router`, `judge`, `bedrock`, `synthetic`. |
 | `routiium doctor` | Check env/config files, server health, and judge/router readiness. Use `--production` before launch. |
 | `routiium status` | Fetch `/status` from a running server. |
-| `routiium key create|list|revoke` | Manage API keys through the admin HTTP API. |
+| `routiium key create`, `list`, `revoke` | Manage API keys through the admin HTTP API. |
 | `routiium router probe` | Send a small request and print routing-related response details. |
 | `routiium router explain` | Explain the embedded router + judge decision locally. |
-| `routiium judge profile shadow|protect|enforce|off` | Update local env defaults for judge rollout. |
-| `routiium judge policy init|validate` | Create or validate custom judge prompt/policy overlays. |
+| `routiium judge profile <mode>` | Update local env defaults for judge rollout. Modes: `shadow`, `protect`, `enforce`, `off`. |
+| `routiium judge policy init`, `validate` | Create or validate custom judge prompt/policy overlays. |
 | `routiium judge explain` | Explain judge action, target alias, and policy fingerprint locally. |
 | `routiium judge test` | Run built-in prompt-injection/exfiltration/dangerous-action judge checks. |
 | `routiium docs` | Print the main docs entry points. |
