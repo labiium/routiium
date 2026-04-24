@@ -1,27 +1,21 @@
 # Getting Started with Routiium
 
-Routiium is now safe-by-default: if you do not configure a remote Router, `routiium serve` enables the embedded EduRouter-style router, request judge, response guard, and streaming safety automatically.
+Routiium is now safe-by-default: if you do not configure a remote Router, `routiium serve` enables the embedded policy router, request judge, response guard, and streaming safety automatically.
 
 ## Path 1: One-key secure gateway
 
-```bash
-routiium init --profile openai --out .env
-```
-
-Edit `.env`:
-
-```env
-OPENAI_API_KEY=sk-your-provider-key
-ROUTIIUM_ADMIN_TOKEN=change-me-admin-token
-```
-
-Then run:
+Use the per-user config for the easiest app-like setup:
 
 ```bash
-routiium doctor --env-file .env
+routiium config init --profile openai
+routiium config set OPENAI_API_KEY sk-your-provider-key
+routiium config set ROUTIIUM_ADMIN_TOKEN change-me-admin-token
+routiium doctor
 routiium serve
 routiium status
 ```
+
+If you prefer repo-local deployment files, `routiium init --profile openai --out .env` still works and `routiium doctor --env-file .env` will inspect it.
 
 Defaults in this path:
 
@@ -73,9 +67,9 @@ routiium serve
 
 This profile uses `ROUTIIUM_UPSTREAM_MODE=chat`, so Routiium forwards Chat Completions-shaped requests to a Chat-compatible upstream. Set `ROUTIIUM_ROUTER_MODE=off` only if you explicitly want legacy routing without embedded judge decisions.
 
-## Path 5: Remote Router or EduRouter
+## Path 5: Remote Router-compatible service
 
-Use this when you want central policy/catalog/health management outside the Routiium process:
+Use this only when you want central policy/catalog/health management outside the Routiium process. The built-in router is the default and requires no separate project:
 
 ```bash
 routiium init --profile router --out .env
@@ -110,6 +104,21 @@ routiium judge policy validate --path config/judge-policy.json
 
 For any external/remote judge path, keep `ROUTIIUM_CACHE_TTL_MS=0` and judged plans at `cache.ttl_ms: 0` when the requirement is “judge every request.”
 Custom judge prompts are policy overlays only; Routiium's built-in safety prompt remains active and sensitive requests route to `secure` by default.
+
+
+## Path 7: Synthetic/Hugging Face-compatible judge testing
+
+Synthetic-compatible providers can be used both as the upstream and as the isolated LLM judge:
+
+```bash
+routiium config init --profile synthetic
+routiium config set OPENAI_API_KEY syn-your-synthetic-key
+routiium config set ROUTIIUM_JUDGE_MODEL hf:zai-org/GLM-5.1
+routiium doctor
+routiium serve
+```
+
+The profile sets `ROUTIIUM_UPSTREAM_MODE=chat`, `OPENAI_BASE_URL=https://api.synthetic.new/openai/v1`, `ROUTIIUM_JUDGE_BASE_URL=https://api.synthetic.new/openai/v1`, embedded routing, `ROUTIIUM_CACHE_TTL_MS=0`, and agent-friendly rejection responses. You can swap the judge model with `hf:MiniMaxAI/MiniMax-M2.5` or `hf:moonshotai/Kimi-K2.5` using `routiium config set ROUTIIUM_JUDGE_MODEL ...`.
 
 ## Next steps
 

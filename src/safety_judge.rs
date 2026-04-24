@@ -253,6 +253,7 @@ pub struct SafetyJudgeConfig {
     pub llm_model: String,
     pub llm_api_key_env: String,
     pub llm_timeout_ms: u64,
+    pub llm_max_tokens: u32,
     pub safe_target: String,
     pub sensitive_target: String,
     pub deny_target: String,
@@ -343,6 +344,11 @@ impl SafetyJudgeConfig {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(800),
+            llm_max_tokens: std::env::var("ROUTIIUM_JUDGE_MAX_TOKENS")
+                .or_else(|_| std::env::var("ROUTER_JUDGE_MAX_TOKENS"))
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(1024),
             safe_target: std::env::var("ROUTIIUM_JUDGE_SAFE_TARGET")
                 .or_else(|_| std::env::var("ROUTER_JUDGE_SAFE_MODEL"))
                 .ok()
@@ -809,6 +815,7 @@ async fn call_llm_judge(
                 }
             ],
             "temperature": 0,
+            "max_tokens": config.llm_max_tokens,
             "response_format": {"type": "json_object"}
         }))
         .send()
@@ -828,7 +835,7 @@ async fn call_llm_judge(
         .first()
         .and_then(|choice| choice.message.content.as_deref())
         .ok_or_else(|| "judge response did not include content".to_string())?;
-    let payload: LlmJudgePayload = serde_json::from_str(content).map_err(|err| err.to_string())?;
+    let payload = parse_llm_judge_payload(content)?;
     let verdict = parse_verdict(&payload.verdict);
     let mut action = parse_action(payload.action.as_deref(), verdict);
     let mut target = payload.target;
@@ -859,6 +866,56 @@ async fn call_llm_judge(
     })
 }
 
+fn parse_llm_judge_payload(content: &str) -> Result<LlmJudgePayload, String> {
+    serde_json::from_str::<LlmJudgePayload>(content)
+        .or_else(|_| {
+            let trimmed = content.trim();
+            let unfenced = trimmed
+                .strip_prefix("```json")
+                .or_else(|| trimmed.strip_prefix("```JSON"))
+                .or_else(|| trimmed.strip_prefix("```"))
+                .and_then(|value| value.strip_suffix("```"))
+                .map(str::trim)
+                .unwrap_or(trimmed);
+            serde_json::from_str::<LlmJudgePayload>(unfenced)
+        })
+        .or_else(|_| {
+            extract_json_object(content)
+                .ok_or_else(|| "judge response did not contain a JSON object".to_string())
+                .and_then(|json| {
+                    serde_json::from_str::<LlmJudgePayload>(json).map_err(|err| err.to_string())
+                })
+        })
+        .map_err(|err| err.to_string())
+}
+
+fn extract_json_object(content: &str) -> Option<&str> {
+    let start = content.find('{')?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, ch) in content[start..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            '{' if !in_string => depth += 1,
+            '}' if !in_string => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let end = start + offset + ch.len_utf8();
+                    return Some(&content[start..end]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn parse_verdict(value: &str) -> SafetyVerdict {
     match value.trim().to_ascii_lowercase().as_str() {
         "deny" => SafetyVerdict::Deny,
@@ -869,19 +926,18 @@ fn parse_verdict(value: &str) -> SafetyVerdict {
 }
 
 fn parse_action(value: Option<&str>, verdict: SafetyVerdict) -> SafetyAction {
-    match value.unwrap_or("").trim().to_ascii_lowercase().as_str() {
-        "route" | "reroute" | "safe_model" | "safe-model" => SafetyAction::Route,
-        "block" | "deny" => SafetyAction::Block,
-        "needs_approval" | "needs-approval" | "approval" | "reject" | "rejected" => {
-            SafetyAction::Reject
-        }
-        "allow" => SafetyAction::Allow,
-        _ => match verdict {
-            SafetyVerdict::Allow => SafetyAction::Allow,
-            SafetyVerdict::Downgrade => SafetyAction::Route,
-            SafetyVerdict::Deny => SafetyAction::Block,
-            SafetyVerdict::NeedsApproval => SafetyAction::Reject,
+    match verdict {
+        // The verdict is authoritative. Some OpenAI-compatible models return
+        // contradictory fields (for example verdict=allow/action=reject); do
+        // not let an inconsistent action reject a safe request.
+        SafetyVerdict::Allow => SafetyAction::Allow,
+        SafetyVerdict::Downgrade => SafetyAction::Route,
+        SafetyVerdict::Deny => match value.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+            "route" | "reroute" | "safe_model" | "safe-model" => SafetyAction::Route,
+            "reject" | "rejected" => SafetyAction::Reject,
+            _ => SafetyAction::Block,
         },
+        SafetyVerdict::NeedsApproval => SafetyAction::Reject,
     }
 }
 
@@ -1230,6 +1286,33 @@ mod tests {
     use super::*;
     use crate::router_client::{ConversationSignals, PrivacyMode};
 
+    #[test]
+    fn parses_fenced_llm_judge_json() {
+        let content = r#"```json
+{
+  "verdict": "allow",
+  "action": "allow",
+  "risk_level": "low",
+  "reason": "safe",
+  "categories": [],
+  "target": null,
+  "requires_approval": false
+}
+```"#;
+        let payload = parse_llm_judge_payload(content).unwrap();
+        assert_eq!(payload.verdict, "allow");
+        assert_eq!(payload.action.as_deref(), Some("allow"));
+        assert_eq!(payload.risk_level.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn allow_verdict_overrides_contradictory_reject_action() {
+        assert_eq!(
+            parse_action(Some("reject"), SafetyVerdict::Allow),
+            SafetyAction::Allow
+        );
+    }
+
     fn req_with_text(text: &str) -> RouteRequest {
         RouteRequest {
             schema_version: Some("1.1".to_string()),
@@ -1270,6 +1353,7 @@ mod tests {
             llm_model: String::new(),
             llm_api_key_env: String::new(),
             llm_timeout_ms: 10,
+            llm_max_tokens: 128,
             safe_target: "safe".to_string(),
             sensitive_target: "secure".to_string(),
             deny_target: "secure".to_string(),
@@ -1298,6 +1382,7 @@ mod tests {
             llm_model: String::new(),
             llm_api_key_env: String::new(),
             llm_timeout_ms: 10,
+            llm_max_tokens: 128,
             safe_target: "safe".to_string(),
             sensitive_target: "secure".to_string(),
             deny_target: "secure".to_string(),

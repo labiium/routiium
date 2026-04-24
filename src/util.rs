@@ -2,47 +2,60 @@ use actix_web::HttpResponse;
 use http::StatusCode;
 use tracing_subscriber::{fmt, EnvFilter};
 
-/// Load environment variables from explicit env file hints, `.envfile`, or `.env`.
+/// Return the default per-user Routiium config file path.
 ///
-/// Existing process variables are not overwritten. The returned string describes
-/// the source that was loaded and is intended for startup observability.
-pub fn load_env() -> String {
-    // Try explicit environment file variables first
-    let mut env_source: String = "none".into();
-    for key in ["ENV_FILE", "ENVFILE", "DOTENV_PATH"] {
-        if let Ok(p) = std::env::var(key) {
-            let p = p.trim();
-            if !p.is_empty()
-                && std::path::Path::new(p).is_file()
-                && dotenvy::from_filename(p).is_ok()
-            {
-                env_source = format!("{p} ({key})");
-                break;
-            }
+/// This follows the XDG convention on Unix-like systems:
+/// `$XDG_CONFIG_HOME/routiium/config.env`, falling back to
+/// `$HOME/.config/routiium/config.env`.
+pub fn default_user_config_path() -> Option<std::path::PathBuf> {
+    if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
+        let path = std::path::PathBuf::from(config_home);
+        if !path.as_os_str().is_empty() {
+            return Some(path.join("routiium").join("config.env"));
+        }
+    }
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join(".config").join("routiium").join("config.env"))
+}
+
+/// Load environment variables from Routiium's supported env files.
+///
+/// Precedence is: existing process environment > explicit config file
+/// (`--config`, `ROUTIIUM_CONFIG`, `ENV_FILE`, `ENVFILE`, `DOTENV_PATH`) >
+/// local `.envfile` / `.env` > per-user XDG config. Lower-precedence files are
+/// loaded first, and higher-precedence files may replace values that came from
+/// lower-precedence files, but never replace variables that existed in the
+/// process environment before this function ran.
+pub fn load_env_with_config(cli_config: Option<&std::path::Path>) -> String {
+    let original_env: std::collections::HashSet<String> =
+        std::env::vars().map(|(k, _)| k).collect();
+    let mut sources = Vec::new();
+
+    if let Some(path) = default_user_config_path().filter(|path| path.is_file()) {
+        if load_env_file_layered(&path, &original_env) {
+            sources.push(format!("{} (user config)", path.display()));
         }
     }
 
-    // Next, support conventional ".envfile"
-    if env_source == "none"
-        && std::path::Path::new(".envfile").is_file()
-        && dotenvy::from_filename(".envfile").is_ok()
-    {
-        env_source = ".envfile".into();
+    for candidate in [
+        std::path::PathBuf::from(".envfile"),
+        std::path::PathBuf::from(".env"),
+    ] {
+        if candidate.is_file() && load_env_file_layered(&candidate, &original_env) {
+            sources.push(candidate.display().to_string());
+            break;
+        }
     }
 
-    // Default to standard ".env" discovery in current working directory
-    if env_source == "none" && dotenvy::dotenv().is_ok() {
-        env_source = ".env".into();
-    }
-
-    // If still not found, search upward from the executable directory for a .env file.
-    if env_source == "none" {
+    if sources.is_empty() {
         if let Ok(exe) = std::env::current_exe() {
             let mut dir_opt = exe.parent();
             while let Some(dir) = dir_opt {
                 let candidate = dir.join(".env");
-                if candidate.is_file() && dotenvy::from_filename(&candidate).is_ok() {
-                    env_source = candidate.display().to_string();
+                if candidate.is_file() && load_env_file_layered(&candidate, &original_env) {
+                    sources.push(candidate.display().to_string());
                     break;
                 }
                 dir_opt = dir.parent();
@@ -50,44 +63,93 @@ pub fn load_env() -> String {
         }
     }
 
-    // Tolerant manual parser: if still none, try reading "./.env" and set keys not already present.
-    if env_source == "none" {
-        if let Ok(cwd) = std::env::current_dir() {
-            let candidate = cwd.join(".env");
-            if candidate.is_file() {
-                if let Ok(text) = std::fs::read_to_string(&candidate) {
-                    let mut loaded = 0usize;
-                    for raw in text.lines() {
-                        let line = raw.trim();
-                        if line.is_empty() || line.starts_with('#') || !line.contains('=') {
-                            continue;
-                        }
-                        let mut parts = line.splitn(2, '=');
-                        if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-                            let key = k.trim();
-                            if key.is_empty() || std::env::var_os(key).is_some() {
-                                continue; // don't overwrite existing env
-                            }
-                            let mut val = v.trim().to_string();
-                            // Strip surrounding single or double quotes if present
-                            if (val.starts_with('"') && val.ends_with('"'))
-                                || (val.starts_with('\'') && val.ends_with('\''))
-                            {
-                                val = val[1..val.len().saturating_sub(1)].to_string();
-                            }
-                            std::env::set_var(key, val);
-                            loaded += 1;
-                        }
-                    }
-                    if loaded > 0 {
-                        env_source = format!("{} (manual)", candidate.display());
-                    }
-                }
+    for key in ["ENV_FILE", "ENVFILE", "DOTENV_PATH", "ROUTIIUM_CONFIG"] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value.trim();
+            let path = std::path::Path::new(value);
+            if !value.is_empty() && path.is_file() && load_env_file_layered(path, &original_env) {
+                sources.push(format!("{value} ({key})"));
+                break;
             }
         }
     }
 
-    env_source
+    if let Some(path) = cli_config.filter(|path| path.is_file()) {
+        if load_env_file_layered(path, &original_env) {
+            sources.push(format!("{} (--config)", path.display()));
+        }
+    }
+
+    if sources.is_empty() {
+        "none".into()
+    } else {
+        sources.join(", ")
+    }
+}
+
+/// Load environment variables from the default Routiium env sources.
+pub fn load_env() -> String {
+    load_env_with_config(None)
+}
+
+fn load_env_file_layered(
+    path: &std::path::Path,
+    original_env: &std::collections::HashSet<String>,
+) -> bool {
+    if let Ok(iter) = dotenvy::from_path_iter(path) {
+        let mut ok = true;
+        for item in iter {
+            match item {
+                Ok((key, value)) => set_layered_env(key.trim(), value, original_env),
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            return true;
+        }
+    }
+
+    // Keep the previous tolerant fallback behavior for hand-written .env files:
+    // ignore comments/blank/malformed lines and load key=value pairs only.
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let mut loaded = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || !line.contains('=') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let mut value = value.trim().to_string();
+        if (value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\''))
+        {
+            value = value[1..value.len().saturating_sub(1)].to_string();
+        }
+        set_layered_env(key, value, original_env);
+        loaded = true;
+    }
+    loaded
+}
+
+fn set_layered_env<K>(key: K, value: String, original_env: &std::collections::HashSet<String>)
+where
+    K: AsRef<str>,
+{
+    let key = key.as_ref();
+    if !original_env.contains(key) {
+        std::env::set_var(key, value);
+    }
 }
 
 /// Initialize structured tracing based on RUST_LOG and record the env source.

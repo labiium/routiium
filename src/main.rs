@@ -8,10 +8,11 @@ use routiium::mcp_config::McpConfig;
 use routiium::server::config_routes;
 use routiium::util::{
     build_http_client_from_env, cors_config_from_env, env_bind_addr, init_tracing_with_env_source,
-    load_env, AppState,
+    load_env_with_config, AppState,
 };
 use std::env;
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[actix_web::main]
@@ -26,9 +27,29 @@ async fn main() -> anyhow::Result<()> {
         return dispatch(cli, None).await;
     }
 
-    let env_source = load_env();
+    let config_hint = config_arg_from_os_args(env::args_os());
+    let env_source = load_env_with_config(config_hint.as_deref());
     let cli = Cli::parse_compat();
     dispatch(cli, Some(env_source)).await
+}
+
+fn config_arg_from_os_args<I>(args: I) -> Option<PathBuf>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut iter = args.into_iter().skip(1);
+    while let Some(arg) = iter.next() {
+        let text = arg.to_string_lossy();
+        if text == "--config" {
+            return iter.next().map(PathBuf::from);
+        }
+        if let Some(value) = text.strip_prefix("--config=") {
+            if !value.trim().is_empty() {
+                return Some(PathBuf::from(value));
+            }
+        }
+    }
+    None
 }
 
 async fn dispatch(cli: Cli, env_source: Option<String>) -> anyhow::Result<()> {
@@ -295,7 +316,7 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
 
     // Load router configuration. Explicit local/remote routers retain precedence;
     // otherwise Routiium installs the embedded secure router by default so users
-    // get EduRouter-like aliases and request judging without another service.
+    // get policy-router aliases and request judging without another service.
     let mut router_config_path_state: Option<String> = None;
     let mut router_url_state: Option<String> = None;
     let mut embedded_router_active = false;

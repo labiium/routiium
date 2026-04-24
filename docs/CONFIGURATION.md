@@ -1,6 +1,34 @@
 # Routiium Configuration
 
-Routiium reads process environment variables, `.env`/`.envfile`, and selected CLI flags. CLI flags are best for local experiments; env and config files are better for deploys.
+Routiium reads CLI flags, process environment variables, explicit env/config files, local `.env`/`.envfile`, and a per-user XDG config file at `$XDG_CONFIG_HOME/routiium/config.env` or `~/.config/routiium/config.env`. CLI flags are best for local experiments; env and config files are better for deploys.
+
+
+## Per-user config
+
+For app-like onboarding, use the `config` CLI instead of hand-editing a project `.env`:
+
+```bash
+routiium config path
+routiium config init --profile openai
+routiium config set OPENAI_API_KEY sk-your-provider-key
+routiium doctor
+routiium serve
+```
+
+The default config path is `$XDG_CONFIG_HOME/routiium/config.env`, falling back to `~/.config/routiium/config.env`. `routiium serve --config PATH` and `ROUTIIUM_CONFIG=PATH` select a specific file.
+
+Precedence is: CLI flags > existing process environment > explicit config file (`--config`, `ROUTIIUM_CONFIG`, `ENV_FILE`, `ENVFILE`, or `DOTENV_PATH`) > local `.envfile`/`.env` > per-user config. This lets the user config hold safe defaults while deployment env vars still win.
+
+Use `routiium config init --profile synthetic` to scaffold Synthetic/Hugging Face-compatible judge testing defaults:
+
+```env
+OPENAI_BASE_URL=https://api.synthetic.new/openai/v1
+ROUTIIUM_UPSTREAM_MODE=chat
+ROUTIIUM_JUDGE_BASE_URL=https://api.synthetic.new/openai/v1
+ROUTIIUM_JUDGE_MODEL=hf:zai-org/GLM-5.1
+ROUTIIUM_JUDGE_MAX_TOKENS=1024
+ROUTIIUM_CACHE_TTL_MS=0
+```
 
 ## Server basics
 
@@ -44,7 +72,7 @@ Routiium reads process environment variables, `.env`/`.envfile`, and selected CL
 | --- | --- | --- |
 | `ROUTIIUM_BACKENDS` | unset | Semicolon-separated legacy backend rules used only when embedded/remote routing is disabled or allowed to fall back. |
 | `ROUTIIUM_ROUTER_MODE` | `embedded` | `embedded` for built-in router/judge; `off`/`legacy` to disable it. |
-| `ROUTIIUM_ROUTER_URL` | unset | Remote Router/EduRouter URL. Takes precedence over embedded routing. |
+| `ROUTIIUM_ROUTER_URL` | unset | Remote Router-compatible policy service URL. Takes precedence over embedded routing. |
 | `ROUTIIUM_ROUTER_TIMEOUT_MS` | `15` | Remote router request timeout in milliseconds. |
 | `ROUTIIUM_CACHE_TTL_MS` | `15000` remote, `0` embedded status | Local route-plan cache horizon for cached remote clients. |
 | `ROUTIIUM_ROUTER_PRIVACY_MODE` | `full` embedded, `features` remote profile | `features`, `summary`, or `full`. |
@@ -72,6 +100,7 @@ Routiium consumes the `ROUTIIUM_JUDGE_*` variables for the embedded judge. The l
 | `ROUTIIUM_JUDGE_PROMPT_FILE` | unset | Optional operator prompt file appended after Routiium's immutable safety prompt. |
 | `ROUTIIUM_JUDGE_API_KEY_ENV` | `OPENAI_API_KEY` | Env var holding the judge provider key. |
 | `ROUTIIUM_JUDGE_TIMEOUT_MS` | `800` | Judge timeout. |
+| `ROUTIIUM_JUDGE_MAX_TOKENS` | `1024` | Maximum tokens for the JSON LLM-judge response. Reasoning-heavy judge models may need this headroom. |
 | `ROUTIIUM_WEB_JUDGE` | `restricted` | `off`, `restricted`, or `full`; restricted does URL/domain checks without sending private prompts to search. |
 | `ROUTIIUM_RESPONSE_GUARD` | inherits judge mode | `off`, `shadow`, `protect`, or `enforce`; scans successful outputs for prompt/secret leakage and dangerous-action guidance. |
 | `ROUTIIUM_STREAMING_SAFETY` | `chunk` | `off`, `chunk`, `buffer`, or `force_non_stream`; risky judged streams are forced to non-streaming so the response guard can inspect the whole body. |

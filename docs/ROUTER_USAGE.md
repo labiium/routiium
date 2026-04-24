@@ -14,7 +14,7 @@ routiium router probe --model auto
 The CLI does not replace the Router API contract below; it gives operators a faster way to inspect embedded routing and verify remote Routiium-to-Router paths.
 
 
-The router layer lets Routiium resolve human-friendly model aliases into concrete upstream endpoints and policies. When no remote Router is configured, Routiium uses its embedded EduRouter-style policy router and safety judge by default. This guide explains how routing decisions are made, which configuration hooks are available, how to wire everything up in Docker, and how to verify and troubleshoot router integration.
+The router layer lets Routiium resolve human-friendly model aliases into concrete upstream endpoints and policies. When no remote Router is configured, Routiium uses its embedded policy router and safety judge by default. This guide explains how routing decisions are made, which configuration hooks are available, how to wire everything up in Docker, and how to verify and troubleshoot router integration.
 
 **Table of Contents:**
 - [How Routing Works](#1-how-routing-works)
@@ -100,7 +100,7 @@ The router’s `RoutePlan.content_used` field (and the `X-Content-Used` response
 
 ### 4.1 Built-in and remote LLM-as-judge
 
-Routiium now includes a built-in request judge in the embedded router. It runs deterministic checks for prompt injection, exfiltration, risky tools, dangerous actions, and suspicious URLs; its response guard scans outputs for prompt/secret leakage and dangerous guidance; when configured with a provider key, it can also call an isolated LLM judge with redacted context. Sensitive-but-allowable requests route to the built-in `secure` alias. Remote Router/EduRouter deployments can still return judge metadata through the same `RoutePlan.judge` field.
+Routiium now includes a built-in request judge in the embedded router. It runs deterministic checks for prompt injection, exfiltration, risky tools, dangerous actions, and suspicious URLs; its response guard scans outputs for prompt/secret leakage and dangerous guidance; when configured with a provider key, it can also call an isolated LLM judge with redacted context. Sensitive-but-allowable requests route to the built-in `secure` alias. Remote Router-compatible deployments can still return judge metadata through the same `RoutePlan.judge` field.
 
 By default, policy rejections are returned as OpenAI-compatible assistant results (`ROUTIIUM_REJECTION_MODE=agent_result`) so agentic loops can observe the denial reason and continue. Use `ROUTIIUM_REJECTION_MODE=http_error` if a deployment should surface safety policy rejections as HTTP 403 errors instead.
 

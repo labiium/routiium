@@ -1227,11 +1227,11 @@ impl LocalRouter for LocalPolicyRouter {
     }
 }
 
-/// Built-in EduRouter-like router used when no external router is configured.
+/// Built-in policy router used when no external router is configured.
 ///
 /// This router gives single-binary Routiium installs policy-aware aliases,
 /// request-level safety judging, basic cost/latency/context scoring, and a
-/// Router Schema-compatible plan without deploying a separate EduRouter service.
+/// Router Schema-compatible plan without deploying a separate router service.
 pub struct EmbeddedDefaultRouter {
     models: Vec<EmbeddedModel>,
     safety: crate::safety_judge::SafetyJudgeConfig,

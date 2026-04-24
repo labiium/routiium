@@ -1,6 +1,6 @@
 # Routiium Security Model: Embedded Router and Judge
 
-Routiium's embedded router runs a request safety judge before selecting an upstream. The goal is to make the default path useful without a separate EduRouter deployment while reducing prompt injection, exfiltration, unsafe tool use, and dangerous-action risk.
+Routiium's embedded router runs a request safety judge before selecting an upstream. The goal is to make the default path useful without a separate routing service while reducing prompt injection, exfiltration, unsafe tool use, and dangerous-action risk.
 
 ## Default posture
 

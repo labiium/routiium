@@ -8,6 +8,7 @@ Starts the HTTP gateway.
 
 ```bash
 routiium serve
+routiium serve --config ~/.config/routiium/config.env
 routiium serve --keys-backend sled:./data/keys.db
 routiium serve --mcp-config mcp.json --system-prompt-config system_prompt.json
 ```
@@ -18,12 +19,32 @@ Common flags:
 
 | Flag | Env fallback | Description |
 | --- | --- | --- |
+| `--config PATH` | `ROUTIIUM_CONFIG` | Env/config file to load before serving. Defaults to the XDG user config and local `.env` discovery. |
 | `--keys-backend redis://...\|sled:<path>\|memory` | backend-specific env vars | API key store override. |
 | `--mcp-config PATH` | `ROUTIIUM_MCP_CONFIG` | MCP server definitions. |
 | `--system-prompt-config PATH` | `ROUTIIUM_SYSTEM_PROMPT_CONFIG` | System prompt rules. |
 | `--routing-config PATH` | `ROUTIIUM_ROUTING_CONFIG` | Legacy routing config. |
 | `--router-config PATH` | `ROUTIIUM_ROUTER_CONFIG` | Local policy router file. |
 | `--rate-limit-config PATH` | `ROUTIIUM_RATE_LIMIT_CONFIG` | Rate limit policy file. |
+
+
+## `routiium config`
+
+Manages the per-user config file at `$XDG_CONFIG_HOME/routiium/config.env`, or `~/.config/routiium/config.env` when `XDG_CONFIG_HOME` is not set. This gives app-like onboarding without requiring every project to carry a `.env` file.
+
+```bash
+routiium config path
+routiium config init --profile openai
+routiium config init --profile synthetic
+routiium config set OPENAI_API_KEY sk-your-provider-key
+routiium config get ROUTIIUM_JUDGE_MODE
+routiium config list
+routiium serve --config ~/.config/routiium/config.env
+```
+
+Config precedence is: CLI flags > existing process environment > explicit config file (`--config`, `ROUTIIUM_CONFIG`, `ENV_FILE`, `ENVFILE`, or `DOTENV_PATH`) > local `.envfile`/`.env` > per-user config.
+
+The `synthetic` profile is designed for OpenAI-compatible Synthetic/Hugging Face model endpoints and judge testing. It sets `OPENAI_BASE_URL` and `ROUTIIUM_JUDGE_BASE_URL` to `https://api.synthetic.new/openai/v1`, uses `ROUTIIUM_UPSTREAM_MODE=chat`, enables embedded routing/judging, and defaults `ROUTIIUM_JUDGE_MODEL` to `hf:zai-org/GLM-5.1` and `ROUTIIUM_JUDGE_MAX_TOKENS=1024` so reasoning-heavy models still return JSON content. Replace the placeholder key with your own Synthetic key.
 
 ## `routiium init`
 
@@ -35,6 +56,7 @@ routiium init --profile vllm --out .env.local
 routiium init --profile router --out .env.router
 routiium init --profile judge --out .env.judge
 routiium init --profile bedrock --out .env.bedrock --config-dir config
+routiium init --profile synthetic --out .env.synthetic
 ```
 
 Profiles:
@@ -43,9 +65,10 @@ Profiles:
 | --- | --- |
 | `openai` | You want managed keys plus embedded routing/judge defaults in front of OpenAI. |
 | `vllm` | You have a local OpenAI-compatible server such as vLLM or Ollama. |
-| `router` | You want remote routing through EduRouter or another Router service. |
+| `router` | You want remote routing through a Router-compatible policy service. |
 | `judge` | You want embedded router + LLM-as-judge protect defaults. |
 | `bedrock` | You want an AWS Bedrock-oriented starter config. |
+| `synthetic` | You want an OpenAI-compatible Synthetic/HF endpoint profile for upstream and LLM judge testing. |
 
 `init` refuses to overwrite existing files unless `--force` is passed.
 
@@ -61,7 +84,9 @@ routiium doctor --production --require-server
 routiium doctor --json
 ```
 
-Doctor checks include env file presence, referenced config files, provider key/base URL hints, `/status`, optional remote router catalog reachability, and judge/cache compatibility. Embedded routing does not require `ROUTIIUM_ROUTER_URL`; use `--check-router` only for remote Router/EduRouter deployments. By default, an unreachable server is a warning so `doctor` can be used before `serve`; use `--require-server` for deployment readiness checks.
+If `--env-file` is omitted, `doctor` checks the per-user config when it exists, otherwise `.env`.
+
+Doctor checks include env file presence, referenced config files, provider key/base URL hints, `/status`, optional remote router catalog reachability, and judge/cache compatibility. Embedded routing does not require `ROUTIIUM_ROUTER_URL`; use `--check-router` only for remote Router-compatible deployments. By default, an unreachable server is a warning so `doctor` can be used before `serve`; use `--require-server` for deployment readiness checks.
 
 `--production` adds stricter checks for an internet-facing deployment: high-entropy admin token, explicit CORS origins, managed auth, persistent key store, enabled router/judge, enabled response guard, and streaming safety.
 

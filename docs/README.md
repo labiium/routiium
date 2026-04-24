@@ -8,7 +8,7 @@ Start with the task you are trying to complete:
 | Learn the CLI | [CLI Reference](CLI.md) |
 | Configure env vars and config files | [Configuration](CONFIGURATION.md) |
 | Call or automate the HTTP API | [API Reference](API_REFERENCE.md) |
-| Use embedded routing or remote Router/EduRouter | [Router Usage Guide](ROUTER_USAGE.md) |
+| Use embedded routing or an optional remote router | [Router Usage Guide](ROUTER_USAGE.md) |
 | Understand embedded judge controls | [Security Model](SECURITY_MODEL.md) |
 | Customize judge prompts and secure rerouting | [Judge Policy](JUDGE_POLICY.md) |
 | Implement a Router service | [Router API Spec](ROUTER_API_SPEC.md) |
