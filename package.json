@@ -1,10 +1,18 @@
 {
-  "name": "routiium-monorepo",
+  "name": "routiium-workspace",
   "private": true,
   "scripts": {
     "admin:install": "npm --prefix apps/admin install",
     "admin:dev": "npm --prefix apps/admin run dev",
     "admin:build": "npm --prefix apps/admin run build",
-    "admin:lint": "npm --prefix apps/admin run lint"
-  }
+    "admin:lint": "npm --prefix apps/admin run lint",
+    "admin:typecheck": "npm --prefix apps/admin run typecheck",
+    "admin:audit": "npm --prefix apps/admin audit --audit-level=high",
+    "admin:pack": "cd apps/admin && npm pack --dry-run",
+    "admin:publish": "cd apps/admin && npm publish --access public"
+  },
+  "version": "0.2.0",
+  "description": "Workspace scripts for Routiium and the publishable Routiium admin npm package.",
+  "license": "Apache-2.0",
+  "packageManager": "npm@11.9.0"
 }

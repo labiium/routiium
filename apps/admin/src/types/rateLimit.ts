@@ -1,3 +1,5 @@
+import type { HttpMethod } from "./routing";
+
 // Rate limiting types for routiium
 
 export interface RateLimitConfig {
@@ -29,7 +31,6 @@ export interface RateLimitRule {
   conditions?: RateLimitCondition[];
 }
 
-export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'OPTIONS' | 'HEAD' | '*';
 
 export interface RateLimitCondition {
   type: 'header' | 'query' | 'path' | 'ip';

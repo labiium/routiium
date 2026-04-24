@@ -140,6 +140,15 @@ npm run admin:install
 npm run admin:dev
 ```
 
+For npm release checks of the standalone static admin package:
+
+```bash
+npm run admin:lint
+npm run admin:build
+npm run admin:audit
+npm run admin:pack
+```
+
 Set `ROUTIIUM_ADMIN_TOKEN` on the server and enter the matching bearer in the panel header. The panel talks to live admin APIs; it is not a mock dashboard.
 
 ## Documentation

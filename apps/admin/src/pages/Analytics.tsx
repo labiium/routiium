@@ -3,6 +3,10 @@ import { ErrorState, LoadingState } from "../components/AsyncState";
 import { fetchBlob, fetchJson } from "../lib/adminApi";
 import { formatCurrency, formatDateTime, formatNumber } from "../lib/formatters";
 
+interface AnalyticsEventsPayload {
+    events?: any[];
+}
+
 function Analytics() {
     const [stats, setStats] = useState<any>(null);
     const [aggregate, setAggregate] = useState<any>(null);
@@ -20,7 +24,7 @@ function Analytics() {
             const [statsPayload, aggregatePayload, eventsPayload] = await Promise.all([
                 fetchJson("/analytics/stats"),
                 fetchJson(`/analytics/aggregate?start=${start}&end=${now}`),
-                fetchJson(`/analytics/events?start=${start}&end=${now}&limit=100`),
+                fetchJson<AnalyticsEventsPayload>(`/analytics/events?start=${start}&end=${now}&limit=100`),
             ]);
             setStats(statsPayload);
             setAggregate(aggregatePayload);

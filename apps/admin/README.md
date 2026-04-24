@@ -56,6 +56,36 @@ npm run admin:install
 npm run admin:build
 ```
 
+
+## npm Package
+
+The admin panel is publishable as `routiium-admin`. The package contains the production `dist/` assets plus this README so downstream deployments can install or mirror the static panel without cloning the whole repository.
+
+Publish-readiness checks:
+
+```bash
+npm run lint
+npm run build
+npm audit --audit-level=high
+npm pack --dry-run
+```
+
+From the repository root, use:
+
+```bash
+npm run admin:lint
+npm run admin:build
+npm run admin:audit
+npm run admin:pack
+```
+
+When authenticated to npm and ready to release:
+
+```bash
+npm run admin:publish
+# equivalent: cd apps/admin && npm publish --access public
+```
+
 ## Connecting To Routiium
 
 The header includes:

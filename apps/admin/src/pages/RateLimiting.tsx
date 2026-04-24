@@ -25,7 +25,7 @@ function RateLimiting() {
     const [blockDuration, setBlockDuration] = useState("3600");
     const [blockReason, setBlockReason] = useState("Emergency block by admin");
 
-    const policies = data?.rate_limits?.policies || [];
+    const policies = useMemo(() => data?.rate_limits?.policies || [], [data?.rate_limits?.policies]);
     const selectedPolicy = useMemo(() => {
         return policies.find((policy: any) => policy.id === selectedPolicyId) || EMPTY_POLICY;
     }, [policies, selectedPolicyId]);

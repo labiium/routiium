@@ -1,3 +1,5 @@
+import type { ChatHistoryStoreType } from "./chatHistory";
+
 // Settings types for routiium admin panel configuration
 
 export interface Settings {
@@ -141,7 +143,6 @@ export interface ChatHistorySettings {
   tursoAuthToken?: string;
 }
 
-export type ChatHistoryStoreType = 'memory' | 'jsonl' | 'sqlite' | 'postgres' | 'turso';
 
 export interface MCPSettings {
   enabled: boolean;
