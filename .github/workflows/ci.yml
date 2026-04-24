@@ -54,6 +54,12 @@ jobs:
       - name: Cargo clippy (warnings as errors)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Cargo audit
+        run: scripts/cargo-audit.sh
+
       - name: Cargo build (debug)
         run: cargo build --locked
 

@@ -1,6 +1,22 @@
 # Routiium CLI Reference
 
-Routiium uses a `clap`-based CLI. Run `routiium --help` for the top-level command list and `routiium <command> --help` for command-specific flags.
+Routiium uses a `clap`-based CLI. Install it with `npm install -g routiium`, or build from source with `cargo install --path .`. Run `routiium --help` for the top-level command list and `routiium <command> --help` for command-specific flags.
+
+## npm global install
+
+```bash
+npm install -g routiium
+routiium --version
+```
+
+The npm package exposes the `routiium` binary globally. Its postinstall step downloads a prebuilt release binary for Linux, macOS, or Windows when available. If there is no matching release asset, it builds the Rust binary from the packaged source with `cargo build --release --locked`. Set `ROUTIIUM_BINARY=/path/to/routiium` to force a custom binary, `ROUTIIUM_NPM_BINARY_URL` to test a release asset, or `ROUTIIUM_NPM_SKIP_DOWNLOAD=1` to force the local Cargo fallback.
+
+## Security-sensitive defaults
+
+- Admin commands and admin HTTP APIs require `ROUTIIUM_ADMIN_TOKEN`; unset tokens fail closed unless `ROUTIIUM_INSECURE_ADMIN=1` is explicitly set for throwaway local development.
+- CORS is not open by default. Configure `CORS_ALLOWED_ORIGINS` for browser apps, or `CORS_ALLOW_ALL=1` only for trusted local use.
+- `/convert` performs safe conversion by default. Use `/convert?include_internal_config=true` with admin auth to include internal system prompt/MCP metadata.
+- MCP runtime config updates require `ROUTIIUM_ALLOW_MCP_CONFIG_UPDATE=1` because MCP server configs can spawn local commands.
 
 ## `routiium serve`
 

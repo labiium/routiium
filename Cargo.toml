@@ -73,7 +73,7 @@ base64 = "0.21"
 async-stream = "0.3"
 
 # SQL support (optional features)
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls"], optional = true }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls"], optional = true }
 libsql = { version = "0.3", optional = true }
 
 [dev-dependencies]

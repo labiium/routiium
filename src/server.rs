@@ -28,6 +28,9 @@ pub struct ConvertQuery {
     pub conversation_id: Option<String>,
     /// Optional pointer to a previous Responses id (state chaining preview).
     pub previous_response_id: Option<String>,
+    /// Include server-side system prompts and MCP tool metadata. Requires admin auth unless explicitly exposed.
+    #[serde(default)]
+    pub include_internal_config: bool,
 }
 
 /// Optional state hints accepted on `/v1/chat/completions`.
@@ -101,8 +104,22 @@ fn authorize_admin_request(
     expected_token: Option<&str>,
 ) -> Result<(), HttpResponse> {
     let Some(expected_token) = expected_token.map(str::trim).filter(|v| !v.is_empty()) else {
-        // Backwards-compatible default: if no admin token is configured, keep admin endpoints open.
-        return Ok(());
+        if env_truthy("ROUTIIUM_INSECURE_ADMIN") {
+            tracing::warn!(
+                target: "routiium::auth",
+                "Allowing admin request without ROUTIIUM_ADMIN_TOKEN because ROUTIIUM_INSECURE_ADMIN is enabled"
+            );
+            return Ok(());
+        }
+
+        return Err(HttpResponse::Unauthorized()
+            .insert_header(("www-authenticate", "Bearer"))
+            .json(serde_json::json!({
+                "error": {
+                    "message": "Admin token required. Set ROUTIIUM_ADMIN_TOKEN, or set ROUTIIUM_INSECURE_ADMIN=1 only for local throwaway development.",
+                    "type": "invalid_request_error"
+                }
+            })));
     };
 
     let provided = bearer_from_request(req);
@@ -123,6 +140,68 @@ fn authorize_admin_request(
 fn require_admin(req: &HttpRequest) -> Result<(), HttpResponse> {
     let expected_token = std::env::var("ROUTIIUM_ADMIN_TOKEN").ok();
     authorize_admin_request(req, expected_token.as_deref())
+}
+
+fn mcp_config_update_enabled() -> bool {
+    env_truthy("ROUTIIUM_ALLOW_MCP_CONFIG_UPDATE")
+}
+
+fn managed_key_store_unavailable_response(api: &str, req: &HttpRequest) -> HttpResponse {
+    tracing::error!(
+        target: "routiium::auth",
+        api = api,
+        client = request_client_ip(req),
+        "Managed auth is enabled but no API key manager is available"
+    );
+    error_response(
+        http::StatusCode::SERVICE_UNAVAILABLE,
+        "Managed auth is enabled but the API key store is unavailable",
+    )
+}
+
+fn csv_escape_cell(value: impl AsRef<str>) -> String {
+    let value = value.as_ref();
+    let formula_prefix = matches!(
+        value.as_bytes().first().copied(),
+        Some(b'=') | Some(b'+') | Some(b'-') | Some(b'@')
+    );
+    let needs_quotes = formula_prefix
+        || value.contains(',')
+        || value.contains('"')
+        || value.contains('\n')
+        || value.contains('\r');
+
+    if !needs_quotes {
+        return value.to_string();
+    }
+
+    let mut escaped = String::with_capacity(value.len() + 3);
+    escaped.push('"');
+    if formula_prefix {
+        escaped.push('\'');
+    }
+    for ch in value.chars() {
+        if ch == '"' {
+            escaped.push('"');
+        }
+        escaped.push(ch);
+    }
+    escaped.push('"');
+    escaped
+}
+
+fn csv_row<I, S>(cells: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut row = cells
+        .into_iter()
+        .map(csv_escape_cell)
+        .collect::<Vec<_>>()
+        .join(",");
+    row.push('\n');
+    row
 }
 
 fn non_empty_env(name: &str) -> Option<String> {
@@ -1587,6 +1666,31 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
 
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new(keys: &[&'static str]) -> Self {
+            let saved = keys
+                .iter()
+                .map(|key| (*key, std::env::var(key).ok()))
+                .collect();
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
     #[test]
     fn extract_conversation_supports_object_form() {
         let payload = json!({
@@ -1728,7 +1832,17 @@ mod tests {
     }
 
     #[test]
-    fn admin_auth_allows_when_token_unset() {
+    fn admin_auth_rejects_when_token_unset_by_default() {
+        let req = TestRequest::default().to_http_request();
+        let _env = EnvGuard::new(&["ROUTIIUM_INSECURE_ADMIN"]);
+        std::env::remove_var("ROUTIIUM_INSECURE_ADMIN");
+        assert!(authorize_admin_request(&req, None).is_err());
+    }
+
+    #[test]
+    fn admin_auth_allows_without_token_only_when_explicitly_insecure() {
+        let _env = EnvGuard::new(&["ROUTIIUM_INSECURE_ADMIN"]);
+        std::env::set_var("ROUTIIUM_INSECURE_ADMIN", "1");
         let req = TestRequest::default().to_http_request();
         assert!(authorize_admin_request(&req, None).is_ok());
     }
@@ -1747,6 +1861,18 @@ mod tests {
             .insert_header(("Authorization", "Bearer secret-token"))
             .to_http_request();
         assert!(authorize_admin_request(&good, Some("secret-token")).is_ok());
+    }
+
+    #[test]
+    fn csv_cells_escape_delimiters_quotes_and_formula_prefixes() {
+        assert_eq!(csv_escape_cell("simple"), "simple");
+        assert_eq!(csv_escape_cell("hello,world"), "\"hello,world\"");
+        assert_eq!(csv_escape_cell("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(csv_escape_cell("=SUM(A1:A2)"), "\"'=SUM(A1:A2)\"");
+        assert_eq!(
+            csv_row(["id", "model,with,comma", "+formula"]),
+            "id,\"model,with,comma\",\"'+formula\"\n"
+        );
     }
 
     async fn test_history_manager() -> Arc<ChatHistoryManager> {
@@ -2298,9 +2424,7 @@ async fn responses_passthrough(
                 }
             }
         } else {
-            // No manager: accept and let routing pick env key
-            authenticated = client_bearer.is_some();
-            None
+            return managed_key_store_unavailable_response("responses", &req);
         }
     } else {
         if client_bearer.is_none() {
@@ -3419,6 +3543,13 @@ async fn admin_panel_update_mcp(
         );
     };
 
+    if !mcp_config_update_enabled() {
+        return error_response(
+            http::StatusCode::FORBIDDEN,
+            "MCP config updates are disabled by default because MCP commands are a privileged execution surface. Set ROUTIIUM_ALLOW_MCP_CONFIG_UPDATE=1 to enable this endpoint for a trusted admin deployment.",
+        );
+    }
+
     let config = body.into_inner();
     if let Err(err) = write_pretty_json_file(path, &config) {
         return error_response(
@@ -3849,6 +3980,8 @@ async fn list_models(state: web::Data<AppState>, req: HttpRequest) -> impl Respo
                     );
                 }
             }
+        } else {
+            return managed_key_store_unavailable_response("models", &req);
         }
     } else if client_bearer.is_none() {
         return error_response(
@@ -3956,30 +4089,41 @@ fn get_default_models() -> Vec<Model> {
 /// Convert a Chat Completions request into a Responses API request payload (JSON).
 async fn convert(
     state: web::Data<AppState>,
+    req: HttpRequest,
     query: web::Query<ConvertQuery>,
     body: web::Json<ChatCompletionRequest>,
 ) -> impl Responder {
-    let mcp_manager_guard = if let Some(mgr) = state.mcp_manager.as_ref() {
-        Some(mgr.read().await)
+    let mut converted = if query.include_internal_config {
+        if !env_truthy("ROUTIIUM_PUBLIC_CONVERT_INTERNAL_CONFIG") {
+            if let Err(resp) = require_admin(&req) {
+                return resp;
+            }
+        }
+
+        let mcp_manager_guard = if let Some(mgr) = state.mcp_manager.as_ref() {
+            Some(mgr.read().await)
+        } else {
+            None
+        };
+
+        let system_prompt_guard = state.system_prompt_config.read().await;
+
+        crate::conversion::to_responses_request_with_mcp_and_prompt(
+            &body,
+            query.conversation_id.clone(),
+            mcp_manager_guard.as_deref(),
+            Some(&*system_prompt_guard),
+        )
+        .await
     } else {
-        None
+        crate::conversion::to_responses_request(&body, query.conversation_id.clone())
     };
-
-    let system_prompt_guard = state.system_prompt_config.read().await;
-
-    let mut converted = crate::conversion::to_responses_request_with_mcp_and_prompt(
-        &body,
-        query.conversation_id.clone(),
-        mcp_manager_guard.as_deref(),
-        Some(&*system_prompt_guard),
-    )
-    .await;
 
     if let Some(prev) = query.previous_response_id.clone() {
         converted.previous_response_id = Some(prev);
     }
 
-    web::Json(converted)
+    HttpResponse::Ok().json(converted)
 }
 
 /// Direct passthrough for native Chat Completions requests (no translation).
@@ -4111,9 +4255,7 @@ async fn chat_completions_passthrough(
                 }
             }
         } else {
-            // No manager: accept and let routing pick env key
-            authenticated = client_bearer.is_some();
-            None
+            return managed_key_store_unavailable_response("chat", &req);
         }
     } else {
         if client_bearer.is_none() {
@@ -5629,9 +5771,25 @@ async fn analytics_export(
                 Ok(events) => match format {
                     "csv" => {
                         // Generate CSV export
-                        let mut csv_output = String::from(
-                            "id,timestamp,endpoint,method,model,stream,status_code,success,duration_ms,tokens_per_second,prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens,total_cost,backend,upstream_mode\n",
-                        );
+                        let mut csv_output = csv_row([
+                            "id",
+                            "timestamp",
+                            "endpoint",
+                            "method",
+                            "model",
+                            "stream",
+                            "status_code",
+                            "success",
+                            "duration_ms",
+                            "tokens_per_second",
+                            "prompt_tokens",
+                            "completion_tokens",
+                            "cached_tokens",
+                            "reasoning_tokens",
+                            "total_cost",
+                            "backend",
+                            "upstream_mode",
+                        ]);
 
                         for event in events {
                             let model = event.request.model.as_deref().unwrap_or("");
@@ -5670,26 +5828,25 @@ async fn analytics_export(
                                 .map(|c| format!("{:.6}", c.total_cost))
                                 .unwrap_or_else(|| "".to_string());
 
-                            csv_output.push_str(&format!(
-                                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                            csv_output.push_str(&csv_row([
                                 event.id,
-                                event.timestamp,
+                                event.timestamp.to_string(),
                                 event.request.endpoint,
                                 event.request.method,
-                                model,
-                                event.request.stream,
-                                status,
-                                success,
-                                event.performance.duration_ms,
+                                model.to_string(),
+                                event.request.stream.to_string(),
+                                status.to_string(),
+                                success.to_string(),
+                                event.performance.duration_ms.to_string(),
                                 tps,
-                                prompt_tokens,
-                                completion_tokens,
-                                cached_tokens,
-                                reasoning_tokens,
+                                prompt_tokens.to_string(),
+                                completion_tokens.to_string(),
+                                cached_tokens.to_string(),
+                                reasoning_tokens.to_string(),
                                 cost,
                                 event.routing.backend,
-                                event.routing.upstream_mode
-                            ));
+                                event.routing.upstream_mode,
+                            ]));
                         }
 
                         HttpResponse::Ok()

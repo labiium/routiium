@@ -99,3 +99,11 @@ curl -H "Authorization: Bearer $ROUTIIUM_ADMIN_TOKEN" \
 ```
 
 Events currently cover router/judge denials and response-guard blocks. They intentionally store metadata, reason, risk, categories, route/model identifiers, and client IP rather than full prompt/output bodies.
+
+## Admin and MCP trust boundary
+
+Admin APIs fail closed unless `ROUTIIUM_ADMIN_TOKEN` is set and supplied as a bearer token. MCP server configuration is a privileged local execution surface because configured MCP commands are spawned by the Routiium process. Runtime MCP config writes therefore require `ROUTIIUM_ALLOW_MCP_CONFIG_UPDATE=1` in addition to admin auth.
+
+`/convert` is safe by default: it converts the user-supplied request shape without exposing internal system prompts or MCP tool metadata. Use `?include_internal_config=true` only with admin auth when intentionally debugging internal conversion.
+
+CORS is same-origin by default. Expose explicit trusted origins with `CORS_ALLOWED_ORIGINS`; do not use `CORS_ALLOW_ALL=1` on internet-facing deployments.

@@ -1,7 +1,51 @@
 {
-  "name": "routiium-workspace",
-  "private": true,
+  "name": "routiium",
+  "version": "0.2.0",
+  "description": "OpenAI-compatible LLM gateway with safe-by-default routing, judging, and managed keys.",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/labiium/routiium#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/labiium/routiium.git"
+  },
+  "bugs": {
+    "url": "https://github.com/labiium/routiium/issues"
+  },
+  "keywords": [
+    "llm",
+    "openai",
+    "proxy",
+    "gateway",
+    "routing",
+    "judge",
+    "agentic",
+    "cli"
+  ],
+  "bin": {
+    "routiium": "npm/routiium.js"
+  },
+  "files": [
+    "npm/*.js",
+    "src/",
+    "docs/",
+    "examples/",
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "README.md",
+    "LICENSE",
+    ".env.example",
+    "mcp.json.example",
+    "router_aliases.json.example",
+    "routing.json.example",
+    "system_prompt.json.example"
+  ],
   "scripts": {
+    "postinstall": "node npm/postinstall.js",
+    "package:verify": "node npm/verify-publish.js",
+    "package:pack": "npm pack --dry-run",
+    "package:publish": "npm publish --access public",
+    "prepublishOnly": "npm run package:verify",
     "admin:install": "npm --prefix apps/admin install",
     "admin:dev": "npm --prefix apps/admin run dev",
     "admin:build": "npm --prefix apps/admin run build",
@@ -11,8 +55,18 @@
     "admin:pack": "cd apps/admin && npm pack --dry-run",
     "admin:publish": "cd apps/admin && npm publish --access public"
   },
-  "version": "0.2.0",
-  "description": "Workspace scripts for Routiium and the publishable Routiium admin npm package.",
-  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.17.0",
+    "npm": ">=9"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
   "packageManager": "npm@11.9.0"
 }

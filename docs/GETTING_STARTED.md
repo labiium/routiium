@@ -1,5 +1,12 @@
 # Getting Started with Routiium
 
+Install the CLI first:
+
+```bash
+npm install -g routiium
+routiium --version
+```
+
 Routiium is now safe-by-default: if you do not configure a remote Router, `routiium serve` enables the embedded policy router, request judge, response guard, and streaming safety automatically.
 
 ## Path 1: One-key secure gateway
@@ -28,6 +35,13 @@ Defaults in this path:
 - `ROUTIIUM_WEB_JUDGE=restricted` inspects suspicious URLs/domains without sending private prompts to search.
 
 Point any OpenAI-compatible SDK at `http://127.0.0.1:8088/v1`.
+
+### Security defaults to know
+
+- Admin endpoints require `ROUTIIUM_ADMIN_TOKEN`; they do not open anonymously when unset.
+- CORS is same-origin by default. Set `CORS_ALLOWED_ORIGINS` for browser clients, or `CORS_ALLOW_ALL=1` only for trusted local testing.
+- `/convert` is safe by default and does not merge internal system prompt or MCP metadata unless `?include_internal_config=true` is used with admin auth.
+- Runtime MCP config writes are disabled unless `ROUTIIUM_ALLOW_MCP_CONFIG_UPDATE=1` is set, because MCP server configs can spawn local commands.
 
 ## Path 2: Inspect routing and judge behavior locally
 

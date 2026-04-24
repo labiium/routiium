@@ -70,3 +70,11 @@ routiium judge events --limit 50 --json
 ## 6. Treat tools as privileged actions
 
 MCP/browser/shell/database/cloud/payment tools should be available only to scoped keys and trusted workloads. Routiium's built-in judge rejects risky tool requests by default and returns an agent-readable rejection result unless `ROUTIIUM_REJECTION_MODE=http_error` is configured.
+
+## Security gates before publish/deploy
+
+- [ ] `ROUTIIUM_ADMIN_TOKEN` is set to a high-entropy secret; `ROUTIIUM_INSECURE_ADMIN` is unset.
+- [ ] `CORS_ALLOWED_ORIGINS` is explicit and `CORS_ALLOW_ALL` is unset/false.
+- [ ] Managed mode has a persistent API key store; startup must fail if managed mode cannot initialize the store.
+- [ ] `ROUTIIUM_ALLOW_MCP_CONFIG_UPDATE` is unset unless runtime MCP edits are required and admin access is strongly protected.
+- [ ] `/convert?include_internal_config=true` is not exposed publicly; it requires admin auth by default.

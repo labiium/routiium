@@ -122,3 +122,10 @@ See the dedicated guides for full details:
 - [RATE_LIMITS.md](RATE_LIMITS.md)
 - [ANALYTICS.md](ANALYTICS.md)
 - [PRODUCTION_HARDENING.md](PRODUCTION_HARDENING.md)
+
+## Secure defaults
+
+- `ROUTIIUM_ADMIN_TOKEN` is required for admin APIs. If it is unset, admin endpoints return 401 by default. `ROUTIIUM_INSECURE_ADMIN=1` re-enables anonymous admin only for throwaway local development.
+- CORS emits no cross-origin allow-all default. Set `CORS_ALLOWED_ORIGINS` for browser clients, or `CORS_ALLOW_ALL=1` for explicit local testing.
+- `/convert` does safe conversion unless `include_internal_config=true` is requested with admin auth.
+- `ROUTIIUM_ALLOW_MCP_CONFIG_UPDATE=1` is required for runtime MCP config writes. Leave it off unless the admin API is strongly protected.

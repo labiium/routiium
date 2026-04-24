@@ -169,6 +169,7 @@ async fn test_convert_merges_mcp_tools_with_existing_tools() {
 /// Test MCP config reload endpoint
 #[actix_web::test]
 async fn test_reload_mcp_with_valid_config() {
+    std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
     let temp_dir = tempfile::tempdir().unwrap();
     let mcp_config_path = temp_dir.path().join("mcp.json");
 
@@ -202,6 +203,7 @@ async fn test_reload_mcp_with_valid_config() {
     let req = test::TestRequest::post()
         .uri("/reload/mcp")
         .insert_header(("content-type", "application/json"))
+        .insert_header(("authorization", "Bearer admin-test"))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -225,6 +227,7 @@ async fn test_reload_mcp_with_valid_config() {
 /// Test MCP config reload with invalid JSON
 #[actix_web::test]
 async fn test_reload_mcp_with_invalid_json() {
+    std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
     let temp_dir = tempfile::tempdir().unwrap();
     let mcp_config_path = temp_dir.path().join("invalid_mcp.json");
 
@@ -245,6 +248,7 @@ async fn test_reload_mcp_with_invalid_json() {
     let req = test::TestRequest::post()
         .uri("/reload/mcp")
         .insert_header(("content-type", "application/json"))
+        .insert_header(("authorization", "Bearer admin-test"))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -260,6 +264,7 @@ async fn test_reload_mcp_with_invalid_json() {
 /// Test combined MCP tools and system prompt injection
 #[actix_web::test]
 async fn test_convert_with_mcp_and_system_prompt() {
+    std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
     let temp_dir = tempfile::tempdir().unwrap();
 
     // Create system prompt config
@@ -318,8 +323,9 @@ async fn test_convert_with_mcp_and_system_prompt() {
     });
 
     let req = test::TestRequest::post()
-        .uri("/convert")
+        .uri("/convert?include_internal_config=true")
         .insert_header(("content-type", "application/json"))
+        .insert_header(("authorization", "Bearer admin-test"))
         .set_payload(serde_json::to_string(&chat_request).unwrap())
         .to_request();
 
@@ -347,6 +353,7 @@ async fn test_convert_with_mcp_and_system_prompt() {
 /// Test /reload/all endpoint reloads both MCP and system prompt
 #[actix_web::test]
 async fn test_reload_all_with_both_configs() {
+    std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
     let temp_dir = tempfile::tempdir().unwrap();
 
     // Create system prompt config
@@ -394,6 +401,7 @@ async fn test_reload_all_with_both_configs() {
     let req = test::TestRequest::post()
         .uri("/reload/all")
         .insert_header(("content-type", "application/json"))
+        .insert_header(("authorization", "Bearer admin-test"))
         .to_request();
 
     let resp = test::call_service(&app, req).await;

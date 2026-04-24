@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 #[actix_web::test]
 async fn test_reload_mcp_without_path() {
+    std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
     let app_state = AppState::default();
     let app = test::init_service(
         App::new()
@@ -17,6 +18,7 @@ async fn test_reload_mcp_without_path() {
     let req = test::TestRequest::post()
         .uri("/reload/mcp")
         .insert_header(("content-type", "application/json"))
+        .insert_header(("authorization", "Bearer admin-test"))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -34,6 +36,7 @@ async fn test_reload_mcp_without_path() {
 
 #[actix_web::test]
 async fn test_reload_system_prompt_without_path() {
+    std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
     let app_state = AppState::default();
     let app = test::init_service(
         App::new()
@@ -45,6 +48,7 @@ async fn test_reload_system_prompt_without_path() {
     let req = test::TestRequest::post()
         .uri("/reload/system_prompt")
         .insert_header(("content-type", "application/json"))
+        .insert_header(("authorization", "Bearer admin-test"))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -62,6 +66,7 @@ async fn test_reload_system_prompt_without_path() {
 
 #[actix_web::test]
 async fn test_reload_all_without_paths() {
+    std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
     let app_state = AppState::default();
     let app = test::init_service(
         App::new()
@@ -73,6 +78,7 @@ async fn test_reload_all_without_paths() {
     let req = test::TestRequest::post()
         .uri("/reload/all")
         .insert_header(("content-type", "application/json"))
+        .insert_header(("authorization", "Bearer admin-test"))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -88,6 +94,7 @@ async fn test_reload_all_without_paths() {
 
 #[actix_web::test]
 async fn test_reload_system_prompt_with_valid_config() {
+    std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
     // Create a temporary config file
     let temp_dir = tempfile::tempdir().unwrap();
     let config_path = temp_dir.path().join("system_prompt.json");
@@ -115,6 +122,7 @@ async fn test_reload_system_prompt_with_valid_config() {
     let req = test::TestRequest::post()
         .uri("/reload/system_prompt")
         .insert_header(("content-type", "application/json"))
+        .insert_header(("authorization", "Bearer admin-test"))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -153,6 +161,7 @@ async fn test_reload_system_prompt_with_invalid_config() {
     let req = test::TestRequest::post()
         .uri("/reload/system_prompt")
         .insert_header(("content-type", "application/json"))
+        .insert_header(("authorization", "Bearer admin-test"))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -162,6 +171,7 @@ async fn test_reload_system_prompt_with_invalid_config() {
 
 #[actix_web::test]
 async fn test_convert_with_system_prompt() {
+    std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
     // Create a temporary config file
     let temp_dir = tempfile::tempdir().unwrap();
     let config_path = temp_dir.path().join("system_prompt.json");
@@ -199,8 +209,9 @@ async fn test_convert_with_system_prompt() {
     });
 
     let req = test::TestRequest::post()
-        .uri("/convert")
+        .uri("/convert?include_internal_config=true")
         .insert_header(("content-type", "application/json"))
+        .insert_header(("authorization", "Bearer admin-test"))
         .set_payload(serde_json::to_string(&chat_request).unwrap())
         .to_request();
 

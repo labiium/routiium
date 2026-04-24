@@ -189,6 +189,11 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
             }
         }
     };
+    if routiium::util::managed_mode_from_env() && api_keys.is_none() {
+        return Err(std::io::Error::other(
+            "managed auth is enabled but the API key manager could not be initialized",
+        ));
+    }
 
     // Optional MCP config path via --mcp-config=<path> or ROUTIIUM_MCP_CONFIG
     let mcp_config_arg = runtime_config.mcp_config_path.clone();

@@ -1104,12 +1104,26 @@ pub async fn sse_proxy_stream_with_bearer(
 /// - CORS_ALLOW_CREDENTIALS: enable with 1,true,yes,on
 /// - CORS_MAX_AGE: max age in seconds (usize)
 ///
-/// Defaults are permissive to match prior behavior when not configured.
+/// Defaults are same-origin only: when no CORS env vars are set, Routiium does not
+/// emit cross-origin allow headers. Set explicit origins for browser clients, or
+/// set `CORS_ALLOW_ALL=1` / `CORS_ALLOWED_ORIGINS=*` only for trusted local use.
 pub fn cors_config_from_env() -> actix_cors::Cors {
     let mut cors = actix_cors::Cors::default();
 
     // Allowed origins
-    if let Ok(origins) = std::env::var("CORS_ALLOWED_ORIGINS") {
+    let allow_all = std::env::var("CORS_ALLOW_ALL")
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+
+    if allow_all {
+        cors = cors.allow_any_origin();
+    } else if let Ok(origins) = std::env::var("CORS_ALLOWED_ORIGINS") {
         let s = origins.trim();
         if s == "*" {
             cors = cors.allow_any_origin();
@@ -1121,8 +1135,6 @@ pub fn cors_config_from_env() -> actix_cors::Cors {
                 }
             }
         }
-    } else {
-        cors = cors.allow_any_origin();
     }
 
     // Allowed methods
@@ -1142,8 +1154,6 @@ pub fn cors_config_from_env() -> actix_cors::Cors {
                 cors = cors.allowed_methods(methods);
             }
         }
-    } else {
-        cors = cors.allow_any_method();
     }
 
     // Allowed headers
@@ -1165,8 +1175,6 @@ pub fn cors_config_from_env() -> actix_cors::Cors {
                 }
             }
         }
-    } else {
-        cors = cors.allow_any_header();
     }
 
     // Credentials

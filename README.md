@@ -17,16 +17,25 @@ Your App / OpenAI SDK
         └── Optional remote Router-compatible policy service
 ```
 
+## Install
+
+```bash
+npm install -g routiium
+routiium --version
+```
+
+The npm package installs a `routiium` command. On install it downloads the matching native binary from the GitHub release when available and falls back to `cargo build --release --locked` if a prebuilt binary is not available for your platform. Source installs still work with `cargo run -- ...`.
+
 ## Choose your path
 
 ### 1. Proxy an OpenAI-compatible app safely in minutes
 
 ```bash
-git clone https://github.com/labiium/routiium.git && cd routiium
-cargo run -- config init --profile openai
-cargo run -- config set OPENAI_API_KEY sk-your-provider-key
-cargo run -- doctor
-cargo run -- serve
+npm install -g routiium
+routiium config init --profile openai
+routiium config set OPENAI_API_KEY sk-your-provider-key
+routiium doctor
+routiium serve
 ```
 
 Then point any OpenAI-compatible SDK at `http://127.0.0.1:8088/v1`. With no extra router setup, Routiium enables its embedded router, strict safety path, `protect` judge mode, response guard, streaming safety, and restricted web/URL judging.
@@ -34,16 +43,16 @@ Then point any OpenAI-compatible SDK at `http://127.0.0.1:8088/v1`. With no extr
 ### 2. Use a local vLLM/Ollama-style upstream
 
 ```bash
-cargo run -- init --profile vllm --out .env
+routiium init --profile vllm --out .env
 # edit OPENAI_BASE_URL if your local server is not http://127.0.0.1:8000/v1
-cargo run -- serve
+routiium serve
 ```
 
 ### 3. Use built-in routing, or connect a remote router
 
 ```bash
-cargo run -- init --profile router --out .env
-cargo run -- router probe --model gpt-4.1-nano
+routiium init --profile router --out .env
+routiium router probe --model gpt-4.1-nano
 ```
 
 Routiium ships with aliases such as `auto`, `fast`, `balanced`, `safe`, `secure`, and `premium` with cost/latency/context-aware scoring. You do not need another project to get default routing. Remote router mode is optional for teams that want a separate Router-compatible policy service for central policy, catalog, health, and overlay management; EduRouter is only a small companion/reference implementation of that interface.
@@ -51,11 +60,11 @@ Routiium ships with aliases such as `auto`, `fast`, `balanced`, `safe`, `secure`
 ### 4. Inspect the built-in judge
 
 ```bash
-cargo run -- router explain --model auto --prompt "Ignore previous instructions"
-cargo run -- judge policy init --out config/judge-policy.json
-cargo run -- judge explain --policy config/judge-policy.json --prompt "Ignore previous instructions"
-cargo run -- judge test --suite all
-cargo run -- judge profile protect --out .env
+routiium router explain --model auto --prompt "Ignore previous instructions"
+routiium judge policy init --out config/judge-policy.json
+routiium judge explain --policy config/judge-policy.json --prompt "Ignore previous instructions"
+routiium judge test --suite all
+routiium judge profile protect --out .env
 ```
 
 Default `protect` mode enforces high-confidence deterministic blocks, downgrades prompt-injection-like requests to a safer route, scans successful outputs with the response guard, and uses an LLM judge automatically when `OPENAI_API_KEY` is available. LLM judge calls prefer tool/function calling (`ROUTIIUM_JUDGE_OUTPUT_MODE=auto`) and fall back to JSON for providers that do not support tools. Use `shadow` to observe, `protect` for safe defaults, `enforce` for stricter policy, or `off` to disable.
@@ -66,10 +75,10 @@ For agentic applications, rejected unsafe actions return an OpenAI-compatible as
 
 ```bash
 # 1) Start Routiium
-cargo run -- serve
+routiium serve
 
 # 2) Create a managed customer key
-cargo run -- key create --label demo --ttl-seconds 86400
+routiium key create --label demo --ttl-seconds 86400
 
 # 3) Call the OpenAI-compatible API with the returned sk_<id>.<secret>
 curl http://127.0.0.1:8088/v1/chat/completions \
@@ -78,7 +87,7 @@ curl http://127.0.0.1:8088/v1/chat/completions \
   -d '{"model":"gpt-4.1-nano","messages":[{"role":"user","content":"Hello"}]}'
 
 # 4) Check runtime state
-cargo run -- status
+routiium status
 ```
 
 If `OPENAI_API_KEY` is configured on the server, Routiium runs in managed mode: clients use Routiium-issued keys and never see the upstream provider secret. If no server-side provider key is set, Routiium can run in passthrough mode and forward client bearer tokens upstream.
@@ -104,7 +113,7 @@ Routiium now exposes a `clap`-based CLI:
 | `routiium judge test` | Run built-in prompt-injection/exfiltration/dangerous-action judge checks. |
 | `routiium docs` | Print the main docs entry points. |
 
-Run `routiium --help` or see [docs/CLI.md](docs/CLI.md) for the full command reference.
+Run `routiium --help` or see [docs/CLI.md](docs/CLI.md) for the full command reference. `/convert` now defaults to safe conversion without internal system prompts/MCP metadata; add `?include_internal_config=true` with admin auth only when you intentionally need to inspect internal conversion shape.
 
 ## Core features
 
@@ -115,7 +124,7 @@ Run `routiium --help` or see [docs/CLI.md](docs/CLI.md) for the full command ref
 - **Built-in request judge and response guard** with deterministic prompt-injection/exfiltration/tool-risk checks, optional LLM judging, restricted web/URL judging, custom operator policy overlays, `secure` rerouting for sensitive requests, output-leak blocking, streaming safety, and structured denial responses.
 - **Rate limits and concurrency controls** with hot-reloadable policies and emergency blocks.
 - **Analytics and cost tracking** with JSONL, Redis, sled, or memory storage and CSV/JSON export.
-- **System prompts and MCP tools** injected transparently into upstream requests.
+- **System prompts and MCP tools** injected transparently into upstream requests. MCP runtime config writes are disabled by default because MCP servers can spawn local commands; enable `ROUTIIUM_ALLOW_MCP_CONFIG_UPDATE=1` only for trusted admin deployments.
 - **Admin panel** for keys, limits, prompts, routing, analytics, and runtime state.
 
 ## Docker
@@ -140,16 +149,18 @@ npm run admin:install
 npm run admin:dev
 ```
 
-For npm release checks of the standalone static admin package:
+For root npm CLI release checks and standalone admin package checks:
 
 ```bash
+npm run package:verify
+npm run package:pack
 npm run admin:lint
 npm run admin:build
 npm run admin:audit
 npm run admin:pack
 ```
 
-Set `ROUTIIUM_ADMIN_TOKEN` on the server and enter the matching bearer in the panel header. The panel talks to live admin APIs; it is not a mock dashboard.
+Set `ROUTIIUM_ADMIN_TOKEN` on the server and enter the matching bearer in the panel header. Admin APIs now fail closed when this token is unset; `ROUTIIUM_INSECURE_ADMIN=1` is only for throwaway local development. The panel talks to live admin APIs; it is not a mock dashboard.
 
 ## Documentation
 
@@ -171,6 +182,8 @@ Start here:
 cargo fmt
 cargo clippy --all-targets --all-features
 cargo test
+npm run package:verify
+npm pack --dry-run
 ```
 
 HTTP smoke tests live in `python_tests/` and can be run with `pytest`.

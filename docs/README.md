@@ -4,7 +4,7 @@ Start with the task you are trying to complete:
 
 | Goal | Document |
 | --- | --- |
-| Install and make the first request | [Getting Started](GETTING_STARTED.md) |
+| Install with `npm install -g routiium` and make the first request | [Getting Started](GETTING_STARTED.md) |
 | Learn the CLI | [CLI Reference](CLI.md) |
 | Configure env vars and config files | [Configuration](CONFIGURATION.md) |
 | Call or automate the HTTP API | [API Reference](API_REFERENCE.md) |

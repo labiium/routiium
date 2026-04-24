@@ -1,0 +1,11 @@
+# Never publish generated native binaries or local state.
+npm/native/
+target/
+data/
+.omx/
+.env
+.envfile
+apps/admin/node_modules/
+apps/admin/dist/
+apps/admin/*.tgz
+*.tsbuildinfo
