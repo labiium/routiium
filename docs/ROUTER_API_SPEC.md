@@ -167,11 +167,16 @@ Routers SHOULD reject requests with unknown `schema_version` unless they can dow
   "policy_rev": "pol_v5",   // legacy scalar for backwards compatibility
   "content_used": "none",
   "judge": {
-    "mode": "enforce",
+    "id": "jdg_01HX…",
+    "mode": "protect",
     "verdict": "downgrade",
     "risk_level": "medium",
-    "reason": "Safer/cheaper model satisfies this request",
-    "target": "gpt-4o-mini-2024-07-18"
+    "reason": "Prompt-injection-like request downgraded to safer route",
+    "target": "safe",
+    "categories": ["prompt_injection"],
+    "requires_approval": false,
+    "policy_rev": "routiium_safety_v1",
+    "cacheable": false
   }
 }
 ```
@@ -186,12 +191,13 @@ Routers SHOULD reject requests with unknown `schema_version` unless they can dow
 | `X-Route-Cache` | `miss`, `hit`, or `stale`. |
 | `X-Route-Id` / `X-Resolved-Model` / `X-Route-Tier` / `X-Policy-Rev` | Propagated for observability. |
 | `X-Content-Used` | Echo of `content_used` for audit logs. |
-| `X-Judge-Mode` / `X-Judge-Verdict` / `X-Judge-Risk` / `X-Judge-Target` | Optional LLM-judge observability when the Router includes judge metadata. |
+| `X-Judge-Id` / `X-Judge-Mode` / `X-Judge-Verdict` / `X-Judge-Risk` / `X-Judge-Target` | Judge observability when Router includes judge metadata. |
+| `X-Safety-Policy-Rev` / `X-Safety-Cache` | Safety policy revision and cacheability (`cacheable` or `no-store`). |
 
 ### Cache & Stickiness Semantics
 
 - `ttl_ms` defines the soft lifetime for reuse. Routiium also honours `valid_until` when provided.
-- Routers that run an LLM judge on every request SHOULD set `ttl_ms: 0` for judged plans unless their cache key includes content fingerprints strong enough to preserve the judging guarantee.
+- Routers that run a request judge SHOULD set `ttl_ms: 0` for non-cacheable/content-sensitive safety decisions unless their cache key includes content fingerprints, tool set, tenant, and safety policy revision.
 - `freeze_key` lets routers invalidate a single cached plan without altering revisions.
 - `stickiness.plan_token` (with optional `max_turns`/`expires_at`) instructs Routiium to reuse the plan for future turns by sending the token back in `RouteRequest.plan_token`.
 

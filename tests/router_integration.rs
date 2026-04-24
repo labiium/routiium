@@ -136,11 +136,18 @@ async fn router_judge_headers_are_forwarded() {
 
     let mut plan = sample_plan("rte_judged", "gpt-4o-mini");
     plan.judge = Some(JudgeMetadata {
+        id: None,
+        action: Some("route".to_string()),
         mode: Some("enforce".to_string()),
         verdict: Some("downgrade".to_string()),
         risk_level: Some("medium".to_string()),
         reason: Some("Use a safer route".to_string()),
         target: Some("gpt-4o-mini".to_string()),
+        categories: None,
+        requires_approval: None,
+        policy_rev: None,
+        policy_fingerprint: None,
+        cacheable: None,
     });
     let router = RouterStub::start(RouterResponseConfig::Plan(Box::new(plan))).await;
     let state = build_app_state(&router.url(), 60_000);
@@ -162,6 +169,10 @@ async fn router_judge_headers_are_forwarded() {
     assert_eq!(
         headers.get("x-judge-mode").and_then(|v| v.to_str().ok()),
         Some("enforce")
+    );
+    assert_eq!(
+        headers.get("x-judge-action").and_then(|v| v.to_str().ok()),
+        Some("route")
     );
     assert_eq!(
         headers.get("x-judge-verdict").and_then(|v| v.to_str().ok()),

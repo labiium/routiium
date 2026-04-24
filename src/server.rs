@@ -191,13 +191,8 @@ fn log_request_start(
     );
 }
 
-fn router_privacy_mode_from_env() -> RouterPrivacyMode {
-    match std::env::var("ROUTIIUM_ROUTER_PRIVACY_MODE")
-        .unwrap_or_else(|_| "features".to_string())
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
+fn router_privacy_mode_from_str(value: &str) -> RouterPrivacyMode {
+    match value.trim().to_ascii_lowercase().as_str() {
         "summary" => RouterPrivacyMode::Summary,
         "full" => RouterPrivacyMode::Full,
         _ => RouterPrivacyMode::FeaturesOnly,
@@ -210,16 +205,6 @@ fn map_router_mode(mode: RouterUpstreamMode) -> crate::util::UpstreamMode {
         RouterUpstreamMode::Chat => crate::util::UpstreamMode::Chat,
         RouterUpstreamMode::Bedrock => crate::util::UpstreamMode::Bedrock,
     }
-}
-
-fn router_strict_mode() -> bool {
-    matches!(
-        std::env::var("ROUTIIUM_ROUTER_STRICT")
-            .ok()
-            .as_deref()
-            .map(|v| v.trim().to_ascii_lowercase()),
-        Some(ref v) if v == "1" || v == "true" || v == "yes" || v == "on"
-    )
 }
 
 /// Record chat history for a conversation and messages
@@ -571,6 +556,155 @@ async fn record_analytics_event(
     }
 }
 
+async fn record_response_guard_event(
+    state: &AppState,
+    req: &HttpRequest,
+    endpoint: &str,
+    requested_model: &str,
+    resolution: &UpstreamResolution,
+    decision: &crate::safety_judge::ResponseGuardDecision,
+) {
+    state
+        .safety_audit
+        .record(crate::safety_audit::SafetyAuditEventBuilder {
+            kind: "response_guard_block".to_string(),
+            endpoint: endpoint.to_string(),
+            client_ip: Some(request_client_ip(req)),
+            requested_model: (!requested_model.is_empty()).then(|| requested_model.to_string()),
+            resolved_model: Some(resolution.model_id.clone()),
+            route_id: resolution.plan.as_ref().map(|plan| plan.route_id.clone()),
+            action: None,
+            target_alias: None,
+            verdict: Some(decision.verdict.clone()),
+            risk_level: Some(decision.risk_level.clone()),
+            reason: Some(decision.reason.clone()),
+            categories: decision.categories.clone(),
+            policy_rev: Some(decision.policy_rev.clone()),
+            policy_fingerprint: None,
+        })
+        .await;
+}
+
+async fn record_router_error_event(
+    state: &AppState,
+    req: &HttpRequest,
+    endpoint: &str,
+    requested_model: &str,
+    err: &RouteError,
+) {
+    let (
+        kind,
+        action,
+        target_alias,
+        verdict,
+        risk_level,
+        reason,
+        categories,
+        policy_rev,
+        policy_fingerprint,
+    ) = match err {
+        RouteError::Rejected {
+            message,
+            policy_rev,
+            body,
+            ..
+        } => {
+            let judge = body
+                .as_ref()
+                .and_then(|body| body.get("error"))
+                .and_then(|error| error.get("judge"));
+            let categories = judge
+                .and_then(|judge| judge.get("categories"))
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (
+                "router_rejected".to_string(),
+                judge
+                    .and_then(|judge| judge.get("action"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                judge
+                    .and_then(|judge| judge.get("target"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                judge
+                    .and_then(|judge| judge.get("verdict"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                judge
+                    .and_then(|judge| judge.get("risk_level"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                Some(message.clone()),
+                categories,
+                policy_rev.clone(),
+                judge
+                    .and_then(|judge| judge.get("policy_fingerprint"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+            )
+        }
+        other => (
+            "router_error".to_string(),
+            None,
+            None,
+            None,
+            None,
+            Some(other.to_string()),
+            Vec::new(),
+            None,
+            None,
+        ),
+    };
+
+    state
+        .safety_audit
+        .record(crate::safety_audit::SafetyAuditEventBuilder {
+            kind,
+            endpoint: endpoint.to_string(),
+            client_ip: Some(request_client_ip(req)),
+            requested_model: (!requested_model.is_empty()).then(|| requested_model.to_string()),
+            resolved_model: None,
+            route_id: None,
+            action,
+            target_alias,
+            verdict,
+            risk_level,
+            reason,
+            categories,
+            policy_rev,
+            policy_fingerprint,
+        })
+        .await;
+}
+
+fn judge_route_requires_tool_stripping(plan: &RoutePlan) -> bool {
+    plan.judge
+        .as_ref()
+        .map(|judge| {
+            judge.action.as_deref() == Some("route")
+                && matches!(
+                    judge.verdict.as_deref(),
+                    Some("deny") | Some("needs_approval")
+                )
+        })
+        .unwrap_or(false)
+}
+
+fn strip_high_risk_tools(body: &mut serde_json::Value) {
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("tools");
+        obj.remove("tool_choice");
+        obj.remove("parallel_tool_calls");
+    }
+}
+
 async fn resolve_upstream(
     state: &AppState,
     api: &str,
@@ -581,15 +715,29 @@ async fn resolve_upstream(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let strict_mode = router_strict_mode();
+    let strict_mode = state.router_strict || env_truthy("ROUTIIUM_ROUTER_STRICT");
 
     if let Some(router) = state.router_client.as_ref() {
         if !requested_model.is_empty() {
-            let privacy_mode = router_privacy_mode_from_env();
+            let privacy_mode = router_privacy_mode_from_str(&state.router_privacy_mode);
             let route_request =
                 extract_route_request(requested_model.as_str(), api, body, privacy_mode);
             match router.plan(&route_request).await {
-                Ok(plan) => {
+                Ok(mut plan) => {
+                    if judge_route_requires_tool_stripping(&plan) {
+                        strip_high_risk_tools(body);
+                        if let Some(judge) = plan.judge.as_mut() {
+                            let mut categories = judge.categories.take().unwrap_or_default();
+                            if !categories
+                                .iter()
+                                .any(|category| category == "tools_stripped")
+                            {
+                                categories.push("tools_stripped".to_string());
+                            }
+                            judge.categories = Some(categories);
+                            judge.cacheable = Some(false);
+                        }
+                    }
                     let model_id = plan.upstream.model_id.clone();
                     return Ok(UpstreamResolution {
                         base_url: plan.upstream.base_url.clone(),
@@ -602,7 +750,7 @@ async fn resolve_upstream(
                     });
                 }
                 Err(e) => {
-                    if strict_mode {
+                    if strict_mode || matches!(e, RouteError::Rejected { .. }) {
                         return Err(e);
                     }
                     tracing::debug!(
@@ -802,6 +950,12 @@ fn insert_route_headers(builder: &mut HttpResponseBuilder, plan: &RoutePlan, res
         builder.insert_header(("x-content-used", content_used.to_string()));
     }
     if let Some(judge) = plan.judge.as_ref() {
+        if let Some(id) = judge.id.as_deref() {
+            builder.insert_header(("x-judge-id", id.to_string()));
+        }
+        if let Some(action) = judge.action.as_deref() {
+            builder.insert_header(("x-judge-action", action.to_string()));
+        }
         if let Some(mode) = judge.mode.as_deref() {
             builder.insert_header(("x-judge-mode", mode.to_string()));
         }
@@ -814,7 +968,55 @@ fn insert_route_headers(builder: &mut HttpResponseBuilder, plan: &RoutePlan, res
         if let Some(target) = judge.target.as_deref() {
             builder.insert_header(("x-judge-target", target.to_string()));
         }
+        if let Some(policy_rev) = judge.policy_rev.as_deref() {
+            builder.insert_header(("x-safety-policy-rev", policy_rev.to_string()));
+        }
+        if let Some(policy_fingerprint) = judge.policy_fingerprint.as_deref() {
+            builder.insert_header(("x-judge-policy-fingerprint", policy_fingerprint.to_string()));
+        }
+        if let Some(cacheable) = judge.cacheable {
+            builder.insert_header((
+                "x-safety-cache",
+                if cacheable { "cacheable" } else { "no-store" },
+            ));
+        }
     }
+}
+
+fn insert_response_guard_headers(
+    builder: &mut HttpResponseBuilder,
+    decision: &crate::safety_judge::ResponseGuardDecision,
+) {
+    builder.insert_header(("x-response-guard-id", decision.id.clone()));
+    builder.insert_header(("x-response-guard-mode", decision.mode.clone()));
+    builder.insert_header(("x-response-guard-verdict", decision.verdict.clone()));
+    builder.insert_header(("x-response-guard-risk", decision.risk_level.clone()));
+    builder.insert_header(("x-response-guard-blocked", decision.blocked.to_string()));
+    builder.insert_header(("x-safety-policy-rev", decision.policy_rev.clone()));
+}
+
+fn response_guard_error_response(
+    decision: &crate::safety_judge::ResponseGuardDecision,
+    plan: Option<&RoutePlan>,
+    resolved_model: &str,
+) -> HttpResponse {
+    let mut builder = HttpResponse::Forbidden();
+    if let Some(plan) = plan {
+        insert_route_headers(&mut builder, plan, resolved_model);
+    }
+    insert_response_guard_headers(&mut builder, decision);
+    builder.json(serde_json::json!({
+        "error": {
+            "message": "Response blocked by Routiium response guard",
+            "type": "safety_policy_error",
+            "code": "response_guard_blocked",
+            "safety_event_id": decision.id,
+            "reason": decision.reason,
+            "risk_level": decision.risk_level,
+            "categories": decision.categories,
+            "policy_rev": decision.policy_rev
+        }
+    }))
 }
 
 fn router_error_response(
@@ -1583,6 +1785,86 @@ where
     }
 }
 
+struct SafetySseGuard<S> {
+    inner: S,
+    rolling_text: String,
+    emitted_block: bool,
+}
+
+impl<S> SafetySseGuard<S>
+where
+    S: futures_util::stream::Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
+{
+    fn new(inner: S) -> Self {
+        Self {
+            inner,
+            rolling_text: String::new(),
+            emitted_block: false,
+        }
+    }
+}
+
+impl<S> futures_util::stream::Stream for SafetySseGuard<S>
+where
+    S: futures_util::stream::Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
+{
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.emitted_block {
+            return Poll::Ready(None);
+        }
+
+        match Pin::new(&mut this.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(chunk))) => {
+                let text = String::from_utf8_lossy(&chunk);
+                this.rolling_text.push_str(&text);
+                if this.rolling_text.len() > 24_000 {
+                    this.rolling_text = this
+                        .rolling_text
+                        .chars()
+                        .rev()
+                        .take(16_000)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                }
+
+                let decision = crate::safety_judge::guard_response_text(&this.rolling_text);
+                if decision.should_block() {
+                    this.emitted_block = true;
+                    tracing::warn!(
+                        target: "routiium::safety",
+                        guard_id = %decision.id,
+                        risk = %decision.risk_level,
+                        categories = ?decision.categories,
+                        "streaming response blocked by response guard"
+                    );
+                    let payload = serde_json::json!({
+                        "error": {
+                            "message": "Streaming response blocked by Routiium response guard",
+                            "type": "safety_policy_error",
+                            "code": "response_guard_blocked",
+                            "safety_event_id": decision.id,
+                            "reason": decision.reason,
+                            "risk_level": decision.risk_level,
+                            "categories": decision.categories,
+                            "policy_rev": decision.policy_rev
+                        }
+                    });
+                    let event = format!("event: error\ndata: {}\n\n", payload);
+                    Poll::Ready(Some(Ok(Bytes::from(event))))
+                } else {
+                    Poll::Ready(Some(Ok(chunk)))
+                }
+            }
+            other => other,
+        }
+    }
+}
+
 /// Passthrough for OpenAI Responses API (`/v1/responses`):
 /// Accepts native Responses payload and forwards upstream without transformation.
 /// Supports SSE when `stream: true`.
@@ -1781,7 +2063,7 @@ async fn responses_passthrough(
         Err(resp) => return resp,
     };
 
-    let stream = body
+    let mut stream = body
         .get("stream")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
@@ -1790,9 +2072,23 @@ async fn responses_passthrough(
     let resolution = match resolve_upstream(&state, "responses", &mut body).await {
         Ok(res) => res,
         Err(err) => {
+            record_router_error_event(&state, &req, "responses", &requested_model, &err).await;
             return router_plan_error_response(&err);
         }
     };
+
+    let streaming_safety =
+        if stream && crate::safety_judge::should_force_non_stream(resolution.plan.as_ref()) {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("stream".to_string(), serde_json::json!(false));
+            }
+            stream = false;
+            Some("forced_non_stream")
+        } else if stream {
+            Some(crate::safety_judge::streaming_safety_mode_from_env().as_str())
+        } else {
+            None
+        };
 
     log_request_start("responses", &req, &requested_model, &resolution, stream);
 
@@ -1802,6 +2098,9 @@ async fn responses_passthrough(
             "model".to_string(),
             serde_json::json!(resolution.model_id.clone()),
         );
+        if streaming_safety == Some("forced_non_stream") {
+            obj.insert("stream".to_string(), serde_json::json!(false));
+        }
     }
 
     let mut eff_bearer = upstream_bearer.clone();
@@ -1860,6 +2159,50 @@ async fn responses_passthrough(
                             serde_json::to_value(&responses_response).unwrap_or_default();
                         let token_usage =
                             crate::analytics_middleware::extract_token_usage(&response_json);
+                        let response_bytes =
+                            serde_json::to_vec(&responses_response).unwrap_or_default();
+                        let response_guard =
+                            crate::safety_judge::guard_response_bytes(&response_bytes);
+                        if response_guard.should_block() {
+                            tracing::warn!(
+                                target: "routiium::safety",
+                                guard_id = %response_guard.id,
+                                risk = %response_guard.risk_level,
+                                categories = ?response_guard.categories,
+                                "bedrock responses output blocked by response guard"
+                            );
+                            record_analytics_event(
+                                &state,
+                                &req,
+                                &body,
+                                &requested_model,
+                                &resolution,
+                                started_at,
+                                403,
+                                0,
+                                None,
+                                authenticated,
+                                api_key_id.clone(),
+                                api_key_label.clone(),
+                                system_prompt_applied,
+                                Some(response_guard.reason.clone()),
+                            )
+                            .await;
+                            record_response_guard_event(
+                                &state,
+                                &req,
+                                "responses",
+                                &requested_model,
+                                &resolution,
+                                &response_guard,
+                            )
+                            .await;
+                            return response_guard_error_response(
+                                &response_guard,
+                                resolution.plan.as_ref(),
+                                &resolution.model_id,
+                            );
+                        }
 
                         record_chat_history(
                             &state.chat_history,
@@ -1896,6 +2239,7 @@ async fn responses_passthrough(
                         if let Some(plan) = resolution.plan.as_ref() {
                             insert_route_headers(&mut builder, plan, &resolution.model_id);
                         }
+                        insert_response_guard_headers(&mut builder, &response_guard);
                         return builder.json(responses_response);
                     }
                     Err(e) => {
@@ -2006,14 +2350,9 @@ async fn responses_passthrough(
                         dyn futures_util::stream::Stream<Item = Result<Bytes, std::io::Error>>
                             + Send,
                     >,
-                > = if let Some(plan) = resolution.plan.as_ref() {
-                    if matches!(plan.upstream.mode, RouterUpstreamMode::Responses) {
-                        Box::pin(ResponsesSseToChatSse::new(stream))
-                    } else {
-                        Box::pin(stream)
-                    }
-                } else {
-                    Box::pin(stream)
+                > = match crate::safety_judge::streaming_safety_mode_from_env() {
+                    crate::safety_judge::StreamingSafetyMode::Off => stream,
+                    _ => Box::pin(SafetySseGuard::new(stream)),
                 };
 
                 let mut response = HttpResponse::Ok();
@@ -2031,6 +2370,9 @@ async fn responses_passthrough(
                     .insert_header(("connection", "keep-alive"));
                 if let Some(plan) = resolution.plan.as_ref() {
                     insert_route_headers(&mut response, plan, &resolution.model_id);
+                }
+                if let Some(value) = streaming_safety {
+                    response.insert_header(("x-streaming-safety", value));
                 }
                 if let Some(ref rl) = rl_result {
                     insert_rate_limit_headers(&mut response, rl);
@@ -2105,6 +2447,53 @@ async fn responses_passthrough(
                     .as_ref()
                     .and_then(crate::analytics_middleware::extract_token_usage);
 
+                let response_guard = if status.is_success() {
+                    let decision = crate::safety_judge::guard_response_bytes(&bytes);
+                    if decision.should_block() {
+                        tracing::warn!(
+                            target: "routiium::safety",
+                            guard_id = %decision.id,
+                            risk = %decision.risk_level,
+                            categories = ?decision.categories,
+                            "responses output blocked by response guard"
+                        );
+                        record_analytics_event(
+                            &state,
+                            &req,
+                            &body,
+                            &requested_model,
+                            &resolution,
+                            started_at,
+                            403,
+                            0,
+                            None,
+                            authenticated,
+                            api_key_id.clone(),
+                            api_key_label.clone(),
+                            system_prompt_applied,
+                            Some(decision.reason.clone()),
+                        )
+                        .await;
+                        record_response_guard_event(
+                            &state,
+                            &req,
+                            "responses",
+                            &requested_model,
+                            &resolution,
+                            &decision,
+                        )
+                        .await;
+                        return response_guard_error_response(
+                            &decision,
+                            resolution.plan.as_ref(),
+                            &resolution.model_id,
+                        );
+                    }
+                    Some(decision)
+                } else {
+                    None
+                };
+
                 if status.is_success() {
                     if let Some(ref response_json) = response_json {
                         record_chat_history(
@@ -2148,6 +2537,12 @@ async fn responses_passthrough(
                 );
                 if let Some(plan) = resolution.plan.as_ref() {
                     insert_route_headers(&mut builder, plan, &resolution.model_id);
+                    if let Some(decision) = response_guard.as_ref() {
+                        insert_response_guard_headers(&mut builder, decision);
+                    }
+                    if let Some(value) = streaming_safety {
+                        builder.insert_header(("x-streaming-safety", value));
+                    }
                     if status.is_success()
                         && matches!(plan.upstream.mode, RouterUpstreamMode::Responses)
                     {
@@ -2163,6 +2558,14 @@ async fn responses_passthrough(
                                 return builder.body(body);
                             }
                         }
+                    }
+                }
+                if resolution.plan.is_none() {
+                    if let Some(decision) = response_guard.as_ref() {
+                        insert_response_guard_headers(&mut builder, decision);
+                    }
+                    if let Some(value) = streaming_safety {
+                        builder.insert_header(("x-streaming-safety", value));
                     }
                 }
                 if let Some(ref rl) = rl_result {
@@ -2523,6 +2926,10 @@ async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl
                 "default_policy_id": rate_limit_default_policy_id,
                 "emergency_blocks": emergency_blocks.len()
             },
+            "safety_audit": {
+                "max_events": state.safety_audit.max_events(),
+                "jsonl_path": state.safety_audit.jsonl_path()
+            },
             "analytics": {
                 "enabled": state.analytics.is_some(),
                 "stats": analytics_stats
@@ -2622,6 +3029,11 @@ async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl
                 "enabled": state.rate_limit_manager.is_some(),
                 "backend": non_empty_env("ROUTIIUM_RATE_LIMIT_BACKEND"),
                 "config_path": non_empty_env("ROUTIIUM_RATE_LIMIT_CONFIG")
+            },
+            "safety": {
+                "judge_mode": crate::safety_judge::SafetyJudgeConfig::from_env().mode.as_str(),
+                "response_guard_mode": crate::safety_judge::response_guard_mode_from_env().as_str(),
+                "streaming_safety": crate::safety_judge::streaming_safety_mode_from_env().as_str()
             }
         },
         "bedrock": {
@@ -2646,6 +3058,31 @@ async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl
             "default_policy_id": rate_limit_default_policy_id,
             "emergency_blocks": emergency_blocks
         }
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct SafetyEventsQuery {
+    limit: Option<usize>,
+}
+
+async fn admin_safety_events(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    query: web::Query<SafetyEventsQuery>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
+
+    let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
+    let events = state.safety_audit.recent(limit).await;
+    HttpResponse::Ok().json(serde_json::json!({
+        "events": events,
+        "count": events.len(),
+        "limit": limit,
+        "jsonl_path": state.safety_audit.jsonl_path(),
+        "max_events": state.safety_audit.max_events()
     }))
 }
 
@@ -2813,6 +3250,7 @@ pub fn config_routes(cfg: &mut web::ServiceConfig) {
             .route("/analytics/aggregate", web::get().to(analytics_aggregate))
             .route("/analytics/export", web::get().to(analytics_export))
             .route("/analytics/clear", web::post().to(analytics_clear))
+            .route("/admin/safety/events", web::get().to(admin_safety_events))
             .route("/chat_history/stats", web::get().to(chat_history_stats))
             .route(
                 "/chat_history/conversations",
@@ -2938,6 +3376,7 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
         "/analytics/aggregate",
         "/analytics/export",
         "/analytics/clear",
+        "/admin/safety/events",
         "/chat_history/stats",
         "/chat_history/conversations",
         "/chat_history/conversations/{id}",
@@ -2972,7 +3411,7 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
     } else if state.router_url.is_some() {
         "remote"
     } else if router_enabled {
-        "configured"
+        "embedded"
     } else {
         "none"
     };
@@ -2981,6 +3420,13 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
         .as_ref()
         .map(|p| format!("file://{}", p));
     let pricing_config_path = state.pricing_config_path.as_deref();
+    let safety_config = crate::safety_judge::SafetyJudgeConfig::from_env();
+    let response_guard_mode = crate::safety_judge::response_guard_mode_from_env();
+    let streaming_safety_mode = crate::safety_judge::streaming_safety_mode_from_env();
+    let judge_key_present = std::env::var(&safety_config.llm_api_key_env)
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
 
     // Get analytics status
     let analytics_enabled = state.analytics.is_some();
@@ -3017,6 +3463,22 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
             "strict": state.router_strict,
             "cache_ttl_ms": state.router_cache_ttl_ms,
             "privacy_mode": state.router_privacy_mode
+        },
+        "judge": {
+            "enabled": safety_config.mode != crate::safety_judge::SafetyMode::Off,
+            "mode": safety_config.mode.as_str(),
+            "llm_enabled": safety_config.llm_enabled,
+            "llm_model": safety_config.llm_model,
+            "llm_api_key_env": safety_config.llm_api_key_env,
+            "llm_key_present": judge_key_present,
+            "safe_target": safety_config.safe_target,
+            "sensitive_target": safety_config.sensitive_target,
+            "deny_target": safety_config.deny_target,
+            "on_deny": safety_config.on_deny.as_str(),
+            "policy_fingerprint": safety_config.policy_fingerprint,
+            "web_judge": safety_config.web_judge.as_str(),
+            "response_guard_mode": response_guard_mode.as_str(),
+            "streaming_safety": streaming_safety_mode.as_str()
         },
         "features": {
             "auth": {
@@ -3404,7 +3866,7 @@ async fn chat_completions_passthrough(
     };
 
     // Determine if streaming is requested
-    let stream = body
+    let mut stream = body
         .get("stream")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
@@ -3413,9 +3875,23 @@ async fn chat_completions_passthrough(
     let resolution = match resolve_upstream(&state, "chat", &mut body).await {
         Ok(res) => res,
         Err(err) => {
+            record_router_error_event(&state, &req, "chat", &requested_model, &err).await;
             return router_plan_error_response(&err);
         }
     };
+
+    let streaming_safety =
+        if stream && crate::safety_judge::should_force_non_stream(resolution.plan.as_ref()) {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("stream".to_string(), serde_json::json!(false));
+            }
+            stream = false;
+            Some("forced_non_stream")
+        } else if stream {
+            Some(crate::safety_judge::streaming_safety_mode_from_env().as_str())
+        } else {
+            None
+        };
 
     log_request_start("chat", &req, &requested_model, &resolution, stream);
 
@@ -3424,6 +3900,9 @@ async fn chat_completions_passthrough(
             "model".to_string(),
             serde_json::json!(resolution.model_id.clone()),
         );
+        if streaming_safety == Some("forced_non_stream") {
+            obj.insert("stream".to_string(), serde_json::json!(false));
+        }
     }
 
     let mut eff_bearer = upstream_bearer.clone();
@@ -3513,10 +3992,17 @@ async fn chat_completions_passthrough(
                         }
                         Err(err) => Err(std::io::Error::other(err.to_string())),
                     });
+                    let mapped = match crate::safety_judge::streaming_safety_mode_from_env() {
+                        crate::safety_judge::StreamingSafetyMode::Off => mapped.boxed(),
+                        _ => SafetySseGuard::new(mapped.boxed()).boxed(),
+                    };
 
                     let mut response = HttpResponse::Ok();
                     if let Some(plan) = resolution.plan.as_ref() {
                         insert_route_headers(&mut response, plan, &resolution.model_id);
+                    }
+                    if let Some(value) = streaming_safety {
+                        response.insert_header(("x-streaming-safety", value));
                     }
 
                     record_analytics_event(
@@ -3581,6 +4067,48 @@ async fn chat_completions_passthrough(
                     let response_json = serde_json::to_value(&chat_response).unwrap_or_default();
                     let token_usage =
                         crate::analytics_middleware::extract_token_usage(&response_json);
+                    let response_bytes = serde_json::to_vec(&chat_response).unwrap_or_default();
+                    let response_guard = crate::safety_judge::guard_response_bytes(&response_bytes);
+                    if response_guard.should_block() {
+                        tracing::warn!(
+                            target: "routiium::safety",
+                            guard_id = %response_guard.id,
+                            risk = %response_guard.risk_level,
+                            categories = ?response_guard.categories,
+                            "bedrock chat output blocked by response guard"
+                        );
+                        record_analytics_event(
+                            &state,
+                            &req,
+                            &body,
+                            &requested_model,
+                            &resolution,
+                            started_at,
+                            403,
+                            0,
+                            None,
+                            authenticated,
+                            api_key_id.clone(),
+                            api_key_label.clone(),
+                            system_prompt_applied,
+                            Some(response_guard.reason.clone()),
+                        )
+                        .await;
+                        record_response_guard_event(
+                            &state,
+                            &req,
+                            "chat",
+                            &requested_model,
+                            &resolution,
+                            &response_guard,
+                        )
+                        .await;
+                        return response_guard_error_response(
+                            &response_guard,
+                            resolution.plan.as_ref(),
+                            &resolution.model_id,
+                        );
+                    }
                     record_chat_history(
                         &state.chat_history,
                         conversation_hint.clone(),
@@ -3615,6 +4143,10 @@ async fn chat_completions_passthrough(
                     let mut builder = HttpResponse::Ok();
                     if let Some(plan) = resolution.plan.as_ref() {
                         insert_route_headers(&mut builder, plan, &resolution.model_id);
+                    }
+                    insert_response_guard_headers(&mut builder, &response_guard);
+                    if let Some(value) = streaming_safety {
+                        builder.insert_header(("x-streaming-safety", value));
                     }
                     return builder.json(chat_response);
                 }
@@ -3741,6 +4273,10 @@ async fn chat_completions_passthrough(
                 } else {
                     base_stream.boxed()
                 };
+                let stream = match crate::safety_judge::streaming_safety_mode_from_env() {
+                    crate::safety_judge::StreamingSafetyMode::Off => stream,
+                    _ => SafetySseGuard::new(stream).boxed(),
+                };
 
                 let mut response = HttpResponse::Ok();
                 if let Some(ct) = upstream_ct {
@@ -3758,6 +4294,9 @@ async fn chat_completions_passthrough(
                     .insert_header(("connection", "keep-alive"));
                 if let Some(plan) = resolution.plan.as_ref() {
                     insert_route_headers(&mut response, plan, &resolution.model_id);
+                }
+                if let Some(value) = streaming_safety {
+                    response.insert_header(("x-streaming-safety", value));
                 }
                 if let Some(ref rl) = rl_result {
                     insert_rate_limit_headers(&mut response, rl);
@@ -3842,6 +4381,53 @@ async fn chat_completions_passthrough(
                     .as_ref()
                     .and_then(crate::analytics_middleware::extract_token_usage);
 
+                let response_guard = if status.is_success() {
+                    let decision = crate::safety_judge::guard_response_bytes(&bytes);
+                    if decision.should_block() {
+                        tracing::warn!(
+                            target: "routiium::safety",
+                            guard_id = %decision.id,
+                            risk = %decision.risk_level,
+                            categories = ?decision.categories,
+                            "chat output blocked by response guard"
+                        );
+                        record_analytics_event(
+                            &state,
+                            &req,
+                            &body,
+                            &requested_model,
+                            &resolution,
+                            started_at,
+                            403,
+                            0,
+                            None,
+                            authenticated,
+                            api_key_id.clone(),
+                            api_key_label.clone(),
+                            system_prompt_applied,
+                            Some(decision.reason.clone()),
+                        )
+                        .await;
+                        record_response_guard_event(
+                            &state,
+                            &req,
+                            "chat",
+                            &requested_model,
+                            &resolution,
+                            &decision,
+                        )
+                        .await;
+                        return response_guard_error_response(
+                            &decision,
+                            resolution.plan.as_ref(),
+                            &resolution.model_id,
+                        );
+                    }
+                    Some(decision)
+                } else {
+                    None
+                };
+
                 // Record chat history for successful non-streaming responses
                 // This must happen BEFORE any early returns below
                 if status.is_success() {
@@ -3887,6 +4473,12 @@ async fn chat_completions_passthrough(
                 );
                 if let Some(plan) = resolution.plan.as_ref() {
                     insert_route_headers(&mut builder, plan, &resolution.model_id);
+                }
+                if let Some(decision) = response_guard.as_ref() {
+                    insert_response_guard_headers(&mut builder, decision);
+                }
+                if let Some(value) = streaming_safety {
+                    builder.insert_header(("x-streaming-safety", value));
                 }
                 if status.is_success() && expects_responses {
                     match serde_json::from_slice::<responses::ResponsesResponse>(&bytes) {

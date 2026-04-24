@@ -125,6 +125,19 @@ fn env_truthy(name: &str) -> bool {
     )
 }
 
+fn env_falsey_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off" | "disabled" | "legacy"
+    )
+}
+
+fn embedded_router_enabled() -> bool {
+    env_string("ROUTIIUM_ROUTER_MODE")
+        .map(|value| !env_falsey_value(&value))
+        .unwrap_or(true)
+}
+
 async fn serve(args: ServeArgs) -> std::io::Result<()> {
     let runtime_config = RuntimeConfig::from_serve_args(args);
 
@@ -280,9 +293,12 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
             )
         };
 
-    // Load router configuration if provided
+    // Load router configuration. Explicit local/remote routers retain precedence;
+    // otherwise Routiium installs the embedded secure router by default so users
+    // get EduRouter-like aliases and request judging without another service.
     let mut router_config_path_state: Option<String> = None;
     let mut router_url_state: Option<String> = None;
+    let mut embedded_router_active = false;
     let router_client: Option<Arc<dyn routiium::router_client::RouterClient>> =
         if let Some(router_path) = router_config_arg.clone() {
             tracing::info!("Loading router configuration from: {}", router_path);
@@ -312,7 +328,6 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
                 Ok(client) => {
                     tracing::info!("Connected to remote router");
                     router_url_state = Some(router_url);
-                    // Wrap with cache
                     Some(Arc::new(routiium::router_client::CachedRouterClient::new(
                         Box::new(client),
                         runtime_config.router_cache_ttl_ms,
@@ -324,9 +339,36 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
                     None
                 }
             }
+        } else if embedded_router_enabled() {
+            tracing::info!(
+                "No router configured; enabling Routiium embedded router + safety judge"
+            );
+            embedded_router_active = true;
+            Some(Arc::new(
+                routiium::router_client::EmbeddedDefaultRouter::from_env(),
+            ))
         } else {
-            tracing::info!("No router configured");
+            tracing::info!(
+                "Embedded router disabled by ROUTIIUM_ROUTER_MODE; using legacy routing"
+            );
             None
+        };
+
+    let effective_router_strict = if embedded_router_active {
+        true
+    } else {
+        runtime_config.router_strict
+    };
+    let effective_router_cache_ttl_ms = if embedded_router_active {
+        0
+    } else {
+        runtime_config.router_cache_ttl_ms
+    };
+    let effective_router_privacy_mode =
+        if embedded_router_active && env_string("ROUTIIUM_ROUTER_PRIVACY_MODE").is_none() {
+            "full".to_string()
+        } else {
+            runtime_config.router_privacy_mode.clone()
         };
 
     // Initialize analytics manager
@@ -458,10 +500,11 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
         router_client,
         router_config_path: router_config_path_state,
         router_url: router_url_state,
-        router_strict: runtime_config.router_strict,
-        router_cache_ttl_ms: Some(runtime_config.router_cache_ttl_ms),
-        router_privacy_mode: runtime_config.router_privacy_mode,
+        router_strict: effective_router_strict,
+        router_cache_ttl_ms: Some(effective_router_cache_ttl_ms),
+        router_privacy_mode: effective_router_privacy_mode,
         rate_limit_manager,
+        safety_audit: routiium::safety_audit::SafetyAuditManager::from_env(),
     };
 
     // Startup mode announcement (managed vs passthrough)

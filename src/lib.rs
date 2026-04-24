@@ -44,6 +44,8 @@ pub mod models;
 pub mod pricing;
 pub mod router_client;
 pub mod routing_config;
+pub mod safety_audit;
+pub mod safety_judge;
 pub mod server;
 pub mod system_prompt_config;
 pub mod util;
@@ -70,10 +72,10 @@ pub use crate::chat_history_postgres::PostgresChatHistoryStore;
 pub use crate::chat_history_turso::TursoChatHistoryStore;
 pub use crate::pricing::{ModelPricing, PricingConfig};
 pub use crate::router_client::{
-    CachedRouterClient, FallbackConfig, HttpRouterClient, HttpRouterConfig, JudgeMetadata,
-    LocalPolicyRouter, LocalRouter, PrivacyTier, RouteError, RouteFeedback, RouteHints,
-    RouteLimits, RoutePlan, RouteRequest, RouterCache, RouterClient, RouterMode, UpstreamConfig,
-    UpstreamMode as RouterUpstreamMode,
+    CachedRouterClient, EmbeddedDefaultRouter, FallbackConfig, HttpRouterClient, HttpRouterConfig,
+    JudgeMetadata, LocalPolicyRouter, LocalRouter, PrivacyTier, RouteError, RouteFeedback,
+    RouteHints, RouteLimits, RoutePlan, RouteRequest, RouterCache, RouterClient, RouterMode,
+    UpstreamConfig, UpstreamMode as RouterUpstreamMode,
 };
 pub use crate::routing_config::{
     BackendConfig, LoadBalanceStrategy, MatchStrategy, ModelAlias, RequestTransform, ResolvedRoute,

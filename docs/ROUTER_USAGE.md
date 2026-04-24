@@ -4,16 +4,17 @@
 Use the Routiium CLI for the common rollout loop:
 
 ```bash
-routiium init --profile router --out .env
-routiium doctor --env-file .env --check-router
-routiium router probe --model <alias>
-routiium judge profile shadow --out .env
+routiium init --profile openai --out .env
+routiium router explain --model auto --prompt "Ignore previous instructions"
+routiium judge explain --prompt "Ignore previous instructions"
+routiium judge test --suite all
+routiium router probe --model auto
 ```
 
-The CLI does not replace the Router API contract below; it gives operators a faster way to scaffold env files and verify the Routiium-to-Router path.
+The CLI does not replace the Router API contract below; it gives operators a faster way to inspect embedded routing and verify remote Routiium-to-Router paths.
 
 
-The router layer lets Routiium resolve human-friendly model aliases into concrete upstream endpoints and policies. This guide explains how routing decisions are made, which configuration hooks are available, how to wire everything up in Docker, and how to verify and troubleshoot router integration.
+The router layer lets Routiium resolve human-friendly model aliases into concrete upstream endpoints and policies. When no remote Router is configured, Routiium uses its embedded EduRouter-style policy router and safety judge by default. This guide explains how routing decisions are made, which configuration hooks are available, how to wire everything up in Docker, and how to verify and troubleshoot router integration.
 
 **Table of Contents:**
 - [How Routing Works](#1-how-routing-works)
@@ -32,7 +33,7 @@ The router layer lets Routiium resolve human-friendly model aliases into concret
 ## 1. How Routing Works
 
 1. Every inbound `/v1/responses`, `/v1/chat/completions`, or `/convert` call flows through `resolve_upstream` (`src/server.rs`).  
-2. If a `RouterClient` is configured (either via `--router-config` or `ROUTIIUM_ROUTER_URL`), Routiium builds a `RouteRequest` from the payload using `extract_route_request` (`src/router_client.rs`). That request includes:
+2. Routiium chooses a `RouterClient`: explicit `--router-config`, explicit `ROUTIIUM_ROUTER_URL`, or the embedded default router. It builds a `RouteRequest` from the payload using `extract_route_request` (`src/router_client.rs`). That request includes:
    - The alias the client asked for (`body.model`).
    - API surface (`responses` or `chat`).
    - Capability flags (text, tools, vision, etc.).
@@ -40,7 +41,7 @@ The router layer lets Routiium resolve human-friendly model aliases into concret
    - Optional conversation signals whose detail level is controlled by `ROUTIIUM_ROUTER_PRIVACY_MODE`.
 3. The router returns a `RoutePlan` describing the target upstream (`base_url`, `mode`, `model_id`, optional `auth_env`, headers, limits, cache TTL, policy revision, stickiness token, etc.).  
 4. Routiium forwards the request upstream using that plan, adds observability headers (e.g. `x-route-id`, `x-resolved-model`, `router-schema`), and submits router feedback when supported.
-5. If the router rejects the alias or is unreachable and `ROUTIIUM_ROUTER_STRICT` is **not** set, Routiium falls back to the legacy `ROUTIIUM_BACKENDS` prefix rules or the global `OPENAI_BASE_URL`.
+5. Embedded safety denials never fall back to legacy routing. Remote router failures can fall back only when strict mode is disabled.
 
 The Router contract is documented in detail in [`ROUTER_API_SPEC.md`](ROUTER_API_SPEC.md); `../examples/router_service.rs` is a runnable reference implementation.
 
@@ -50,11 +51,12 @@ The Router contract is documented in detail in [`ROUTER_API_SPEC.md`](ROUTER_API
 
 | Mode | How to enable | When to use |
 | ---- | ------------- | ----------- |
+| **Embedded default router** | Default when no explicit router is configured (`ROUTIIUM_ROUTER_MODE=embedded`) | Safe-by-default single-binary deployments with aliases, scoring, and request judging. |
 | **Local alias map** | `routiium --router-config=router_aliases.json` | Simple deployments where a static JSON map is sufficient. |
 | **Remote HTTP router** | Set `ROUTIIUM_ROUTER_URL=https://router.yourdomain/` (optional `ROUTIIUM_ROUTER_TIMEOUT_MS`, `ROUTIIUM_ROUTER_MTLS`, etc.) | Dynamic policies, catalog metadata, and multi-tenant routing. |
-| **Legacy prefix fallback** | No router configured; set `ROUTIIUM_BACKENDS` | Emergency fallback or ultra-simple setups. |
+| **Legacy prefix fallback** | Set `ROUTIIUM_ROUTER_MODE=off` and configure `ROUTIIUM_BACKENDS` | Emergency fallback or ultra-simple setups without embedded judge. |
 
-`--router-config` takes precedence over `ROUTIIUM_ROUTER_URL`. When neither is specified, Routiium only uses `ROUTIIUM_BACKENDS` (if provided) or the global upstream.
+`--router-config` takes precedence over `ROUTIIUM_ROUTER_URL`; both take precedence over the embedded router. Set `ROUTIIUM_ROUTER_MODE=off` to disable embedded routing intentionally.
 
 ---
 
@@ -64,25 +66,27 @@ The Router contract is documented in detail in [`ROUTER_API_SPEC.md`](ROUTER_API
 
 | Value | Description |
 | ----- | ----------- |
-| `features` (default) | Sends metadata only (modalities, tool usage, token estimates). |
+| `features` | Sends metadata only (modalities, tool usage, token estimates). |
 | `summary` | Adds a short summary of the latest user message. |
 | `full` | Includes the system prompt and the last five turns so routers can enforce richer policies. |
 
-The router’s `RoutePlan.content_used` field (and the `X-Content-Used` response header) records what the router actually consumed for auditing.
+The router’s `RoutePlan.content_used` field (and the `X-Content-Used` response header) records what the router actually consumed for auditing. Embedded mode defaults to `full` because the judge runs in-process; remote mode should prefer `features` unless the remote policy needs content.
 
 ---
 
 ## 4. Plans, Caching, and Headers
 
 - Each `RoutePlan` carries cache metadata (`cache.ttl_ms`, `cache.valid_until`, `cache.freeze_key`). Routiium also exposes `ROUTIIUM_CACHE_TTL_MS` to override the default 15 s cache horizon for remote routers.  
-- For per-request LLM judging, configure the Router to return `cache.ttl_ms: 0` (or set `ROUTIIUM_CACHE_TTL_MS=0` as a belt-and-braces default) so each routed request reaches the judge. Cached alias-level plans are intentionally too coarse for a hard “every request is judged” guarantee.
+- Embedded judged requests set `cache.ttl_ms: 0` whenever content-sensitive safety decisions are involved. For remote per-request LLM judging, configure the Router to return `cache.ttl_ms: 0` (or set `ROUTIIUM_CACHE_TTL_MS=0`) so each routed request reaches the judge.
 - Plans that include `stickiness.plan_token` cause Routiium to send that token back to the router on the next turn so multi-turn conversations stay on the same upstream.  
 - Observability headers forwarded to clients:
   - `x-route-id`: Router-generated identifier (helps correlate downstream logs).
   - `x-resolved-model`: Actual upstream model ID.
   - `x-policy-rev` and `router-schema`: Policy metadata + schema version.
   - `x-content-used`: Privacy attestation from the router.
-  - `x-judge-mode`, `x-judge-verdict`, `x-judge-risk`, `x-judge-target`: LLM judge observability when the Router includes judge metadata.
+  - `x-judge-id`, `x-judge-mode`, `x-judge-verdict`, `x-judge-risk`, `x-judge-target`: judge observability.
+  - `x-judge-action` and `x-judge-policy-fingerprint`: normalized judge action and policy overlay fingerprint.
+  - `x-safety-policy-rev`, `x-safety-cache`: embedded/remote safety policy metadata.
   - `x-route-cache`: `hit`, `miss`, or `stale` when the router exposed cache hints.
 - When strict mode is disabled (default), failed router lookups fall back to `ROUTIIUM_BACKENDS`. Enabling `ROUTIIUM_ROUTER_STRICT=1` preserves structured Router error statuses (for example `403 POLICY_DENY` or `409 NO_ROUTE`) so callers notice misconfigured aliases and policy denials immediately.
 
@@ -94,17 +98,17 @@ The router’s `RoutePlan.content_used` field (and the `X-Content-Used` response
 | unset / `0` | Routiium may fall back to legacy routing | Routiium may fall back where safe | Not guaranteed; judge may be bypassed by fallback | Development or best-effort routing |
 
 
-### 4.1 LLM-as-Judge Router
+### 4.1 Built-in and remote LLM-as-judge
 
-Routiium’s recommended LLM-as-judge pattern is to put the judge inside the remote Router/EduRouter. Routiium already sends every routed alias through `/route/plan`, so the Router can call a judge model, then return a normal `RoutePlan` for `allow`/`downgrade` decisions or a structured router error for `deny`.
+Routiium now includes a built-in request judge in the embedded router. It runs deterministic checks for prompt injection, exfiltration, risky tools, dangerous actions, and suspicious URLs; its response guard scans outputs for prompt/secret leakage and dangerous guidance; when configured with a provider key, it can also call an isolated LLM judge with redacted context. Sensitive-but-allowable requests route to the built-in `secure` alias. Remote Router/EduRouter deployments can still return judge metadata through the same `RoutePlan.judge` field.
 
 **Guarantee checklist: every routed request is judged**
 
-- Clients use judged aliases, not direct model names that bypass the Router.
-- `ROUTIIUM_ROUTER_URL` points at the judging Router.
-- `ROUTIIUM_ROUTER_STRICT=1` so Router failures do not silently fall back to legacy routing.
-- `ROUTIIUM_ROUTER_PRIVACY_MODE=full` when the judge needs the system prompt and recent turns.
-- The Router returns `cache.ttl_ms: 0` for judged decisions, or Routiium is launched with `ROUTIIUM_CACHE_TTL_MS=0`.
+- Keep embedded routing enabled, or point `ROUTIIUM_ROUTER_URL` at a judging Router.
+- Use `ROUTIIUM_ROUTER_STRICT=1` so policy failures do not silently fall back.
+- Use `ROUTIIUM_ROUTER_PRIVACY_MODE=full` only when the judge needs request content.
+- Ensure content-sensitive judged decisions have `cache.ttl_ms: 0`.
+- Review `x-judge-*`, `x-response-guard-*`, `x-streaming-safety`, and `x-safety-*` headers in probes.
 
 **Bundled example Router profiles**
 

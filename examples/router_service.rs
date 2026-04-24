@@ -354,6 +354,16 @@ async fn get_catalog(state: web::Data<RouterState>, req: HttpRequest) -> impl Re
 
 fn judge_metadata(config: &JudgeConfig, decision: &JudgeDecision) -> JudgeMetadata {
     JudgeMetadata {
+        id: None,
+        action: Some(
+            match decision.verdict.as_str() {
+                "downgrade" => "route",
+                "deny" => "block",
+                "needs_approval" => "needs_approval",
+                _ => "allow",
+            }
+            .to_string(),
+        ),
         mode: Some(
             match config.mode {
                 JudgeMode::Off => "off",
@@ -366,6 +376,11 @@ fn judge_metadata(config: &JudgeConfig, decision: &JudgeDecision) -> JudgeMetada
         risk_level: decision.risk_level.clone(),
         reason: decision.reason.clone(),
         target: decision.target.clone(),
+        categories: None,
+        requires_approval: None,
+        policy_rev: None,
+        policy_fingerprint: None,
+        cacheable: None,
     }
 }
 
