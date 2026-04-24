@@ -57,6 +57,16 @@ jobs:
             exit 1
           fi
 
+      - name: Verify crates.io token is configured
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        shell: bash
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error title=Missing CARGO_REGISTRY_TOKEN::Add a crates.io API token as the repository secret CARGO_REGISTRY_TOKEN before pushing a release tag."
+            exit 1
+          fi
+
       - name: Cargo publish (dry run)
         run: cargo publish --dry-run --locked
 

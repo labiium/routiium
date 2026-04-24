@@ -147,5 +147,17 @@ jobs:
       - name: Verify package metadata
         run: npm run package:verify
 
+      - name: Check whether this npm version already exists
+        id: npm_version
+        shell: bash
+        run: |
+          if npm view "routiium@${{ needs.verify.outputs.version }}" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "routiium@${{ needs.verify.outputs.version }} is already published; skipping npm publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish package with npm trusted publishing (OIDC)
+        if: steps.npm_version.outputs.exists != 'true'
         run: npm publish --access public

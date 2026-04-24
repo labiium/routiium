@@ -65,15 +65,11 @@ pub fn responses_to_chat_response(
         let mut text_parts: Vec<String> = Vec::new();
         for item in &responses_response.output {
             match item {
-                resp::OutputItem::AssistantMessage { content: text, .. } => {
-                    if !text.is_empty() {
-                        text_parts.push(text.clone());
-                    }
-                }
-                resp::OutputItem::FunctionCallOutput { content: text, .. } => {
-                    if !text.is_empty() {
-                        text_parts.push(text.clone());
-                    }
+                resp::OutputItem::AssistantMessage { content: text, .. }
+                | resp::OutputItem::FunctionCallOutput { content: text, .. }
+                    if !text.is_empty() =>
+                {
+                    text_parts.push(text.clone());
                 }
                 _ => {}
             }
@@ -253,10 +249,10 @@ pub fn responses_chunk_to_chat_chunk(
                     });
                 }
                 resp::OutputItem::AssistantMessage { content, .. }
-                | resp::OutputItem::FunctionCallOutput { content, .. } => {
-                    if delta_content.is_none() {
-                        delta_content = Some(content.clone());
-                    }
+                | resp::OutputItem::FunctionCallOutput { content, .. }
+                    if delta_content.is_none() =>
+                {
+                    delta_content = Some(content.clone());
                 }
                 _ => {}
             }

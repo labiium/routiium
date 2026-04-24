@@ -3022,7 +3022,7 @@ async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl
             key.rate_limit_policy = rl_mgr.get_key_policy_id(&key.id).await.ok().flatten();
         }
     }
-    keys.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    keys.sort_by_key(|key| std::cmp::Reverse(key.created_at));
 
     let active_key_count = keys
         .iter()

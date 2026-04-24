@@ -203,7 +203,7 @@ impl ChatHistoryStore for JsonlChatHistoryStore {
             .collect();
 
         // Sort by last_seen_at descending
-        results.sort_by(|a, b| b.last_seen_at.cmp(&a.last_seen_at));
+        results.sort_by_key(|conversation| std::cmp::Reverse(conversation.last_seen_at));
 
         if let Some(limit) = filters.limit {
             results.truncate(limit);
@@ -273,7 +273,7 @@ impl ChatHistoryStore for JsonlChatHistoryStore {
             .collect();
 
         // Sort by created_at ascending
-        results.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        results.sort_by_key(|message| message.created_at);
 
         if let Some(limit) = filters.limit {
             results.truncate(limit);

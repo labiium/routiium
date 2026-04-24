@@ -339,7 +339,9 @@ impl RoutingConfig {
         let mut config: RoutingConfig = serde_json::from_str(&content)?;
 
         // Sort rules by priority (highest first)
-        config.rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        config
+            .rules
+            .sort_by_key(|rule| std::cmp::Reverse(rule.priority));
 
         // Compile regex patterns
         for rule in &mut config.rules {
