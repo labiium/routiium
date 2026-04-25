@@ -597,12 +597,12 @@ impl SafetyJudgeConfig {
 }
 
 fn app_policy_fingerprint(policy: &crate::app_config::JudgePolicyConfig) -> String {
-    use std::hash::{Hash, Hasher};
+    use sha2::{Digest, Sha256};
 
     let canonical = serde_json::to_string(policy).unwrap_or_else(|_| format!("{policy:?}"));
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    canonical.hash(&mut hasher);
-    format!("sha256:{:016x}", hasher.finish())
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

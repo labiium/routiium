@@ -196,6 +196,8 @@ Routiium consumes the `ROUTIIUM_JUDGE_*` variables for the embedded judge. The l
 | `ROUTIIUM_JUDGE_TIMEOUT_MS` | `800` | Judge timeout. |
 | `ROUTIIUM_JUDGE_OUTPUT_MODE` | `auto` | `auto` prefers tool/function calling and falls back to JSON; `tool` requires a judge tool call; `json` uses JSON response mode only. |
 | `ROUTIIUM_JUDGE_MAX_TOKENS` | `1024` | Maximum tokens for the JSON or tool-call LLM-judge response. Reasoning-heavy judge models may need this headroom. |
+| `ROUTIIUM_JUDGE_RECENT_MESSAGES` | `5` | Maximum messages included in full router/judge conversation context. The first user instruction is anchored when present, then recent tail messages fill the remaining window. |
+| `ROUTIIUM_JUDGE_RECENT_TOKEN_BUDGET` | `4000` | Approximate token budget for the full router/judge recent-message window. Large tool/MCP dumps are dropped from the window when they exceed this budget. |
 | `ROUTIIUM_WEB_JUDGE` | `restricted` | `off`, `restricted`, or `full`; restricted does URL/domain checks without sending private prompts to search. |
 | `ROUTIIUM_JUDGE_SELECTOR_SCOPE` | `baseline_always` | `baseline_always` keeps deterministic safety checks active; `gate_all` lets selector rules gate the whole request judge. |
 | `ROUTIIUM_JUDGE_SELECTOR_DEFAULT` | `judge` | Selector action when no rule matches: `judge`, `skip`, or `deny`. |

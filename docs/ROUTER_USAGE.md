@@ -68,7 +68,7 @@ The Router contract is documented in detail in [`ROUTER_API_SPEC.md`](ROUTER_API
 | ----- | ----------- |
 | `features` | Sends metadata only (modalities, tool usage, token estimates). |
 | `summary` | Adds a short summary of the latest user message. |
-| `full` | Includes the system prompt and the last five turns so routers can enforce richer policies. |
+| `full` | Includes the system prompt and an anchored recent-message window so routers can enforce richer policies. The first user instruction is preserved when present, then recent tail messages fill the remaining window. |
 
 The router’s `RoutePlan.content_used` field (and the `X-Content-Used` response header) records what the router actually consumed for auditing. Embedded mode defaults to `full` because the judge runs in-process; remote mode should prefer `features` unless the remote policy needs content.
 
@@ -893,6 +893,8 @@ curl http://localhost:8088/analytics/events?limit=500 | jq '
 | `ROUTIIUM_ROUTER_URL` | unset | Base URL for the remote Router API (`http(s)://...`). |
 | `ROUTIIUM_ROUTER_TIMEOUT_MS` | `15` | HTTP timeout (ms) for `/route/plan` & `/catalog/models`. |
 | `ROUTIIUM_ROUTER_PRIVACY_MODE` | `features` | Controls how much conversation content is sent to the router (`features`, `summary`, `full`). |
+| `ROUTIIUM_JUDGE_RECENT_MESSAGES` | `5` | Maximum full-mode messages sent to router/judge context, including the anchored first user instruction when present. |
+| `ROUTIIUM_JUDGE_RECENT_TOKEN_BUDGET` | `4000` | Approximate full-mode token budget for router/judge recent-message context. |
 | `ROUTIIUM_ROUTER_STRICT` | unset | When truthy (`1`, `true`, `yes`, `on`), fail client requests if routing fails. |
 | `ROUTIIUM_ROUTER_MTLS` | unset | Enable mutual TLS for router calls (certs must already exist on the host). |
 | `ROUTIIUM_CACHE_TTL_MS` | `15000` | Cache horizon for router plans when using `HttpRouterClient`. |

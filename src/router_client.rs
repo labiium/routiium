@@ -377,7 +377,8 @@ pub struct ConversationSignals {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
 
-    /// Last K messages - only with privacy_mode = Full
+    /// Anchored recent messages - only with privacy_mode = Full.
+    /// Includes the first user message when present, then a bounded recent tail.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recent_messages: Option<Vec<serde_json::Value>>,
 }
@@ -2024,13 +2025,13 @@ fn build_conversation_signals(
                 .unwrap_or(false)
         }) {
             if let Some(content) = system_msg.get("content").and_then(|c| c.as_str()) {
-                signals.system_fingerprint = Some(format!("sha256:{}", simple_hash(content)));
+                signals.system_fingerprint = Some(format!("sha256:{}", sha256_hex(content)));
             }
         }
 
         // History fingerprint
         let history_str = serde_json::to_string(msgs).unwrap_or_default();
-        signals.history_fingerprint = Some(format!("sha256:{}", simple_hash(&history_str)));
+        signals.history_fingerprint = Some(format!("sha256:{}", sha256_hex(&history_str)));
     }
 
     // Add content based on privacy mode
@@ -2075,16 +2076,7 @@ fn build_conversation_signals(
                     }
                 }
 
-                // Last 5 messages
-                let recent_count = 5.min(msgs.len());
-                signals.recent_messages = Some(
-                    msgs.iter()
-                        .rev()
-                        .take(recent_count)
-                        .rev()
-                        .cloned()
-                        .collect(),
-                );
+                signals.recent_messages = Some(select_judge_context_messages(msgs));
             }
         }
     }
@@ -2113,7 +2105,7 @@ fn extract_tools(payload: &serde_json::Value) -> Vec<ToolSignal> {
                     .get("function")
                     .and_then(|f| f.get("parameters"))
                     .or_else(|| tool.get("parameters"))
-                    .map(|s| format!("sha256:{}", simple_hash(&s.to_string())));
+                    .map(|s| format!("sha256:{}", sha256_hex(&s.to_string())));
 
                 tools.push(ToolSignal {
                     name: name.to_string(),
@@ -2161,14 +2153,99 @@ fn tool_source(tool_type: &str, tool: &serde_json::Value) -> String {
     "client".to_string()
 }
 
-/// Simple hash function (not cryptographically secure, just for fingerprinting)
-fn simple_hash(s: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+fn select_judge_context_messages(msgs: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let max_messages = judge_recent_message_limit().min(msgs.len());
+    if max_messages == 0 {
+        return Vec::new();
+    }
 
-    let mut hasher = DefaultHasher::new();
-    s.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let first_user_idx = msgs.iter().position(is_user_message);
+    let mut selected = Vec::with_capacity(max_messages);
+    if let Some(idx) = first_user_idx {
+        selected.push(idx);
+    }
+
+    for idx in (0..msgs.len()).rev() {
+        if selected.len() >= max_messages {
+            break;
+        }
+        if Some(idx) == first_user_idx {
+            continue;
+        }
+        selected.push(idx);
+    }
+
+    selected.sort_unstable();
+    trim_to_judge_token_budget(selected.into_iter().map(|idx| msgs[idx].clone()).collect())
+}
+
+fn trim_to_judge_token_budget(messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let budget = judge_recent_token_budget();
+    if budget == 0 {
+        return messages;
+    }
+
+    let first_user_pos = messages.iter().position(is_user_message);
+    let mut selected = Vec::with_capacity(messages.len());
+    let mut used = 0usize;
+
+    if let Some(pos) = first_user_pos {
+        let message = messages[pos].clone();
+        used = used.saturating_add(estimate_message_tokens(&message));
+        selected.push((pos, message));
+    }
+
+    for (pos, message) in messages.iter().enumerate().rev() {
+        if Some(pos) == first_user_pos {
+            continue;
+        }
+        let cost = estimate_message_tokens(message);
+        if used.saturating_add(cost) > budget && !selected.is_empty() {
+            continue;
+        }
+        used = used.saturating_add(cost);
+        selected.push((pos, message.clone()));
+    }
+
+    selected.sort_by_key(|(pos, _)| *pos);
+    selected.into_iter().map(|(_, message)| message).collect()
+}
+
+fn is_user_message(message: &serde_json::Value) -> bool {
+    message
+        .get("role")
+        .and_then(|role| role.as_str())
+        .map(|role| role == "user")
+        .unwrap_or(false)
+}
+
+fn judge_recent_message_limit() -> usize {
+    parse_positive_env_usize("ROUTIIUM_JUDGE_RECENT_MESSAGES", 5)
+}
+
+fn judge_recent_token_budget() -> usize {
+    parse_positive_env_usize("ROUTIIUM_JUDGE_RECENT_TOKEN_BUDGET", 4_000)
+}
+
+fn parse_positive_env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn estimate_message_tokens(message: &serde_json::Value) -> usize {
+    serde_json::to_string(message)
+        .map(|value| (value.len() / 4).saturating_add(10).max(1))
+        .unwrap_or(1)
+}
+
+fn sha256_hex(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(s.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 /// Rough token estimation (4 chars per token, improved)
@@ -2458,6 +2535,30 @@ mod tests {
         let signals = build_conversation_signals(&payload, PrivacyMode::Full);
         assert!(signals.system_prompt.is_some());
         assert!(signals.recent_messages.is_some());
+    }
+
+    #[test]
+    fn full_privacy_context_anchors_first_user_message() {
+        let payload = serde_json::json!({
+            "messages": [
+                {"role": "system", "content": "System prompt"},
+                {"role": "user", "content": "Original cleanup intent"},
+                {"role": "assistant", "content": "ok 1"},
+                {"role": "user", "content": "ok 2"},
+                {"role": "assistant", "content": "ok 3"},
+                {"role": "tool", "content": "large tool output"},
+                {"role": "assistant", "content": "rm -rf candidate"}
+            ]
+        });
+
+        let signals = build_conversation_signals(&payload, PrivacyMode::Full);
+        let recent = signals.recent_messages.unwrap();
+
+        assert!(recent.iter().any(|message| {
+            message.get("content").and_then(|content| content.as_str())
+                == Some("Original cleanup intent")
+        }));
+        assert!(recent.len() <= 5);
     }
 
     #[test]
