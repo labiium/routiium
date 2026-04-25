@@ -167,26 +167,6 @@ npm run admin:install
 npm run admin:dev
 ```
 
-For root npm CLI release checks, trusted publishing setup, and standalone admin package checks:
-
-```bash
-npm run package:verify
-npm run package:trust:github:dry-run
-npm run package:pack
-npm run admin:lint
-npm run admin:build
-npm run admin:audit
-npm run admin:pack
-```
-
-The root `routiium` npm release workflow is configured for npm Trusted Publishing/OIDC rather than a long-lived `NPM_TOKEN`. Before tagging a release, configure npm's trusted publisher for package `routiium` with repository `labiium/routiium` and workflow file `publish-npm.yml`:
-
-```bash
-npm run package:trust:github
-```
-
-If npm requires the package to exist before adding trust, do a one-time first publish with a short-lived npm automation token, then immediately configure trusted publishing and remove token-based publishing.
-
 Set `ROUTIIUM_ADMIN_TOKEN` on the server and enter the matching bearer in the panel header. Admin APIs now fail closed when this token is unset; `ROUTIIUM_INSECURE_ADMIN=1` is only for throwaway local development. The panel talks to live admin APIs; it is not a mock dashboard.
 
 ## Documentation
