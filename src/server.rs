@@ -6,10 +6,12 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use crate::conversion::{
-    responses_chunk_to_chat_chunk, responses_to_chat_response, to_responses_request,
+    chat_to_responses_response, responses_chunk_to_chat_chunk, responses_to_chat_response,
+    to_responses_request,
 };
 use crate::models::chat::{ChatCompletionRequest, Model, ModelsResponse};
 use crate::models::responses;
@@ -21,6 +23,96 @@ use crate::util::{env_bind_addr, managed_mode_from_env, upstream_mode_from_env, 
 
 use crate::util::error_response;
 use tracing::warn;
+
+static GATEWAY_METRICS: once_cell::sync::Lazy<GatewayMetrics> =
+    once_cell::sync::Lazy::new(GatewayMetrics::default);
+
+#[derive(Default)]
+struct GatewayMetrics {
+    requests_total: AtomicU64,
+    errors_total: AtomicU64,
+    duration_ms_sum: AtomicU64,
+    usage_measured_total: AtomicU64,
+    usage_estimated_total: AtomicU64,
+    usage_absent_total: AtomicU64,
+}
+
+impl GatewayMetrics {
+    fn record(
+        &self,
+        status_code: u16,
+        duration_ms: u64,
+        usage_source: crate::analytics::UsageSource,
+    ) {
+        self.requests_total.fetch_add(1, Ordering::Relaxed);
+        self.duration_ms_sum
+            .fetch_add(duration_ms, Ordering::Relaxed);
+        if status_code >= 500 {
+            self.errors_total.fetch_add(1, Ordering::Relaxed);
+        }
+        match usage_source {
+            crate::analytics::UsageSource::Measured => {
+                self.usage_measured_total.fetch_add(1, Ordering::Relaxed);
+            }
+            crate::analytics::UsageSource::Estimated => {
+                self.usage_estimated_total.fetch_add(1, Ordering::Relaxed);
+            }
+            crate::analytics::UsageSource::Absent => {
+                self.usage_absent_total.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn render_prometheus(&self) -> String {
+        let requests_total = self.requests_total.load(Ordering::Relaxed);
+        let errors_total = self.errors_total.load(Ordering::Relaxed);
+        let duration_ms_sum = self.duration_ms_sum.load(Ordering::Relaxed);
+        let usage_measured_total = self.usage_measured_total.load(Ordering::Relaxed);
+        let usage_estimated_total = self.usage_estimated_total.load(Ordering::Relaxed);
+        let usage_absent_total = self.usage_absent_total.load(Ordering::Relaxed);
+
+        format!(
+            concat!(
+                "# HELP routiium_requests_total Total terminal gateway requests recorded.\n",
+                "# TYPE routiium_requests_total counter\n",
+                "routiium_requests_total {}\n",
+                "# HELP routiium_errors_total Total terminal gateway requests with 5xx status.\n",
+                "# TYPE routiium_errors_total counter\n",
+                "routiium_errors_total {}\n",
+                "# HELP routiium_request_duration_ms_sum Sum of terminal gateway request durations in milliseconds.\n",
+                "# TYPE routiium_request_duration_ms_sum counter\n",
+                "routiium_request_duration_ms_sum {}\n",
+                "# HELP routiium_usage_source_total Terminal request count by usage source.\n",
+                "# TYPE routiium_usage_source_total counter\n",
+                "routiium_usage_source_total{{source=\"measured\"}} {}\n",
+                "routiium_usage_source_total{{source=\"estimated\"}} {}\n",
+                "routiium_usage_source_total{{source=\"absent\"}} {}\n"
+            ),
+            requests_total,
+            errors_total,
+            duration_ms_sum,
+            usage_measured_total,
+            usage_estimated_total,
+            usage_absent_total
+        )
+    }
+}
+
+#[derive(Clone)]
+struct ExactResponseCacheEntry {
+    status: u16,
+    bytes: Bytes,
+    content_type: &'static str,
+    token_usage: Option<crate::analytics::TokenUsage>,
+    expires_at: std::time::Instant,
+    policy_rev: Option<String>,
+    route_id: Option<String>,
+}
+
+static EXACT_RESPONSE_CACHE: once_cell::sync::Lazy<
+    std::sync::Mutex<HashMap<String, ExactResponseCacheEntry>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+
 /// Query parameters for conversion/proxy endpoints.
 #[derive(Debug, Deserialize)]
 pub struct ConvertQuery {
@@ -392,6 +484,274 @@ fn env_truthy(name: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+fn governance_mode() -> &'static str {
+    match non_empty_env("ROUTIIUM_GOVERNANCE_MODE")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "router" => "router",
+        _ => "off",
+    }
+}
+
+fn exact_response_cache_enabled() -> bool {
+    env_truthy("ROUTIIUM_EXACT_RESPONSE_CACHE")
+}
+
+fn exact_response_cache_ttl_ms() -> u64 {
+    non_empty_env("ROUTIIUM_EXACT_RESPONSE_CACHE_TTL_MS")
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|ttl| *ttl > 0)
+        .unwrap_or(60_000)
+}
+
+fn exact_response_cache_max_entries() -> usize {
+    non_empty_env("ROUTIIUM_EXACT_RESPONSE_CACHE_MAX_ENTRIES")
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|max| *max > 0)
+        .unwrap_or(1024)
+}
+
+fn request_declares_no_store(req: &HttpRequest) -> bool {
+    [
+        header::CACHE_CONTROL.as_str(),
+        "pragma",
+        "x-routiium-cache-control",
+    ]
+    .into_iter()
+    .filter_map(|name| req.headers().get(name))
+    .filter_map(|value| value.to_str().ok())
+    .any(|value| {
+        let value = value.to_ascii_lowercase();
+        value.contains("no-store") || value.contains("no-cache")
+    })
+}
+
+fn route_allows_exact_response_cache(resolution: &UpstreamResolution) -> bool {
+    let Some(plan) = resolution.plan.as_ref() else {
+        return false;
+    };
+    if plan
+        .cache
+        .as_ref()
+        .map(|cache| cache.ttl_ms == 0)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    if plan.content_used.as_deref() != Some("none") {
+        return false;
+    }
+    plan.judge.as_ref().and_then(|judge| judge.cacheable) == Some(true)
+}
+
+fn exact_response_cache_key(
+    api: &str,
+    body: &serde_json::Value,
+    resolution: &UpstreamResolution,
+    api_key_id: Option<&str>,
+    client_bearer: Option<&str>,
+) -> Option<String> {
+    if !exact_response_cache_enabled() {
+        return None;
+    }
+    let mut hasher = sha2::Sha256::new();
+    use sha2::Digest;
+    hasher.update(api.as_bytes());
+    hasher.update([0]);
+    hasher.update(resolution.model_id.as_bytes());
+    hasher.update([0]);
+    if let Some(route_id) = resolution
+        .plan
+        .as_ref()
+        .map(|plan| plan.route_id.as_str())
+        .filter(|route_id| !route_id.is_empty())
+    {
+        hasher.update(route_id.as_bytes());
+    }
+    hasher.update([0]);
+    hasher.update(match resolution.mode {
+        crate::util::UpstreamMode::Responses => b"responses".as_slice(),
+        crate::util::UpstreamMode::Chat => b"chat".as_slice(),
+        crate::util::UpstreamMode::Bedrock => b"bedrock".as_slice(),
+    });
+    hasher.update([0]);
+    hasher.update(resolution.base_url.as_bytes());
+    hasher.update([0]);
+    if let Some(plan) = resolution.plan.as_ref() {
+        if let Some(policy_rev) = plan.policy_rev.as_ref() {
+            hasher.update(policy_rev.as_bytes());
+        }
+        hasher.update([0]);
+        if let Some(cache) = plan.cache.as_ref() {
+            if let Some(etag) = cache.etag.as_ref() {
+                hasher.update(etag.as_bytes());
+            }
+            hasher.update([0]);
+            if let Some(freeze_key) = cache.freeze_key.as_ref() {
+                hasher.update(freeze_key.as_bytes());
+            }
+        }
+        hasher.update([0]);
+        if let Some(judge) = plan.judge.as_ref() {
+            if let Some(policy_rev) = judge.policy_rev.as_ref() {
+                hasher.update(policy_rev.as_bytes());
+            }
+            hasher.update([0]);
+            if let Some(fingerprint) = judge.policy_fingerprint.as_ref() {
+                hasher.update(fingerprint.as_bytes());
+            }
+            hasher.update([0]);
+            if let Some(id) = judge.id.as_ref() {
+                hasher.update(id.as_bytes());
+            }
+        }
+    }
+    hasher.update([0]);
+    if let Some(api_key_id) = api_key_id {
+        hasher.update(api_key_id.as_bytes());
+    } else if let Some(client_bearer) = client_bearer {
+        let mut auth_hasher = sha2::Sha256::new();
+        auth_hasher.update(client_bearer.as_bytes());
+        hasher.update(hex::encode(auth_hasher.finalize()).as_bytes());
+    }
+    hasher.update([0]);
+    let body = serde_json::to_vec(body).ok()?;
+    hasher.update(body);
+    Some(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+fn exact_response_cache_get(key: &str) -> Option<ExactResponseCacheEntry> {
+    let now = std::time::Instant::now();
+    let mut cache = EXACT_RESPONSE_CACHE.lock().ok()?;
+    match cache.get(key) {
+        Some(entry) if entry.expires_at > now => Some(entry.clone()),
+        Some(_) => {
+            cache.remove(key);
+            None
+        }
+        None => None,
+    }
+}
+
+fn exact_response_cache_insert(
+    key: String,
+    status: u16,
+    bytes: Bytes,
+    content_type: &'static str,
+    resolution: &UpstreamResolution,
+) {
+    if status != 200 || bytes.is_empty() {
+        return;
+    }
+    let ttl = exact_response_cache_ttl_ms();
+    let max_entries = exact_response_cache_max_entries();
+    let mut cache = match EXACT_RESPONSE_CACHE.lock() {
+        Ok(cache) => cache,
+        Err(_) => return,
+    };
+    let now = std::time::Instant::now();
+    cache.retain(|_, entry| entry.expires_at > now);
+    if cache.len() >= max_entries {
+        if let Some(first_key) = cache.keys().next().cloned() {
+            cache.remove(&first_key);
+        }
+    }
+    cache.insert(
+        key,
+        ExactResponseCacheEntry {
+            status,
+            token_usage: serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|value| crate::analytics_middleware::extract_token_usage(&value)),
+            bytes,
+            content_type,
+            expires_at: now + std::time::Duration::from_millis(ttl),
+            policy_rev: resolution
+                .plan
+                .as_ref()
+                .and_then(|plan| plan.policy_rev.clone()),
+            route_id: resolution.plan.as_ref().map(|plan| plan.route_id.clone()),
+        },
+    );
+}
+
+fn exact_response_cache_clear() -> usize {
+    EXACT_RESPONSE_CACHE
+        .lock()
+        .map(|mut cache| {
+            let count = cache.len();
+            cache.clear();
+            count
+        })
+        .unwrap_or(0)
+}
+
+fn maybe_exact_response_cache_key(
+    api: &str,
+    req: &HttpRequest,
+    body: &serde_json::Value,
+    resolution: &UpstreamResolution,
+    stream: bool,
+    api_key_id: Option<&str>,
+    client_bearer: Option<&str>,
+) -> Option<String> {
+    if governance_mode() == "router" {
+        return None;
+    }
+    if stream || request_declares_no_store(req) || !route_allows_exact_response_cache(resolution) {
+        return None;
+    }
+    exact_response_cache_key(api, body, resolution, api_key_id, client_bearer)
+}
+
+fn governance_readiness(state: &AppState) -> (bool, serde_json::Value) {
+    let mode = governance_mode();
+    let router_client = state.router_client.is_some();
+    let router_strict = state.router_strict || env_truthy("ROUTIIUM_ROUTER_STRICT");
+    let router_cache_disabled = state.router_cache_ttl_ms == Some(0)
+        || std::env::var("ROUTIIUM_CACHE_TTL_MS")
+            .ok()
+            .map(|value| value.trim() == "0")
+            .unwrap_or(false);
+    let exact_cache_enabled = exact_response_cache_enabled();
+    let exact_cache_safe = !(mode == "router" && exact_cache_enabled);
+
+    let router_delegate_ready = if mode == "router" {
+        router_client && router_strict && router_cache_disabled
+    } else {
+        true
+    };
+    let ready = router_delegate_ready && exact_cache_safe;
+
+    (
+        ready,
+        serde_json::json!({
+            "mode": mode,
+            "ready": ready,
+            "router_delegation": {
+                "required": mode == "router",
+                "ready": router_delegate_ready,
+                "router_client": router_client,
+                "strict_fail_closed": router_strict,
+                "plan_cache_disabled": router_cache_disabled
+            },
+            "exact_response_cache": {
+                "enabled": exact_cache_enabled,
+                "ready": exact_cache_safe,
+                "reason": if mode == "router" && exact_cache_enabled {
+                    "disabled in router governance mode so governed requests reach the Router fail-closed boundary"
+                } else if exact_cache_enabled {
+                    "enabled for non-streaming exact matches with route safety metadata, request no-store handling, TTL, and admin invalidation"
+                } else {
+                    "disabled"
+                }
+            }
+        }),
+    )
 }
 
 fn write_pretty_json_file<T: Serialize>(path: &str, value: &T) -> std::io::Result<()> {
@@ -769,6 +1129,24 @@ fn request_size_bytes(body: &serde_json::Value) -> usize {
     serde_json::to_string(body).map(|s| s.len()).unwrap_or(0)
 }
 
+fn estimate_streaming_token_usage(
+    request_body: &serde_json::Value,
+    response_size: usize,
+) -> Option<crate::analytics::TokenUsage> {
+    if response_size == 0 {
+        return None;
+    }
+    let prompt_tokens = ((request_size_bytes(request_body) as u64).saturating_add(3) / 4).max(1);
+    let completion_tokens = ((response_size as u64).saturating_add(3) / 4).max(1);
+    Some(crate::analytics::TokenUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens + completion_tokens,
+        cached_tokens: None,
+        reasoning_tokens: None,
+    })
+}
+
 fn extract_error_message(
     body: Option<&serde_json::Value>,
     fallback_bytes: &[u8],
@@ -811,11 +1189,61 @@ async fn record_analytics_event(
     system_prompt_applied: bool,
     error_message: Option<String>,
 ) {
+    let usage_source = if token_usage.is_some() {
+        crate::analytics::UsageSource::Measured
+    } else {
+        crate::analytics::UsageSource::Absent
+    };
+
+    record_analytics_event_with_usage_source(
+        state,
+        req,
+        request_body,
+        requested_model,
+        resolution,
+        started_at,
+        status_code,
+        response_size,
+        token_usage,
+        usage_source,
+        None,
+        None,
+        authenticated,
+        api_key_id,
+        api_key_label,
+        system_prompt_applied,
+        error_message,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_analytics_event_with_usage_source(
+    state: &AppState,
+    req: &HttpRequest,
+    request_body: &serde_json::Value,
+    requested_model: &str,
+    resolution: &UpstreamResolution,
+    started_at: std::time::Instant,
+    status_code: u16,
+    response_size: usize,
+    token_usage: Option<crate::analytics::TokenUsage>,
+    usage_source: crate::analytics::UsageSource,
+    ttfb_ms: Option<u64>,
+    upstream_duration_ms: Option<u64>,
+    authenticated: bool,
+    api_key_id: Option<String>,
+    api_key_label: Option<String>,
+    system_prompt_applied: bool,
+    error_message: Option<String>,
+) {
+    let duration_ms = started_at.elapsed().as_millis() as u64;
+    GATEWAY_METRICS.record(status_code, duration_ms, usage_source);
+
     let Some(manager) = state.analytics.as_ref() else {
         return;
     };
 
-    let duration_ms = started_at.elapsed().as_millis() as u64;
     let output_tokens = token_usage.as_ref().map(|u| u.completion_tokens);
     let tokens_per_second = output_tokens.and_then(|tokens| {
         if duration_ms > 0 {
@@ -869,11 +1297,12 @@ async fn record_analytics_event(
             output_tokens,
             success: (200..300).contains(&status_code),
             error_message,
+            usage_source,
         }),
         performance: crate::analytics::PerformanceMetrics {
             duration_ms,
-            ttfb_ms: None,
-            upstream_duration_ms: None,
+            ttfb_ms,
+            upstream_duration_ms,
             tokens_per_second,
         },
         auth: crate::analytics::AuthMetadata {
@@ -1405,6 +1834,51 @@ fn insert_route_headers(builder: &mut HttpResponseBuilder, plan: &RoutePlan, res
             builder.insert_header(("x-judge-selector-rules", selector_rules.join(",")));
         }
     }
+}
+
+fn is_safe_failover_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn fallback_resolutions(primary: &UpstreamResolution) -> Vec<UpstreamResolution> {
+    let Some(plan) = primary.plan.as_ref() else {
+        return Vec::new();
+    };
+
+    plan.ordered_attempts()
+        .into_iter()
+        .skip(1)
+        .map(|attempt| UpstreamResolution {
+            base_url: attempt.base_url,
+            mode: map_router_mode(attempt.mode),
+            key_env: attempt.auth_env,
+            headers: attempt.headers,
+            model_id: attempt.model_id,
+            pricing_model: primary.pricing_model.clone(),
+            plan: Some(plan.clone()),
+            source: primary.source,
+        })
+        .collect()
+}
+
+fn effective_bearer_for_resolution(
+    upstream_bearer: Option<&str>,
+    resolution: &UpstreamResolution,
+) -> Option<String> {
+    upstream_bearer
+        .map(str::to_string)
+        .or_else(|| {
+            resolution
+                .key_env
+                .as_deref()
+                .and_then(|env| std::env::var(env).ok())
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            std::env::var("OPENAI_API_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
 }
 
 fn insert_response_guard_headers(
@@ -2105,6 +2579,98 @@ mod tests {
     }
 
     #[test]
+    fn safe_failover_status_is_limited_to_429_and_5xx() {
+        assert!(is_safe_failover_status(
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+        ));
+        assert!(is_safe_failover_status(reqwest::StatusCode::BAD_GATEWAY));
+        assert!(is_safe_failover_status(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ));
+        assert!(!is_safe_failover_status(reqwest::StatusCode::BAD_REQUEST));
+        assert!(!is_safe_failover_status(reqwest::StatusCode::UNAUTHORIZED));
+        assert!(!is_safe_failover_status(reqwest::StatusCode::OK));
+    }
+
+    #[test]
+    fn streaming_usage_estimator_returns_nonzero_advisory_usage_for_bytes() {
+        let request = json!({
+            "model": "gpt-4o-mini",
+            "input": [{"role": "user", "content": "Estimate this"}]
+        });
+        let usage =
+            estimate_streaming_token_usage(&request, 128).expect("stream bytes are estimable");
+        assert!(usage.prompt_tokens > 0);
+        assert_eq!(usage.completion_tokens, 32);
+        assert_eq!(usage.total_tokens, usage.prompt_tokens + 32);
+        assert!(estimate_streaming_token_usage(&request, 0).is_none());
+    }
+
+    #[test]
+    fn fallback_resolutions_follow_router_plan_order() {
+        let plan = RoutePlan {
+            schema_version: Some("1.1".to_string()),
+            route_id: "rte_fallback".to_string(),
+            upstream: crate::router_client::UpstreamConfig {
+                base_url: "https://primary.example.com/v1".to_string(),
+                mode: RouterUpstreamMode::Responses,
+                model_id: "primary".to_string(),
+                auth_env: Some("PRIMARY_KEY".to_string()),
+                headers: None,
+            },
+            limits: crate::router_client::RouteLimits::default(),
+            prompt_overlays: None,
+            hints: crate::router_client::RouteHints::default(),
+            fallbacks: vec![
+                crate::router_client::FallbackConfig {
+                    base_url: "https://fallback-a.example.com/v1".to_string(),
+                    mode: RouterUpstreamMode::Chat,
+                    model_id: "fallback-a".to_string(),
+                    reason: Some("primary_5xx".to_string()),
+                    auth_env: Some("FALLBACK_A_KEY".to_string()),
+                    penalty: None,
+                },
+                crate::router_client::FallbackConfig {
+                    base_url: "https://fallback-b.example.com/v1".to_string(),
+                    mode: RouterUpstreamMode::Responses,
+                    model_id: "fallback-b".to_string(),
+                    reason: Some("fallback_a_5xx".to_string()),
+                    auth_env: None,
+                    penalty: None,
+                },
+            ],
+            cache: None,
+            policy_rev: None,
+            policy: None,
+            stickiness: None,
+            content_used: None,
+            judge: None,
+        };
+        let primary = UpstreamResolution {
+            base_url: "https://primary.example.com/v1".to_string(),
+            mode: crate::util::UpstreamMode::Responses,
+            key_env: Some("PRIMARY_KEY".to_string()),
+            headers: None,
+            model_id: "primary".to_string(),
+            pricing_model: Some("price-model".to_string()),
+            plan: Some(plan),
+            source: UpstreamSource::RouterPlan,
+        };
+
+        let fallbacks = fallback_resolutions(&primary);
+        assert_eq!(fallbacks.len(), 2);
+        assert_eq!(fallbacks[0].base_url, "https://fallback-a.example.com/v1");
+        assert_eq!(fallbacks[0].mode, crate::util::UpstreamMode::Chat);
+        assert_eq!(fallbacks[0].key_env.as_deref(), Some("FALLBACK_A_KEY"));
+        assert_eq!(fallbacks[0].model_id, "fallback-a");
+        assert_eq!(fallbacks[0].pricing_model.as_deref(), Some("price-model"));
+        assert_eq!(fallbacks[1].base_url, "https://fallback-b.example.com/v1");
+        assert_eq!(fallbacks[1].mode, crate::util::UpstreamMode::Responses);
+        assert_eq!(fallbacks[1].key_env, None);
+        assert_eq!(fallbacks[1].model_id, "fallback-b");
+    }
+
+    #[test]
     fn merge_mcp_tools_into_chat_payload_dedupes_existing_names() {
         let mut payload = json!({
             "model": "gpt-4o-mini",
@@ -2412,6 +2978,75 @@ fn apply_upstream_headers(
     }
 }
 
+async fn send_responses_nonstream_attempt(
+    client: &reqwest::Client,
+    resolution: &UpstreamResolution,
+    effective_body: &serde_json::Value,
+    upstream_bearer: Option<&str>,
+) -> Result<(reqwest::StatusCode, Bytes), reqwest::Error> {
+    let endpoint = match resolution.mode {
+        crate::util::UpstreamMode::Responses => "responses",
+        crate::util::UpstreamMode::Chat => "chat/completions",
+        crate::util::UpstreamMode::Bedrock => "bedrock/invoke",
+    };
+    let real_url = format!("{}/{}", resolution.base_url.trim_end_matches('/'), endpoint);
+    let outbound_body = if matches!(resolution.mode, crate::util::UpstreamMode::Chat) {
+        crate::conversion::responses_json_to_chat_value(effective_body)
+    } else {
+        effective_body.clone()
+    };
+
+    let mut upstream_req = client
+        .post(&real_url)
+        .header("content-type", "application/json");
+    upstream_req = apply_upstream_headers(upstream_req, &resolution.headers);
+    if let Some(bearer) = effective_bearer_for_resolution(upstream_bearer, resolution) {
+        upstream_req = upstream_req.bearer_auth(bearer);
+    }
+
+    let up = upstream_req.json(&outbound_body).send().await?;
+    let status = up.status();
+    let bytes = up.bytes().await?;
+    Ok((status, bytes))
+}
+
+async fn send_chat_nonstream_attempt(
+    client: &reqwest::Client,
+    resolution: &UpstreamResolution,
+    body: &serde_json::Value,
+    conversation_hint: Option<String>,
+    previous_response_hint: Option<String>,
+    upstream_bearer: Option<&str>,
+) -> Result<(reqwest::StatusCode, Bytes), reqwest::Error> {
+    let endpoint = match resolution.mode {
+        crate::util::UpstreamMode::Responses => "responses",
+        crate::util::UpstreamMode::Chat => "chat/completions",
+        crate::util::UpstreamMode::Bedrock => "bedrock/invoke",
+    };
+    let real_url = format!("{}/{}", resolution.base_url.trim_end_matches('/'), endpoint);
+    let outbound_body = if matches!(resolution.mode, crate::util::UpstreamMode::Responses) {
+        convert_chat_payload_to_responses(body, conversation_hint, previous_response_hint)
+            .unwrap_or_else(|| body.clone())
+    } else {
+        let mut outbound_body = body.clone();
+        strip_responses_only_fields(&mut outbound_body);
+        outbound_body
+    };
+
+    let mut upstream_req = client
+        .post(&real_url)
+        .header("content-type", "application/json");
+    upstream_req = apply_upstream_headers(upstream_req, &resolution.headers);
+    if let Some(bearer) = effective_bearer_for_resolution(upstream_bearer, resolution) {
+        upstream_req = upstream_req.bearer_auth(bearer);
+    }
+
+    let up = upstream_req.json(&outbound_body).send().await?;
+    let status = up.status();
+    let bytes = up.bytes().await?;
+    Ok((status, bytes))
+}
+
 fn trim_ascii(bytes: &[u8]) -> &[u8] {
     let start = bytes
         .iter()
@@ -2632,6 +3267,150 @@ where
             }
             other => other,
         }
+    }
+}
+
+struct StreamAnalyticsContext {
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    request_body: serde_json::Value,
+    requested_model: String,
+    resolution: UpstreamResolution,
+    started_at: std::time::Instant,
+    status_code: u16,
+    authenticated: bool,
+    api_key_id: Option<String>,
+    api_key_label: Option<String>,
+    system_prompt_applied: bool,
+}
+
+struct MeteredSseStream {
+    inner: Pin<Box<dyn futures_util::stream::Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
+    ctx: Option<StreamAnalyticsContext>,
+    response_size: usize,
+    event_buffer: Vec<u8>,
+    token_usage: Option<crate::analytics::TokenUsage>,
+    first_byte_ms: Option<u64>,
+}
+
+impl MeteredSseStream {
+    fn new(
+        inner: Pin<
+            Box<dyn futures_util::stream::Stream<Item = Result<Bytes, std::io::Error>> + Send>,
+        >,
+        ctx: StreamAnalyticsContext,
+    ) -> Self {
+        Self {
+            inner,
+            ctx: Some(ctx),
+            response_size: 0,
+            event_buffer: Vec::new(),
+            token_usage: None,
+            first_byte_ms: None,
+        }
+    }
+
+    fn observe_chunk(&mut self, chunk: &Bytes) {
+        if self.first_byte_ms.is_none() {
+            if let Some(ctx) = self.ctx.as_ref() {
+                self.first_byte_ms = Some(ctx.started_at.elapsed().as_millis() as u64);
+            }
+        }
+
+        self.response_size += chunk.len();
+        self.event_buffer.extend_from_slice(chunk);
+
+        while let Some(pos) = self
+            .event_buffer
+            .windows(2)
+            .position(|window| window == b"\n\n")
+        {
+            let event = self.event_buffer.drain(..pos + 2).collect::<Vec<u8>>();
+            if let Some(usage) =
+                crate::analytics_middleware::extract_streaming_token_usage_from_sse_event(&event)
+            {
+                self.token_usage = Some(usage);
+            }
+        }
+
+        if self.event_buffer.len() > 64 * 1024 {
+            let keep_from = self.event_buffer.len().saturating_sub(16 * 1024);
+            self.event_buffer.drain(..keep_from);
+        }
+    }
+
+    fn finalize(&mut self, error_message: Option<String>) {
+        let Some(ctx) = self.ctx.take() else {
+            return;
+        };
+
+        let response_size = self.response_size;
+        let token_usage = self
+            .token_usage
+            .clone()
+            .or_else(|| estimate_streaming_token_usage(&ctx.request_body, response_size));
+        let ttfb_ms = self.first_byte_ms;
+        let upstream_duration_ms = Some(ctx.started_at.elapsed().as_millis() as u64);
+        let usage_source = if self.token_usage.is_some() {
+            crate::analytics::UsageSource::Measured
+        } else if token_usage.is_some() {
+            crate::analytics::UsageSource::Estimated
+        } else {
+            crate::analytics::UsageSource::Absent
+        };
+
+        actix_web::rt::spawn(async move {
+            record_analytics_event_with_usage_source(
+                ctx.state.get_ref(),
+                &ctx.req,
+                &ctx.request_body,
+                &ctx.requested_model,
+                &ctx.resolution,
+                ctx.started_at,
+                ctx.status_code,
+                response_size,
+                token_usage,
+                usage_source,
+                ttfb_ms,
+                upstream_duration_ms,
+                ctx.authenticated,
+                ctx.api_key_id,
+                ctx.api_key_label,
+                ctx.system_prompt_applied,
+                error_message,
+            )
+            .await;
+        });
+    }
+}
+
+impl futures_util::stream::Stream for MeteredSseStream {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(chunk))) => {
+                this.observe_chunk(&chunk);
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            Poll::Ready(Some(Err(err))) => {
+                let message = err.to_string();
+                this.finalize(Some(message.clone()));
+                Poll::Ready(Some(Err(std::io::Error::new(err.kind(), message))))
+            }
+            Poll::Ready(None) => {
+                this.finalize(None);
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for MeteredSseStream {
+    fn drop(&mut self) {
+        self.finalize(None);
     }
 }
 
@@ -3063,6 +3842,57 @@ async fn responses_passthrough(
     };
     let base = resolution.base_url.trim_end_matches('/');
 
+    let exact_cache_key = maybe_exact_response_cache_key(
+        "responses",
+        &req,
+        &effective_body,
+        &resolution,
+        stream,
+        api_key_id.as_deref(),
+        client_bearer.as_deref(),
+    );
+    if let Some(entry) = exact_cache_key
+        .as_deref()
+        .and_then(exact_response_cache_get)
+    {
+        record_analytics_event(
+            &state,
+            &req,
+            &body,
+            &requested_model,
+            &resolution,
+            started_at,
+            entry.status,
+            entry.bytes.len(),
+            entry.token_usage.clone(),
+            authenticated,
+            api_key_id.clone(),
+            api_key_label.clone(),
+            system_prompt_applied,
+            None,
+        )
+        .await;
+        let mut builder = HttpResponse::build(
+            actix_web::http::StatusCode::from_u16(entry.status)
+                .unwrap_or(actix_web::http::StatusCode::OK),
+        );
+        if let Some(plan) = resolution.plan.as_ref() {
+            insert_route_headers(&mut builder, plan, &resolution.model_id);
+        }
+        builder.insert_header(("content-type", entry.content_type));
+        builder.insert_header(("x-routiium-cache", "hit"));
+        if let Some(route_id) = entry.route_id {
+            builder.insert_header(("x-routiium-cache-route-id", route_id));
+        }
+        if let Some(policy_rev) = entry.policy_rev {
+            builder.insert_header(("x-routiium-cache-policy-rev", policy_rev));
+        }
+        if let Some(ref rl) = rl_result {
+            insert_rate_limit_headers(&mut builder, rl);
+        }
+        return builder.body(entry.bytes);
+    }
+
     if stream {
         use bytes::Bytes;
         use futures_util::TryStreamExt;
@@ -3175,23 +4005,22 @@ async fn responses_passthrough(
                     insert_rate_limit_headers(&mut response, rl);
                 }
 
-                record_analytics_event(
-                    &state,
-                    &req,
-                    &body,
-                    &requested_model,
-                    &resolution,
-                    started_at,
-                    status.as_u16(),
-                    0,
-                    None,
-                    authenticated,
-                    api_key_id.clone(),
-                    api_key_label.clone(),
-                    system_prompt_applied,
-                    None,
-                )
-                .await;
+                let stream = MeteredSseStream::new(
+                    stream,
+                    StreamAnalyticsContext {
+                        state: state.clone(),
+                        req: req.clone(),
+                        request_body: body.clone(),
+                        requested_model: requested_model.clone(),
+                        resolution: resolution.clone(),
+                        started_at,
+                        status_code: status.as_u16(),
+                        authenticated,
+                        api_key_id: api_key_id.clone(),
+                        api_key_label: api_key_label.clone(),
+                        system_prompt_applied,
+                    },
+                );
 
                 response.streaming(stream)
             }
@@ -3222,23 +4051,64 @@ async fn responses_passthrough(
             }
         }
     } else {
-        let mut outbound_body = effective_body.clone();
-        if matches!(resolution.mode, crate::util::UpstreamMode::Chat) {
-            outbound_body = crate::conversion::responses_json_to_chat_value(&outbound_body);
+        let mut attempts = vec![resolution.clone()];
+        attempts.extend(fallback_resolutions(&resolution));
+        let attempt_count = attempts.len();
+        let mut terminal_attempt = None;
+        let mut terminal_error: Option<(UpstreamResolution, String)> = None;
+
+        for (idx, attempt_resolution) in attempts.into_iter().enumerate() {
+            match send_responses_nonstream_attempt(
+                client,
+                &attempt_resolution,
+                &effective_body,
+                upstream_bearer.as_deref(),
+            )
+            .await
+            {
+                Ok((status, _bytes))
+                    if idx + 1 < attempt_count && is_safe_failover_status(status) =>
+                {
+                    tracing::warn!(
+                        route_id = attempt_resolution
+                            .plan
+                            .as_ref()
+                            .map(|plan| plan.route_id.as_str())
+                            .unwrap_or("-"),
+                        model = %attempt_resolution.model_id,
+                        status = status.as_u16(),
+                        "non-streaming responses upstream failed; trying fallback"
+                    );
+                    continue;
+                }
+                Ok((status, bytes)) => {
+                    terminal_attempt = Some((attempt_resolution, status, bytes, idx == 0));
+                    break;
+                }
+                Err(err) if idx + 1 < attempt_count => {
+                    tracing::warn!(
+                        route_id = attempt_resolution
+                            .plan
+                            .as_ref()
+                            .map(|plan| plan.route_id.as_str())
+                            .unwrap_or("-"),
+                        model = %attempt_resolution.model_id,
+                        error = %err,
+                        "non-streaming responses upstream transport failed; trying fallback"
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    terminal_error = Some((attempt_resolution, err.to_string()));
+                    break;
+                }
+            }
         }
 
-        let real_url = format!("{}/{}", base, endpoint);
-        let mut upstream_req = client
-            .post(&real_url)
-            .header("content-type", "application/json");
-        upstream_req = apply_upstream_headers(upstream_req, &resolution.headers);
-        if let Some(b) = eff_bearer {
-            upstream_req = upstream_req.bearer_auth(b);
-        }
-        match upstream_req.json(&outbound_body).send().await {
-            Ok(up) => {
-                let status = up.status();
-                let bytes = up.bytes().await.unwrap_or_default();
+        match terminal_attempt {
+            Some((resolution, status, bytes, terminal_is_primary)) => {
+                let terminal_exact_cache_key =
+                    exact_cache_key.as_ref().filter(|_| terminal_is_primary);
                 let response_json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
                 let token_usage = response_json
                     .as_ref()
@@ -3342,13 +4212,24 @@ async fn responses_passthrough(
                         builder.insert_header(("x-streaming-safety", value));
                     }
                     if status.is_success()
-                        && matches!(plan.upstream.mode, RouterUpstreamMode::Responses)
+                        && matches!(resolution.mode, crate::util::UpstreamMode::Chat)
                     {
-                        if let Ok(resp_obj) =
-                            serde_json::from_slice::<responses::ResponsesResponse>(&bytes)
+                        if let Ok(chat_resp) = serde_json::from_slice::<
+                            crate::models::chat::ChatCompletionResponse,
+                        >(&bytes)
                         {
-                            let chat_resp = responses_to_chat_response(&resp_obj);
-                            if let Ok(body) = serde_json::to_vec(&chat_resp) {
+                            let responses_resp = chat_to_responses_response(&chat_resp);
+                            if let Ok(body) = serde_json::to_vec(&responses_resp) {
+                                let body = Bytes::from(body);
+                                if let Some(key) = terminal_exact_cache_key {
+                                    exact_response_cache_insert(
+                                        key.clone(),
+                                        status.as_u16(),
+                                        body.clone(),
+                                        "application/json",
+                                        &resolution,
+                                    );
+                                }
                                 builder.insert_header(("content-type", "application/json"));
                                 if let Some(ref rl) = rl_result {
                                     insert_rate_limit_headers(&mut builder, rl);
@@ -3369,9 +4250,20 @@ async fn responses_passthrough(
                 if let Some(ref rl) = rl_result {
                     insert_rate_limit_headers(&mut builder, rl);
                 }
+                if let Some(key) = terminal_exact_cache_key {
+                    exact_response_cache_insert(
+                        key.clone(),
+                        status.as_u16(),
+                        bytes.clone(),
+                        "application/json",
+                        &resolution,
+                    );
+                }
                 builder.body(bytes)
             }
-            Err(e) => {
+            None => {
+                let (resolution, error_message) = terminal_error
+                    .unwrap_or_else(|| (resolution.clone(), "upstream failed".to_string()));
                 record_analytics_event(
                     &state,
                     &req,
@@ -3386,12 +4278,12 @@ async fn responses_passthrough(
                     api_key_id,
                     api_key_label,
                     system_prompt_applied,
-                    Some(e.to_string()),
+                    Some(error_message.clone()),
                 )
                 .await;
                 router_error_response(
                     http::StatusCode::BAD_GATEWAY,
-                    &e.to_string(),
+                    &error_message,
                     resolution.plan.as_ref(),
                     &resolution.model_id,
                 )
@@ -3795,6 +4687,13 @@ async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl
                 "admin_token_configured": non_empty_env("ROUTIIUM_ADMIN_TOKEN").is_some(),
                 "key_store_available": state.api_keys.is_some()
             },
+            "subscriptions": {
+                "enabled": non_empty_env("ROUTIIUM_CLAUDE_SUBSCRIPTION_BASE_URL").is_some() || non_empty_env("ROUTIIUM_CODEX_SUBSCRIPTION_BASE_URL").is_some(),
+                "claude_configured": non_empty_env("ROUTIIUM_CLAUDE_SUBSCRIPTION_BASE_URL").is_some(),
+                "codex_configured": non_empty_env("ROUTIIUM_CODEX_SUBSCRIPTION_BASE_URL").is_some(),
+                "log_path_configured": non_empty_env("ROUTIIUM_SUBSCRIPTION_LOG_PATH").is_some(),
+                "log_capture_limit": non_empty_env("ROUTIIUM_SUBSCRIPTION_LOG_MAX_BODY_BYTES")
+            },
             "server": {
                 "bind_addr": env_bind_addr(),
                 "upstream_mode": upstream_mode,
@@ -4030,6 +4929,8 @@ pub fn config_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("")
             .route("/health", web::get().to(health))
+            .route("/ready", web::get().to(ready))
+            .route("/metrics", web::get().to(metrics))
             .route("/status", web::get().to(status))
             .route("/convert", web::post().to(convert))
             .route(
@@ -4039,6 +4940,14 @@ pub fn config_routes(cfg: &mut web::ServiceConfig) {
             .route("/models", web::get().to(list_models))
             .route("/v1/models", web::get().to(list_models))
             .route("/v1/responses", web::post().to(responses_passthrough))
+            .route(
+                "/subscriptions/claude/v1/messages",
+                web::post().to(crate::subscription_proxy::claude_messages),
+            )
+            .route(
+                "/subscriptions/codex/responses",
+                web::post().to(crate::subscription_proxy::codex_responses),
+            )
             .route("/keys", web::get().to(list_keys))
             .route("/keys/generate", web::post().to(generate_key))
             .route("/keys/generate_batch", web::post().to(generate_key_batch))
@@ -4058,9 +4967,14 @@ pub fn config_routes(cfg: &mut web::ServiceConfig) {
             .route("/analytics/stats", web::get().to(analytics_stats))
             .route("/analytics/events", web::get().to(analytics_events))
             .route("/analytics/aggregate", web::get().to(analytics_aggregate))
+            .route("/analytics/governance", web::get().to(analytics_governance))
             .route("/analytics/export", web::get().to(analytics_export))
             .route("/analytics/clear", web::post().to(analytics_clear))
             .route("/admin/safety/events", web::get().to(admin_safety_events))
+            .route(
+                "/admin/cache/exact/clear",
+                web::post().to(admin_exact_response_cache_clear),
+            )
             .route("/chat_history/stats", web::get().to(chat_history_stats))
             .route(
                 "/chat_history/conversations",
@@ -4161,17 +5075,89 @@ async fn health() -> impl Responder {
     }))
 }
 
+/// Readiness endpoint for load balancer traffic gating.
+async fn ready(state: web::Data<AppState>) -> impl Responder {
+    let analytics_ready = state.analytics.is_some();
+    let subscription_upstream_ready = [
+        "ROUTIIUM_CLAUDE_SUBSCRIPTION_BASE_URL",
+        "ROUTIIUM_CODEX_SUBSCRIPTION_BASE_URL",
+    ]
+    .into_iter()
+    .any(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    });
+    let upstream_ready = state.router_client.is_some()
+        || state.runtime_config.is_some()
+        || state.router_config_path.is_some()
+        || state.router_url.is_some()
+        || std::env::var("OPENAI_API_KEY")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        || std::env::var("OPENAI_BASE_URL")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        || std::env::var("AWS_REGION")
+            .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        || subscription_upstream_ready;
+
+    let (governance_ready, governance) = governance_readiness(&state);
+    let ready = analytics_ready && upstream_ready && governance_ready;
+    let body = serde_json::json!({
+        "status": if ready { "ready" } else { "not_ready" },
+        "checks": {
+            "analytics_store": analytics_ready,
+            "upstream_or_router": upstream_ready,
+            "subscription_upstream": subscription_upstream_ready,
+            "governance": governance_ready
+        },
+        "governance": governance
+    });
+
+    if ready {
+        HttpResponse::Ok().json(body)
+    } else {
+        HttpResponse::ServiceUnavailable().json(body)
+    }
+}
+
+/// Prometheus-compatible early gateway RED metrics.
+async fn metrics() -> impl Responder {
+    HttpResponse::Ok()
+        .insert_header(("content-type", "text/plain; version=0.0.4"))
+        .body(GATEWAY_METRICS.render_prometheus())
+}
+
+async fn admin_exact_response_cache_clear(req: HttpRequest) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
+    let cleared = exact_response_cache_clear();
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "cleared": cleared
+    }))
+}
+
 /// Service status endpoint to expose feature flags and available routes.
 async fn status(state: web::Data<AppState>) -> impl Responder {
     let proxy_enabled: bool = true;
     let routes = vec![
         "/health",
+        "/ready",
+        "/metrics",
         "/status",
         "/convert",
         "/v1/chat/completions",
         "/models",
         "/v1/models",
         "/v1/responses",
+        "/subscriptions/claude/v1/messages",
+        "/subscriptions/codex/responses",
         "/keys",
         "/keys/generate",
         "/keys/generate_batch",
@@ -4185,9 +5171,11 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
         "/analytics/stats",
         "/analytics/events",
         "/analytics/aggregate",
+        "/analytics/governance",
         "/analytics/export",
         "/analytics/clear",
         "/admin/safety/events",
+        "/admin/cache/exact/clear",
         "/chat_history/stats",
         "/chat_history/conversations",
         "/chat_history/conversations/{id}",
@@ -4238,6 +5226,7 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
         .ok()
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
+    let (_, governance) = governance_readiness(&state);
 
     // Get analytics status
     let analytics_enabled = state.analytics.is_some();
@@ -4260,6 +5249,10 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
     } else {
         "passthrough"
     };
+    let claude_subscription_configured =
+        non_empty_env("ROUTIIUM_CLAUDE_SUBSCRIPTION_BASE_URL").is_some();
+    let codex_subscription_configured =
+        non_empty_env("ROUTIIUM_CODEX_SUBSCRIPTION_BASE_URL").is_some();
 
     web::Json(serde_json::json!({
         "name": "routiium",
@@ -4275,6 +5268,7 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
             "cache_ttl_ms": state.router_cache_ttl_ms,
             "privacy_mode": state.router_privacy_mode
         },
+        "governance": governance,
         "runtime_config": runtime_config_summary(&state),
         "judge": {
             "enabled": safety_config.mode != crate::safety_judge::SafetyMode::Off,
@@ -4303,6 +5297,12 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
                 "managed_override": managed_override,
                 "openai_key_present": openai_key_present,
                 "key_store_available": state.api_keys.is_some()
+            },
+            "subscriptions": {
+                "enabled": claude_subscription_configured || codex_subscription_configured,
+                "claude_configured": claude_subscription_configured,
+                "codex_configured": codex_subscription_configured,
+                "logging": "jsonl"
             },
             "mcp": {
                 "enabled": mcp_enabled,
@@ -4894,23 +5894,22 @@ async fn chat_completions_passthrough(
                         response.insert_header(("x-streaming-safety", value));
                     }
 
-                    record_analytics_event(
-                        &state,
-                        &req,
-                        &body,
-                        &requested_model,
-                        &resolution,
-                        started_at,
-                        200,
-                        0,
-                        None,
-                        authenticated,
-                        api_key_id.clone(),
-                        api_key_label.clone(),
-                        system_prompt_applied,
-                        None,
-                    )
-                    .await;
+                    let mapped = MeteredSseStream::new(
+                        mapped,
+                        StreamAnalyticsContext {
+                            state: state.clone(),
+                            req: req.clone(),
+                            request_body: body.clone(),
+                            requested_model: requested_model.clone(),
+                            resolution: resolution.clone(),
+                            started_at,
+                            status_code: 200,
+                            authenticated,
+                            api_key_id: api_key_id.clone(),
+                            api_key_label: api_key_label.clone(),
+                            system_prompt_applied,
+                        },
+                    );
 
                     return response
                         .insert_header(("content-type", "text/event-stream"))
@@ -5193,23 +6192,22 @@ async fn chat_completions_passthrough(
                     insert_rate_limit_headers(&mut response, rl);
                 }
 
-                record_analytics_event(
-                    &state,
-                    &req,
-                    &body,
-                    &requested_model,
-                    &resolution,
-                    started_at,
-                    status.as_u16(),
-                    0,
-                    None,
-                    authenticated,
-                    api_key_id.clone(),
-                    api_key_label.clone(),
-                    system_prompt_applied,
-                    None,
-                )
-                .await;
+                let stream = MeteredSseStream::new(
+                    stream,
+                    StreamAnalyticsContext {
+                        state: state.clone(),
+                        req: req.clone(),
+                        request_body: body.clone(),
+                        requested_model: requested_model.clone(),
+                        resolution: resolution.clone(),
+                        started_at,
+                        status_code: status.as_u16(),
+                        authenticated,
+                        api_key_id: api_key_id.clone(),
+                        api_key_label: api_key_label.clone(),
+                        system_prompt_applied,
+                    },
+                );
 
                 response.streaming(stream)
             }
@@ -5255,18 +6253,117 @@ async fn chat_completions_passthrough(
             strip_responses_only_fields(&mut outbound_body);
         }
 
-        let real_url = format!("{}/{}", base, endpoint);
-        let mut upstream_req = client
-            .post(&real_url)
-            .header("content-type", "application/json");
-        upstream_req = apply_upstream_headers(upstream_req, &resolution.headers);
-        if let Some(b) = eff_bearer {
-            upstream_req = upstream_req.bearer_auth(b);
+        let exact_cache_key = maybe_exact_response_cache_key(
+            "chat",
+            &req,
+            &outbound_body,
+            &resolution,
+            false,
+            api_key_id.as_deref(),
+            client_bearer.as_deref(),
+        );
+        if let Some(entry) = exact_cache_key
+            .as_deref()
+            .and_then(exact_response_cache_get)
+        {
+            record_analytics_event(
+                &state,
+                &req,
+                &body,
+                &requested_model,
+                &resolution,
+                started_at,
+                entry.status,
+                entry.bytes.len(),
+                entry.token_usage.clone(),
+                authenticated,
+                api_key_id.clone(),
+                api_key_label.clone(),
+                system_prompt_applied,
+                None,
+            )
+            .await;
+            let mut builder = HttpResponse::build(
+                actix_web::http::StatusCode::from_u16(entry.status)
+                    .unwrap_or(actix_web::http::StatusCode::OK),
+            );
+            if let Some(plan) = resolution.plan.as_ref() {
+                insert_route_headers(&mut builder, plan, &resolution.model_id);
+            }
+            builder.insert_header(("content-type", entry.content_type));
+            builder.insert_header(("x-routiium-cache", "hit"));
+            if let Some(route_id) = entry.route_id {
+                builder.insert_header(("x-routiium-cache-route-id", route_id));
+            }
+            if let Some(policy_rev) = entry.policy_rev {
+                builder.insert_header(("x-routiium-cache-policy-rev", policy_rev));
+            }
+            if let Some(ref rl) = rl_result {
+                insert_rate_limit_headers(&mut builder, rl);
+            }
+            return builder.body(entry.bytes);
         }
-        match upstream_req.json(&outbound_body).send().await {
-            Ok(up) => {
-                let status = up.status();
-                let bytes = up.bytes().await.unwrap_or_default();
+
+        let mut attempts = vec![resolution.clone()];
+        attempts.extend(fallback_resolutions(&resolution));
+        let attempt_count = attempts.len();
+        let mut terminal_attempt = None;
+        let mut terminal_error: Option<(UpstreamResolution, String)> = None;
+
+        for (idx, attempt_resolution) in attempts.into_iter().enumerate() {
+            match send_chat_nonstream_attempt(
+                client,
+                &attempt_resolution,
+                &body,
+                conversation_hint.clone(),
+                previous_response_hint.clone(),
+                upstream_bearer.as_deref(),
+            )
+            .await
+            {
+                Ok((status, _bytes))
+                    if idx + 1 < attempt_count && is_safe_failover_status(status) =>
+                {
+                    tracing::warn!(
+                        route_id = attempt_resolution
+                            .plan
+                            .as_ref()
+                            .map(|plan| plan.route_id.as_str())
+                            .unwrap_or("-"),
+                        model = %attempt_resolution.model_id,
+                        status = status.as_u16(),
+                        "non-streaming chat upstream failed; trying fallback"
+                    );
+                    continue;
+                }
+                Ok((status, bytes)) => {
+                    terminal_attempt = Some((attempt_resolution, status, bytes, idx == 0));
+                    break;
+                }
+                Err(err) if idx + 1 < attempt_count => {
+                    tracing::warn!(
+                        route_id = attempt_resolution
+                            .plan
+                            .as_ref()
+                            .map(|plan| plan.route_id.as_str())
+                            .unwrap_or("-"),
+                        model = %attempt_resolution.model_id,
+                        error = %err,
+                        "non-streaming chat upstream transport failed; trying fallback"
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    terminal_error = Some((attempt_resolution, err.to_string()));
+                    break;
+                }
+            }
+        }
+
+        match terminal_attempt {
+            Some((resolution, status, bytes, terminal_is_primary)) => {
+                let terminal_exact_cache_key =
+                    exact_cache_key.as_ref().filter(|_| terminal_is_primary);
                 let response_json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
                 let token_usage = response_json
                     .as_ref()
@@ -5372,12 +6469,24 @@ async fn chat_completions_passthrough(
                 if let Some(value) = streaming_safety {
                     builder.insert_header(("x-streaming-safety", value));
                 }
-                if status.is_success() && expects_responses {
+                if status.is_success()
+                    && matches!(resolution.mode, crate::util::UpstreamMode::Responses)
+                {
                     match serde_json::from_slice::<responses::ResponsesResponse>(&bytes) {
                         Ok(resp_obj) => {
                             let chat_resp = responses_to_chat_response(&resp_obj);
                             match serde_json::to_vec(&chat_resp) {
                                 Ok(body) => {
+                                    let body = Bytes::from(body);
+                                    if let Some(key) = terminal_exact_cache_key {
+                                        exact_response_cache_insert(
+                                            key.clone(),
+                                            status.as_u16(),
+                                            body.clone(),
+                                            "application/json",
+                                            &resolution,
+                                        );
+                                    }
                                     builder.insert_header(("content-type", "application/json"));
                                     return builder.body(body);
                                 }
@@ -5396,7 +6505,7 @@ async fn chat_completions_passthrough(
 
                 // For Gemini models, parse thought tags from the response
                 if status.is_success()
-                    && !expects_responses
+                    && matches!(resolution.mode, crate::util::UpstreamMode::Chat)
                     && resolution.model_id.starts_with("gemini-")
                 {
                     if let Ok(mut chat_resp) = serde_json::from_slice::<
@@ -5429,6 +6538,16 @@ async fn chat_completions_passthrough(
 
                         match serde_json::to_vec(&chat_resp) {
                             Ok(body) => {
+                                let body = Bytes::from(body);
+                                if let Some(key) = terminal_exact_cache_key {
+                                    exact_response_cache_insert(
+                                        key.clone(),
+                                        status.as_u16(),
+                                        body.clone(),
+                                        "application/json",
+                                        &resolution,
+                                    );
+                                }
                                 builder.insert_header(("content-type", "application/json"));
                                 if let Some(ref rl) = rl_result {
                                     insert_rate_limit_headers(&mut builder, rl);
@@ -5446,9 +6565,20 @@ async fn chat_completions_passthrough(
                 if let Some(ref rl) = rl_result {
                     insert_rate_limit_headers(&mut builder, rl);
                 }
+                if let Some(key) = terminal_exact_cache_key {
+                    exact_response_cache_insert(
+                        key.clone(),
+                        status.as_u16(),
+                        bytes.clone(),
+                        "application/json",
+                        &resolution,
+                    );
+                }
                 builder.body(bytes)
             }
-            Err(e) => {
+            None => {
+                let (resolution, error_message) = terminal_error
+                    .unwrap_or_else(|| (resolution.clone(), "upstream failed".to_string()));
                 record_analytics_event(
                     &state,
                     &req,
@@ -5463,12 +6593,12 @@ async fn chat_completions_passthrough(
                     api_key_id,
                     api_key_label,
                     system_prompt_applied,
-                    Some(e.to_string()),
+                    Some(error_message.clone()),
                 )
                 .await;
                 router_error_response(
                     http::StatusCode::BAD_GATEWAY,
-                    &e.to_string(),
+                    &error_message,
                     resolution.plan.as_ref(),
                     &resolution.model_id,
                 )
@@ -6401,6 +7531,114 @@ async fn analytics_aggregate(
         None => error_response(
             http::StatusCode::SERVICE_UNAVAILABLE,
             "Analytics not enabled",
+        ),
+    }
+}
+
+/// Governance report for measured usage/cost decisions.
+async fn analytics_governance(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    query: web::Query<AnalyticsAggregateQuery>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&req) {
+        return resp;
+    }
+
+    let Some(mgr) = state.analytics.as_ref() else {
+        return error_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "Analytics not enabled",
+        );
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let start = query.start.unwrap_or(now.saturating_sub(3600));
+    let end = query.end.unwrap_or(now);
+
+    match mgr.query_range(start, end, None).await {
+        Ok(events) => {
+            let mut measured_events = 0u64;
+            let mut estimated_events = 0u64;
+            let mut absent_events = 0u64;
+            let mut measured_input_tokens = 0u64;
+            let mut measured_output_tokens = 0u64;
+            let mut measured_cached_tokens = 0u64;
+            let mut measured_reasoning_tokens = 0u64;
+            let mut measured_cost = 0.0f64;
+            let mut unpriced_measured_events = 0u64;
+            let mut models = std::collections::BTreeMap::<String, u64>::new();
+
+            for event in &events {
+                let usage_source = event
+                    .response
+                    .as_ref()
+                    .map(|response| response.usage_source)
+                    .unwrap_or_default();
+
+                match usage_source {
+                    crate::analytics::UsageSource::Measured => {
+                        measured_events += 1;
+                        if let Some(usage) = event.token_usage.as_ref() {
+                            measured_input_tokens += usage.prompt_tokens;
+                            measured_output_tokens += usage.completion_tokens;
+                            measured_cached_tokens += usage.cached_tokens.unwrap_or(0);
+                            measured_reasoning_tokens += usage.reasoning_tokens.unwrap_or(0);
+                        }
+                        if let Some(cost) = event.cost.as_ref() {
+                            measured_cost += cost.total_cost;
+                        } else {
+                            unpriced_measured_events += 1;
+                        }
+                        if let Some(model) = event.request.model.as_ref() {
+                            *models.entry(model.clone()).or_insert(0) += 1;
+                        }
+                    }
+                    crate::analytics::UsageSource::Estimated => {
+                        estimated_events += 1;
+                    }
+                    crate::analytics::UsageSource::Absent => {
+                        absent_events += 1;
+                    }
+                }
+            }
+
+            HttpResponse::Ok().json(serde_json::json!({
+                "start": start,
+                "end": end,
+                "total_events": events.len(),
+                "usage_source": {
+                    "measured": measured_events,
+                    "estimated": estimated_events,
+                    "absent": absent_events
+                },
+                "measured_usage": {
+                    "input_tokens": measured_input_tokens,
+                    "output_tokens": measured_output_tokens,
+                    "cached_tokens": measured_cached_tokens,
+                    "reasoning_tokens": measured_reasoning_tokens,
+                    "total_tokens": measured_input_tokens + measured_output_tokens,
+                    "total_cost": measured_cost,
+                    "unpriced_events": unpriced_measured_events,
+                    "models": models
+                },
+                "governance_ready": {
+                    "budget_reporting": measured_events > 0 && absent_events == 0 && estimated_events == 0 && unpriced_measured_events == 0,
+                    "token_limit_reporting": measured_events > 0 && absent_events == 0 && estimated_events == 0
+                },
+                "notes": [
+                    "Budget and token-limit decisions should use measured_usage only.",
+                    "Estimated or absent usage means enforcement would be advisory, not authoritative.",
+                    "Fleet-wide enforcement still requires a shared atomic store such as Redis."
+                ]
+            }))
+        }
+        Err(e) => error_response(
+            http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to build governance report: {}", e),
         ),
     }
 }

@@ -15,6 +15,7 @@ The analytics system provides comprehensive tracking and analysis capabilities f
 
 2. **Analytics Extraction Helpers** (`src/analytics_middleware.rs`)
    - Token usage extraction for both Chat and Responses usage schemas
+   - Streaming SSE usage extraction for Chat Completions, Responses `response.completed`, and Bedrock metadata events
    - Shared context/outcome structures used by handlers
    - Common analytics helper functions reused across endpoints
 
@@ -22,6 +23,9 @@ The analytics system provides comprehensive tracking and analysis capabilities f
    - REST API for querying and exporting analytics
    - JSON and CSV export formats
    - Real-time statistics
+   - `/metrics` Prometheus-compatible RED counters and usage-source counters
+   - `/ready` load-balancer readiness checks for analytics storage, upstream/router availability, and production governance gates
+   - `/analytics/governance` measured-usage report for budget and token-limit decisions
 
 ### Storage Backends
 
@@ -81,6 +85,10 @@ export ROUTIIUM_ANALYTICS_FORCE_MEMORY=true
 export ROUTIIUM_ANALYTICS_MAX_EVENTS=10000
 ```
 
+#### Turso/libsql Chat History
+
+The `turso`/`libsql` chat-history backend is intentionally disabled in the production build. Its current dependency graph pulls Rustls/webpki versions with active RustSec advisories, so selecting `ROUTIIUM_CHAT_HISTORY_PRIMARY=turso` or `libsql` returns a configuration error. Use `jsonl`, `sqlite`, `postgres`, or `memory` until libsql ships a clean TLS dependency graph.
+
 ## Data Model
 
 ### AnalyticsEvent
@@ -116,12 +124,58 @@ pub struct AnalyticsEvent {
 - `output_tokens`: Total output tokens (if available)
 - `success`: Boolean success flag
 - `error_message`: Error description if failed
+- `usage_source`: `measured`, `estimated`, or `absent`
 
 ### PerformanceMetrics
-- `duration_ms`: Total request duration in milliseconds
-- `ttfb_ms`: Time to first byte (for streaming)
-- `upstream_duration_ms`: Upstream request time
-- `tokens_per_second`: Output tokens divided by duration (for performance analysis)
+- `duration_ms`: Total request duration
+- `ttfb_ms`: Time to first byte for streaming responses when available
+- `upstream_duration_ms`: Upstream/stream duration when available
+- `tokens_per_second`: Output token throughput when usage is known
+
+## Gateway Metrics
+
+`GET /metrics` returns Prometheus text format without requiring an optional exporter dependency. The early metric set intentionally uses low-cardinality counters:
+
+- `routiium_requests_total`
+- `routiium_errors_total`
+- `routiium_request_duration_ms_sum`
+- `routiium_usage_source_total{source="measured|estimated|absent"}`
+
+Per-model, per-key, and per-route labels are intentionally excluded from this early endpoint to avoid cardinality explosions. Use analytics exports for high-cardinality investigations.
+
+## Governance Reporting
+
+`GET /analytics/governance` is an admin endpoint that separates authoritative measured usage from estimated or absent usage:
+
+```bash
+curl -H "Authorization: Bearer $ROUTIIUM_ADMIN_TOKEN" \
+  "http://127.0.0.1:8088/analytics/governance?start=1719999999&end=1720001000"
+```
+
+The response includes:
+
+- `usage_source.measured|estimated|absent`
+- `measured_usage.input_tokens`, `output_tokens`, `cached_tokens`, `reasoning_tokens`, and `total_cost`
+- `measured_usage.unpriced_events`
+- `governance_ready.budget_reporting`
+- `governance_ready.token_limit_reporting`
+
+Budget and token-limit decisions should use `measured_usage` only. If any event in the window has estimated or absent usage, the report marks governance readiness false. Fleet-wide enforcement still requires a shared atomic store such as Redis; memory, local Sled, and JSONL analytics are reporting stores, not distributed enforcement state.
+
+For deployments that delegate enforcement to Router instead of a local atomic budget store, set `ROUTIIUM_GOVERNANCE_MODE=router`. In that mode `/ready` fails closed unless Router is configured, strict router failures are enabled, and router plan caching is disabled with `ROUTIIUM_CACHE_TTL_MS=0`.
+
+`ROUTIIUM_EXACT_RESPONSE_CACHE=1` enables opt-in non-streaming exact response caching only for route plans with explicit safe cache metadata: `content_used: "none"` and judge metadata with `cacheable: true`. The gateway bypasses the cache for streaming calls, client no-store/no-cache requests, zero-TTL route plans, content-sensitive route plans, missing cache metadata, and `ROUTIIUM_GOVERNANCE_MODE=router`. `POST /admin/cache/exact/clear` invalidates the in-memory cache.
+
+## Load Harness
+
+Use the standard-library load harness to measure gateway overhead against a running Routiium instance:
+
+```bash
+python3 scripts/load/gateway_load.py --base-url http://127.0.0.1:8088 --requests 100 --concurrency 8
+python3 scripts/load/gateway_load.py --base-url http://127.0.0.1:8088 --stream --max-p99-ms 250 --max-ttfb-p99-ms 100
+```
+
+The harness prints JSON with p50, p95, p99, average latency, TTFB, bytes read, and failure examples. Non-zero exit means a request failed or a configured threshold was exceeded.
 
 ### TokenUsage (Optional, when available)
 Detailed token breakdown from the provider response:

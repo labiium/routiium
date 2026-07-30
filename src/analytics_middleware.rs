@@ -1,6 +1,6 @@
 use crate::analytics::{
     current_timestamp, generate_event_id, AnalyticsEvent, AnalyticsManager, AuthMetadata,
-    PerformanceMetrics, RequestMetadata, ResponseMetadata, RoutingMetadata,
+    PerformanceMetrics, RequestMetadata, ResponseMetadata, RoutingMetadata, UsageSource,
 };
 use actix_web::{
     body::MessageBody,
@@ -29,6 +29,7 @@ pub struct AnalyticsOutcome {
     pub error_message: Option<String>,
     pub output_tokens: Option<u64>,
     pub token_usage: Option<crate::analytics::TokenUsage>,
+    pub usage_source: UsageSource,
 }
 
 impl AnalyticsContext {
@@ -162,6 +163,7 @@ impl AnalyticsContext {
             output_tokens: outcome.output_tokens,
             success: outcome.success,
             error_message: outcome.error_message,
+            usage_source: outcome.usage_source,
         };
 
         // Calculate tokens per second if we have output tokens
@@ -283,12 +285,24 @@ pub fn extract_token_usage(
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|v| v.as_u64())
+        .or_else(|| {
+            usage
+                .get("input_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(|v| v.as_u64())
+        })
         .or_else(|| usage.get("cached_tokens").and_then(|v| v.as_u64()));
 
     let reasoning_tokens = usage
         .get("completion_tokens_details")
         .and_then(|d| d.get("reasoning_tokens"))
         .and_then(|v| v.as_u64())
+        .or_else(|| {
+            usage
+                .get("output_tokens_details")
+                .and_then(|d| d.get("reasoning_tokens"))
+                .and_then(|v| v.as_u64())
+        })
         .or_else(|| usage.get("reasoning_tokens").and_then(|v| v.as_u64()));
 
     Some(crate::analytics::TokenUsage {
@@ -298,6 +312,85 @@ pub fn extract_token_usage(
         cached_tokens,
         reasoning_tokens,
     })
+}
+
+/// Extract token usage from one complete SSE event.
+///
+/// Supports Chat Completions chunks, Responses `response.completed` events, and
+/// Bedrock metadata events. The caller is responsible for feeding complete SSE
+/// events and keeping only a small rolling event buffer while streaming.
+pub fn extract_streaming_token_usage_from_sse_event(
+    event: &[u8],
+) -> Option<crate::analytics::TokenUsage> {
+    let mut data_segments = Vec::new();
+    for line in event.split(|&b| b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if let Some(data) = line.strip_prefix(b"data:") {
+            let data = trim_ascii(data);
+            if !data.is_empty() && data != b"[DONE]" {
+                data_segments.push(data.to_vec());
+            }
+        }
+    }
+
+    if data_segments.is_empty() {
+        return None;
+    }
+
+    let data_payload = data_segments.join(&b'\n');
+    let payload = serde_json::from_slice::<serde_json::Value>(&data_payload).ok()?;
+
+    if let Some(usage) = extract_token_usage(&payload) {
+        return Some(usage);
+    }
+
+    if let Some(response) = payload.get("response") {
+        if let Some(usage) = extract_token_usage(response) {
+            return Some(usage);
+        }
+    }
+
+    extract_bedrock_metadata_usage(&payload)
+}
+
+fn extract_bedrock_metadata_usage(
+    payload: &serde_json::Value,
+) -> Option<crate::analytics::TokenUsage> {
+    let usage = payload.get("usage")?;
+    let prompt_tokens = usage
+        .get("inputTokens")
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(|v| v.as_u64())?;
+    let completion_tokens = usage
+        .get("outputTokens")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(|v| v.as_u64())?;
+    let total_tokens = usage
+        .get("totalTokens")
+        .or_else(|| usage.get("total_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(prompt_tokens + completion_tokens);
+
+    Some(crate::analytics::TokenUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        cached_tokens: None,
+        reasoning_tokens: None,
+    })
+}
+
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map(|idx| idx + 1)
+        .unwrap_or(start);
+    &bytes[start..end]
 }
 
 #[cfg(test)]

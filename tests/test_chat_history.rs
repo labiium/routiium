@@ -621,6 +621,33 @@ async fn test_manager_integration() {
 }
 
 #[tokio::test]
+async fn test_turso_backend_is_disabled_until_dependency_audit_is_clean() {
+    let config = ChatHistoryConfig {
+        enabled: true,
+        primary_backend: "turso".to_string(),
+        sink_backends: Vec::new(),
+        privacy_level: PrivacyLevel::Full,
+        ttl_seconds: 2592000,
+        strict: false,
+        jsonl_path: None,
+        memory_max_messages: Some(1000),
+        sqlite_url: None,
+        postgres_url: None,
+        turso_url: Some("libsql://example.turso.io".to_string()),
+        turso_auth_token: Some("token".to_string()),
+    };
+
+    let err = match ChatHistoryManager::new(config).await {
+        Ok(_) => panic!("turso backend unexpectedly initialized"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("RustSec TLS advisories"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
 async fn test_conversation_list_with_filters() {
     let store = MemoryChatHistoryStore::new();
     store.init().await.unwrap();

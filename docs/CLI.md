@@ -147,6 +147,32 @@ Doctor checks include env file presence, referenced config files, provider key/b
 
 `--production` adds stricter checks for an internet-facing deployment: high-entropy admin token, explicit CORS origins, managed auth, persistent key store, enabled router/judge, enabled response guard, and streaming safety.
 
+## `routiium subscription setup`
+
+Creates the lowest-friction local setup for first-party coding-client
+subscription proxying:
+
+```bash
+routiium subscription setup --client claude
+routiium subscription setup --client codex --codex-upstream https://your-authorized-codex-upstream.example
+routiium subscription setup --client both --codex-upstream https://your-authorized-codex-upstream.example
+```
+
+It updates the per-user Routiium env file, chooses a durable user data path for
+`subscription_usage.jsonl`, and writes an isolated
+`routiium_subscription.config.toml` profile under `CODEX_HOME` (or `~/.codex`)
+when Codex is selected. It refuses to replace an existing generated profile
+unless `--force` is supplied.
+
+If `BIND_ADDR` already exists, setup derives the printed client URL from its
+port; otherwise it creates a loopback bind. Use `--proxy-url` when a reverse
+proxy or another externally reachable URL fronts Routiium.
+
+The command does not authenticate either client or read their credentials. Run
+`claude login` or `codex login` normally, then use the launch commands printed
+by setup. Use `--config-path`, `--log-path`, and `--codex-home` for explicit
+deployment paths.
+
 ## `routiium status`
 
 Fetches `/status` from a running Routiium server.

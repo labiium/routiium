@@ -15,9 +15,6 @@ use crate::chat_history_sqlite::SqliteChatHistoryStore;
 #[cfg(feature = "postgres")]
 use crate::chat_history_postgres::PostgresChatHistoryStore;
 
-#[cfg(feature = "turso")]
-use crate::chat_history_turso::TursoChatHistoryStore;
-
 use std::sync::Arc;
 
 /// Configuration for chat history
@@ -209,14 +206,10 @@ impl ChatHistoryManager {
                 let store = PostgresChatHistoryStore::new(url).await?;
                 Ok(Box::new(store))
             }
-            #[cfg(feature = "turso")]
             "turso" | "libsql" => {
-                let url = config.turso_url.as_ref().ok_or_else(|| {
-                    ChatHistoryError::InvalidInput("Turso URL not configured".to_string())
-                })?;
-                let store =
-                    TursoChatHistoryStore::new(url, config.turso_auth_token.clone()).await?;
-                Ok(Box::new(store))
+                Err(ChatHistoryError::InvalidInput(
+                    "Turso/libsql chat history backend is disabled in this production build because its current dependency graph has unresolved RustSec TLS advisories; use sqlite, postgres, jsonl, or memory until libsql is updated".to_string(),
+                ))
             }
             _ => Err(ChatHistoryError::InvalidInput(format!(
                 "Unknown backend: {}",

@@ -2,20 +2,22 @@
 #![doc = r#"
 Routiium
 
-Translate OpenAI Chat Completions requests into Responses API payloads and proxy them to OpenAI's Responses endpoint.
+Run an OpenAI-compatible LLM gateway for routing, safety policy, analytics, and provider proxying.
 
 Crate highlights
-- Library: pure conversion via `to_responses_request(&ChatCompletionRequest, Option<String>)`.
-- HTTP server (in `server`): `/convert` and `/proxy` (always available; proxy forwards to `OPENAI_BASE_URL`).
-- Models: minimal but robust request models for Chat Completions and Responses APIs.
+- Gateway: OpenAI-compatible `/v1` proxying with auth, rate limits, routing, judging, analytics, and MCP tools.
+- Providers: OpenAI/Responses, OpenAI-compatible endpoints, AWS Bedrock, and router-selected upstreams.
+- Library: request/response conversion helpers remain available for compatibility and tests.
 
 Modules
 - `models`: Data structures for Chat and Responses.
-- `conversion`: Mapping logic from Chat → Responses.
-- `server`: Axum router/handlers (optional binary uses this).
-- `util`: Shared helpers (tracing, env, SSE utilities).
+- `conversion`: Mapping logic between Chat Completions and Responses shapes.
+- `server`: Actix Web gateway handlers and administrative endpoints.
+- `router_client`: Local and remote routing policy clients.
+- `analytics`: Request, usage, cost, and routing event storage.
+- `util`: Shared helpers for tracing, environment parsing, and SSE utilities.
 
-Note: Keep the mapping rules aligned with OpenAI docs; the Responses API evolves over time.
+Note: Keep gateway contracts and provider mappings aligned with upstream API changes.
 "#]
 
 pub mod analytics;
@@ -35,9 +37,6 @@ pub mod chat_history_sqlite;
 #[cfg(feature = "postgres")]
 pub mod chat_history_postgres;
 
-#[cfg(feature = "turso")]
-pub mod chat_history_turso;
-
 pub mod conversion;
 pub mod judge_selector;
 pub mod mcp_client;
@@ -49,6 +48,7 @@ pub mod routing_config;
 pub mod safety_audit;
 pub mod safety_judge;
 pub mod server;
+pub mod subscription_proxy;
 pub mod system_prompt_config;
 pub mod util;
 
@@ -70,8 +70,6 @@ pub use crate::chat_history_sqlite::SqliteChatHistoryStore;
 #[cfg(feature = "postgres")]
 pub use crate::chat_history_postgres::PostgresChatHistoryStore;
 
-#[cfg(feature = "turso")]
-pub use crate::chat_history_turso::TursoChatHistoryStore;
 pub use crate::pricing::{ModelPricing, PricingConfig};
 pub use crate::router_client::{
     CachedRouterClient, EmbeddedDefaultRouter, FallbackConfig, HttpRouterClient, HttpRouterConfig,

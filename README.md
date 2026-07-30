@@ -71,6 +71,21 @@ Default `protect` mode enforces high-confidence deterministic blocks, downgrades
 Custom judge prompts are supported through policy overlays; Routiium still keeps its built-in safety prompt immutable and routes sensitive-but-allowable requests to the built-in `secure` alias by default.
 For agentic applications, rejected unsafe actions return an OpenAI-compatible assistant result by default (`ROUTIIUM_REJECTION_MODE=agent_result`) so the loop can continue without fulfilling the unsafe request; set `http_error` for strict gateway-style 403s.
 
+### 5. Proxy Claude Code or Codex subscriptions
+
+Use one setup command to create a local-only proxy config and durable JSONL
+usage log. Codex additionally gets an isolated profile without changing its
+main config:
+
+```bash
+routiium subscription setup --client claude
+routiium subscription setup --client codex --codex-upstream https://your-authorized-codex-upstream.example
+```
+
+Run the printed `routiium serve`, login commands, and client launch command.
+See [Subscription Proxy](docs/SUBSCRIPTION_PROXY.md) for the combined setup and
+security boundaries.
+
 ## Day-one workflow
 
 ```bash
@@ -118,6 +133,7 @@ Run `routiium --help` or see [docs/CLI.md](docs/CLI.md) for the full command ref
 ## Core features
 
 - **OpenAI-compatible proxy** for `/v1/chat/completions`, `/v1/responses`, and `/v1/models`.
+- **Claude Code and Codex subscription pass-through** with native wire formats, client-owned login refresh, redacted per-user attribution, and full JSONL request/response stream logs.
 - **Payload translation** between Chat Completions and Responses API shapes, including streaming, tools, multimodal content, logprobs, and usage metadata.
 - **Managed API keys** with Redis, sled, or memory backends; hashed secrets; labels; expiration; scopes; revocation; and admin APIs.
 - **Embedded policy routing** with `auto`, `fast`, `balanced`, `safe`, `secure`, and `premium` aliases, cost/latency/context scoring, route metadata, and remote Router Schema compatibility.
@@ -180,6 +196,7 @@ Start here:
 - [Judge Policy](docs/JUDGE_POLICY.md) — custom prompts, secure rerouting, and policy validation.
 - [Production Checklist](docs/PRODUCTION_CHECKLIST.md) — launch checks for auth, CORS, guards, and streaming safety.
 - [API Reference](docs/API_REFERENCE.md) — HTTP routes and payload examples.
+- [Subscription Proxy](docs/SUBSCRIPTION_PROXY.md) — route Claude Code and Codex model traffic through Routiium without storing refresh tokens.
 - [Router Usage](docs/ROUTER_USAGE.md) and [Router API Spec](docs/ROUTER_API_SPEC.md) — built-in routing plus optional remote Router-compatible integration.
 - [Rate Limits](docs/RATE_LIMITS.md), [Analytics](docs/ANALYTICS.md), [AWS Bedrock](docs/AWS_BEDROCK.md), and [Production Hardening](docs/PRODUCTION_HARDENING.md).
 

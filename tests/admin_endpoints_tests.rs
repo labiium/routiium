@@ -98,6 +98,7 @@ fn sample_analytics_event(id: &str, ts: u64, endpoint: &str, success: bool) -> A
             } else {
                 Some("boom".to_string())
             },
+            usage_source: routiium::analytics::UsageSource::Measured,
         }),
         performance: PerformanceMetrics {
             duration_ms: 55,
@@ -134,6 +135,17 @@ fn sample_analytics_event(id: &str, ts: u64, endpoint: &str, success: bool) -> A
             pricing_model: Some("default".to_string()),
         }),
     }
+}
+
+fn sample_absent_usage_event(id: &str, ts: u64, endpoint: &str) -> AnalyticsEvent {
+    let mut event = sample_analytics_event(id, ts, endpoint, true);
+    event.token_usage = None;
+    event.cost = None;
+    if let Some(response) = event.response.as_mut() {
+        response.output_tokens = None;
+        response.usage_source = routiium::analytics::UsageSource::Absent;
+    }
+    event
 }
 
 #[actix_web::test]
@@ -266,6 +278,100 @@ async fn keys_respect_required_expiration_policy() {
 }
 
 #[actix_web::test]
+async fn readiness_reports_upstream_and_store_checks() {
+    let _env_guard = ENV_LOCK.lock().expect("env lock");
+    let _saved = EnvGuard::new(&["OPENAI_BASE_URL", "OPENAI_API_KEY", "AWS_REGION"]);
+
+    std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9000/v1");
+    std::env::remove_var("OPENAI_API_KEY");
+    std::env::remove_var("AWS_REGION");
+
+    let keys = Arc::new(
+        ApiKeyManager::from_backend(KeyBackend::Memory).expect("memory key backend available"),
+    );
+    let analytics = Some(Arc::new(AnalyticsManager::new_memory(100)));
+    let app_state = app_state_with_keys(keys, analytics, None);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(app_state))
+            .configure(config_routes),
+    )
+    .await;
+
+    let req = test::TestRequest::get().uri("/ready").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&test::read_body(resp).await).expect("ready json");
+    assert_eq!(body["status"], "ready");
+    assert_eq!(body["checks"]["analytics_store"], true);
+    assert_eq!(body["checks"]["upstream_or_router"], true);
+}
+
+#[actix_web::test]
+async fn readiness_accepts_subscription_only_upstream() {
+    let _env_guard = ENV_LOCK.lock().expect("env lock");
+    let _saved = EnvGuard::new(&[
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "AWS_REGION",
+        "ROUTIIUM_CLAUDE_SUBSCRIPTION_BASE_URL",
+        "ROUTIIUM_CODEX_SUBSCRIPTION_BASE_URL",
+    ]);
+
+    std::env::remove_var("OPENAI_BASE_URL");
+    std::env::remove_var("OPENAI_API_KEY");
+    std::env::remove_var("AWS_REGION");
+    std::env::set_var(
+        "ROUTIIUM_CLAUDE_SUBSCRIPTION_BASE_URL",
+        "https://api.anthropic.com",
+    );
+    std::env::remove_var("ROUTIIUM_CODEX_SUBSCRIPTION_BASE_URL");
+
+    let keys = Arc::new(
+        ApiKeyManager::from_backend(KeyBackend::Memory).expect("memory key backend available"),
+    );
+    let analytics = Some(Arc::new(AnalyticsManager::new_memory(100)));
+    let app_state = app_state_with_keys(keys, analytics, None);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(app_state))
+            .configure(config_routes),
+    )
+    .await;
+
+    let req = test::TestRequest::get().uri("/ready").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&test::read_body(resp).await).expect("ready json");
+    assert_eq!(body["status"], "ready");
+    assert_eq!(body["checks"]["subscription_upstream"], true);
+}
+
+#[actix_web::test]
+async fn metrics_endpoint_exposes_gateway_counters() {
+    let keys = Arc::new(
+        ApiKeyManager::from_backend(KeyBackend::Memory).expect("memory key backend available"),
+    );
+    let app_state = app_state_with_keys(keys, None, None);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(app_state))
+            .configure(config_routes),
+    )
+    .await;
+
+    let req = test::TestRequest::get().uri("/metrics").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body = String::from_utf8(test::read_body(resp).await.to_vec()).expect("metrics text");
+    assert!(body.contains("routiium_requests_total"));
+    assert!(body.contains("routiium_errors_total"));
+    assert!(body.contains("routiium_usage_source_total{source=\"measured\"}"));
+}
+
+#[actix_web::test]
 async fn analytics_admin_endpoints_work_end_to_end() {
     let _env_guard = ENV_LOCK.lock().expect("env lock");
     let _saved = EnvGuard::new(&["ROUTIIUM_ADMIN_TOKEN"]);
@@ -342,6 +448,22 @@ async fn analytics_admin_endpoints_work_end_to_end() {
     assert_eq!(agg_body["successful_requests"], 1);
     assert_eq!(agg_body["failed_requests"], 1);
 
+    let governance_req = test::TestRequest::get()
+        .uri("/analytics/governance?start=1719999999&end=1720001000")
+        .insert_header((header::AUTHORIZATION, "Bearer admin-test"))
+        .to_request();
+    let governance_resp = test::call_service(&app, governance_req).await;
+    assert_eq!(governance_resp.status(), 200);
+    let governance_body: serde_json::Value =
+        serde_json::from_slice(&test::read_body(governance_resp).await).expect("governance json");
+    assert_eq!(governance_body["usage_source"]["measured"], 2);
+    assert_eq!(governance_body["measured_usage"]["input_tokens"], 24);
+    assert_eq!(governance_body["measured_usage"]["output_tokens"], 16);
+    assert_eq!(
+        governance_body["governance_ready"]["budget_reporting"],
+        true
+    );
+
     let export_req = test::TestRequest::get()
         .uri("/analytics/export?start=1719999999&end=1720001000&format=csv")
         .insert_header((header::AUTHORIZATION, "Bearer admin-test"))
@@ -373,6 +495,56 @@ async fn analytics_admin_endpoints_work_end_to_end() {
     let stats_after_body: serde_json::Value =
         serde_json::from_slice(&test::read_body(stats_after_resp).await).expect("stats json");
     assert_eq!(stats_after_body["total_events"], 0);
+}
+
+#[actix_web::test]
+async fn analytics_governance_flags_absent_usage_as_not_ready() {
+    let _env_guard = ENV_LOCK.lock().expect("env lock");
+    let _saved = EnvGuard::new(&["ROUTIIUM_ADMIN_TOKEN"]);
+    std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
+
+    let analytics = Arc::new(AnalyticsManager::new_memory(1000));
+    analytics
+        .record(sample_analytics_event(
+            "evt-measured",
+            1_720_000_000,
+            "/v1/chat/completions",
+            true,
+        ))
+        .await
+        .expect("record measured event");
+    analytics
+        .record(sample_absent_usage_event(
+            "evt-absent",
+            1_720_000_001,
+            "/v1/chat/completions",
+        ))
+        .await
+        .expect("record absent event");
+
+    let keys = Arc::new(
+        ApiKeyManager::from_backend(KeyBackend::Memory).expect("memory key backend available"),
+    );
+    let app_state = app_state_with_keys(keys, Some(analytics), None);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(app_state))
+            .configure(config_routes),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri("/analytics/governance?start=1719999999&end=1720001000")
+        .insert_header((header::AUTHORIZATION, "Bearer admin-test"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&test::read_body(resp).await).expect("governance json");
+    assert_eq!(body["usage_source"]["measured"], 1);
+    assert_eq!(body["usage_source"]["absent"], 1);
+    assert_eq!(body["governance_ready"]["budget_reporting"], false);
+    assert_eq!(body["governance_ready"]["token_limit_reporting"], false);
 }
 
 #[actix_web::test]

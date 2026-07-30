@@ -1,8 +1,10 @@
 use actix_web::{test, web, App};
+use axum::{extract::State, routing::post, Json, Router};
 use http::StatusCode as RouterStatusCode;
 use once_cell::sync::Lazy;
 use reqwest::Client;
 use routiium::{
+    analytics::AnalyticsManager,
     router_client::{
         CachedRouterClient, HttpRouterClient, HttpRouterConfig, JudgeMetadata, RouterClient,
     },
@@ -10,8 +12,10 @@ use routiium::{
     util::AppState,
 };
 use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 #[path = "common/router_stub.rs"]
@@ -20,6 +24,68 @@ mod router_stub;
 use router_stub::{sample_plan, RouterResponseConfig, RouterStub};
 
 static ENV_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+#[derive(Clone)]
+struct MockUpstream {
+    base_url: String,
+    calls: Arc<AtomicUsize>,
+}
+
+impl MockUpstream {
+    async fn start_responses(response: serde_json::Value) -> Self {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = (calls.clone(), response);
+        let app = Router::new()
+            .route("/v1/responses", post(mock_responses_handler))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream");
+        let addr = listener.local_addr().expect("upstream addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("upstream server error");
+        });
+        Self {
+            base_url: format!("http://{addr}"),
+            calls,
+        }
+    }
+
+    async fn start_chat(response: serde_json::Value) -> Self {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = (calls.clone(), response);
+        let app = Router::new()
+            .route("/v1/chat/completions", post(mock_responses_handler))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream");
+        let addr = listener.local_addr().expect("upstream addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("upstream server error");
+        });
+        Self {
+            base_url: format!("http://{addr}"),
+            calls,
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+async fn mock_responses_handler(
+    State((calls, response)): State<(Arc<AtomicUsize>, serde_json::Value)>,
+    Json(_body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    calls.fetch_add(1, Ordering::SeqCst);
+    Json(response)
+}
 
 fn basic_responses_body() -> serde_json::Value {
     json!({
@@ -36,10 +102,36 @@ fn basic_responses_body() -> serde_json::Value {
     })
 }
 
+fn cacheable_judge() -> JudgeMetadata {
+    JudgeMetadata {
+        id: Some("jdg_cacheable".to_string()),
+        action: Some("route".to_string()),
+        mode: Some("enforce".to_string()),
+        verdict: Some("allow".to_string()),
+        risk_level: Some("low".to_string()),
+        reason: Some("safe exact-match cache fixture".to_string()),
+        target: None,
+        categories: None,
+        requires_approval: None,
+        policy_rev: Some("cache_policy_v1".to_string()),
+        policy_fingerprint: Some("sha256:test-cache-policy".to_string()),
+        cacheable: Some(true),
+        selector_scope: None,
+        selector_action: None,
+        selector_rules: None,
+        selector_reason: None,
+    }
+}
+
 fn clear_router_env() {
     std::env::remove_var("ROUTIIUM_ROUTER_STRICT");
     std::env::remove_var("ROUTIIUM_CACHE_TTL_MS");
+    std::env::remove_var("ROUTIIUM_GOVERNANCE_MODE");
+    std::env::remove_var("ROUTIIUM_EXACT_RESPONSE_CACHE");
+    std::env::remove_var("ROUTIIUM_EXACT_RESPONSE_CACHE_TTL_MS");
+    std::env::remove_var("ROUTIIUM_EXACT_RESPONSE_CACHE_MAX_ENTRIES");
     std::env::remove_var("ROUTIIUM_REJECTION_MODE");
+    std::env::remove_var("ROUTIIUM_ADMIN_TOKEN");
     std::env::remove_var("OPENAI_BASE_URL");
 }
 
@@ -61,6 +153,18 @@ fn build_app_state(router_url: &str, cache_ttl: u64) -> AppState {
     let base_state = AppState::default();
     AppState {
         router_client: Some(Arc::new(cached) as Arc<dyn RouterClient>),
+        router_url: Some(router_url.to_string()),
+        router_strict: std::env::var("ROUTIIUM_ROUTER_STRICT")
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false),
+        router_cache_ttl_ms: Some(cache_ttl),
+        analytics: Some(Arc::new(AnalyticsManager::new_memory(1000))),
         // Use a short timeout so unreachable upstreams fail fast in tests rather than hanging.
         http: Client::builder()
             .no_proxy()
@@ -303,6 +407,647 @@ async fn router_policy_rejection_returns_agent_result_by_default() {
         body["routiium_rejection"]["categories"][0],
         "dangerous_action"
     );
+    clear_router_env();
+}
+
+#[actix_web::test]
+async fn router_governance_mode_ready_requires_strict_zero_cache() {
+    let _guard = ENV_GUARD.lock().await;
+    clear_router_env();
+    std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9/v1");
+    std::env::set_var("ROUTIIUM_GOVERNANCE_MODE", "router");
+
+    let router = RouterStub::start(RouterResponseConfig::Plan(Box::new(sample_plan(
+        "rte_governance",
+        "gpt-4o-mini",
+    ))))
+    .await;
+
+    let not_ready_state = build_app_state(&router.url(), 120_000);
+    let not_ready_app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(not_ready_state))
+            .configure(config_routes),
+    )
+    .await;
+    let req = test::TestRequest::get().uri("/ready").to_request();
+    let resp = test::call_service(&not_ready_app, req).await;
+    assert_eq!(resp.status().as_u16(), 503);
+    let body: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(body["checks"]["governance"], false);
+    assert_eq!(
+        body["governance"]["router_delegation"]["strict_fail_closed"],
+        false
+    );
+    assert_eq!(
+        body["governance"]["router_delegation"]["plan_cache_disabled"],
+        false
+    );
+
+    std::env::set_var("ROUTIIUM_ROUTER_STRICT", "1");
+    std::env::set_var("ROUTIIUM_CACHE_TTL_MS", "0");
+    let ready_state = build_app_state(&router.url(), 0);
+    let ready_app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(ready_state))
+            .configure(config_routes),
+    )
+    .await;
+    let req = test::TestRequest::get().uri("/ready").to_request();
+    let resp = test::call_service(&ready_app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(body["checks"]["governance"], true);
+    assert_eq!(body["governance"]["mode"], "router");
+    assert_eq!(
+        body["governance"]["router_delegation"]["strict_fail_closed"],
+        true
+    );
+    assert_eq!(
+        body["governance"]["router_delegation"]["plan_cache_disabled"],
+        true
+    );
+    clear_router_env();
+}
+
+#[actix_web::test]
+async fn ready_reports_exact_response_cache_when_enabled() {
+    let _guard = ENV_GUARD.lock().await;
+    clear_router_env();
+    std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9/v1");
+    std::env::set_var("ROUTIIUM_EXACT_RESPONSE_CACHE", "1");
+
+    let router = RouterStub::start(RouterResponseConfig::Plan(Box::new(sample_plan(
+        "rte_cache_guard",
+        "gpt-4o-mini",
+    ))))
+    .await;
+    let state = build_app_state(&router.url(), 0);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(config_routes),
+    )
+    .await;
+
+    let req = test::TestRequest::get().uri("/ready").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(body["checks"]["governance"], true);
+    assert_eq!(body["governance"]["exact_response_cache"]["enabled"], true);
+    assert_eq!(body["governance"]["exact_response_cache"]["ready"], true);
+    clear_router_env();
+}
+
+#[actix_web::test]
+async fn router_governance_mode_rejects_exact_response_cache() {
+    let _guard = ENV_GUARD.lock().await;
+    clear_router_env();
+    std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9/v1");
+    std::env::set_var("ROUTIIUM_GOVERNANCE_MODE", "router");
+    std::env::set_var("ROUTIIUM_ROUTER_STRICT", "1");
+    std::env::set_var("ROUTIIUM_CACHE_TTL_MS", "0");
+    std::env::set_var("ROUTIIUM_EXACT_RESPONSE_CACHE", "1");
+
+    let router = RouterStub::start(RouterResponseConfig::Plan(Box::new(sample_plan(
+        "rte_governed_cache",
+        "gpt-4o-mini",
+    ))))
+    .await;
+    let state = build_app_state(&router.url(), 0);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(config_routes),
+    )
+    .await;
+
+    let req = test::TestRequest::get().uri("/ready").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 503);
+    let body: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(body["checks"]["governance"], false);
+    assert_eq!(body["governance"]["router_delegation"]["ready"], true);
+    assert_eq!(body["governance"]["exact_response_cache"]["enabled"], true);
+    assert_eq!(body["governance"]["exact_response_cache"]["ready"], false);
+    clear_router_env();
+}
+
+#[actix_web::test]
+async fn exact_response_cache_reuses_safe_non_streaming_response_and_clears() {
+    let _guard = ENV_GUARD.lock().await;
+    clear_router_env();
+    std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9/v1");
+    std::env::set_var("ROUTIIUM_EXACT_RESPONSE_CACHE", "1");
+    std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
+
+    let upstream = MockUpstream::start_responses(json!({
+        "id": "rsp-cache-1",
+        "object": "response",
+        "created": 1_720_000_000u64,
+        "model": "gpt-4o-mini",
+        "output_text": "cached answer",
+        "output": [{
+            "id": "msg-cache-1",
+            "type": "assistant_message",
+            "content": "cached answer"
+        }],
+        "usage": {
+            "input_tokens": 4,
+            "output_tokens": 2,
+            "total_tokens": 6
+        }
+    }))
+    .await;
+
+    let mut plan = sample_plan("rte_exact_cache", "gpt-4o-mini");
+    plan.upstream.base_url = format!("{}/v1", upstream.base_url);
+    plan.judge = Some(cacheable_judge());
+    let router = RouterStub::start(RouterResponseConfig::Plan(Box::new(plan))).await;
+    let state = build_app_state(&router.url(), 60_000);
+    let analytics = state.analytics.clone().expect("analytics enabled");
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(config_routes),
+    )
+    .await;
+
+    let body = json!({
+        "model": "nano-basic",
+        "messages": [{"role": "user", "content": "cache me"}],
+        "stream": false
+    });
+
+    for idx in 0..2 {
+        let req = test::TestRequest::post()
+            .uri("/v1/chat/completions")
+            .insert_header(("Authorization", "Bearer router-test"))
+            .set_json(&body)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 200);
+        if idx == 1 {
+            assert_eq!(
+                resp.headers()
+                    .get("x-routiium-cache")
+                    .and_then(|value| value.to_str().ok()),
+                Some("hit")
+            );
+        }
+        let body: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+        assert_eq!(body["choices"][0]["message"]["content"], "cached answer");
+    }
+    assert_eq!(upstream.calls(), 1);
+    let events = analytics
+        .query_range(0, u64::MAX, None)
+        .await
+        .expect("analytics events");
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| {
+        event
+            .response
+            .as_ref()
+            .map(|response| response.usage_source == routiium::analytics::UsageSource::Measured)
+            .unwrap_or(false)
+    }));
+    assert!(events
+        .iter()
+        .all(|event| event.token_usage.as_ref().map(|usage| usage.total_tokens) == Some(6)));
+
+    let clear_req = test::TestRequest::post()
+        .uri("/admin/cache/exact/clear")
+        .insert_header(("Authorization", "Bearer admin-test"))
+        .to_request();
+    let clear_resp = test::call_service(&app, clear_req).await;
+    assert_eq!(clear_resp.status().as_u16(), 200);
+
+    let req = test::TestRequest::post()
+        .uri("/v1/chat/completions")
+        .insert_header(("Authorization", "Bearer router-test"))
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(upstream.calls(), 2);
+    clear_router_env();
+}
+
+#[actix_web::test]
+async fn exact_response_cache_requires_explicit_cacheable_judge_metadata() {
+    let _guard = ENV_GUARD.lock().await;
+    clear_router_env();
+    std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9/v1");
+    std::env::set_var("ROUTIIUM_EXACT_RESPONSE_CACHE", "1");
+
+    let upstream = MockUpstream::start_responses(json!({
+        "id": "rsp-no-cache-metadata",
+        "object": "response",
+        "created": 1_720_000_000u64,
+        "model": "gpt-4o-mini",
+        "output_text": "uncached answer",
+        "output": [{
+            "id": "msg-no-cache-metadata",
+            "type": "assistant_message",
+            "content": "uncached answer"
+        }],
+        "usage": {
+            "input_tokens": 4,
+            "output_tokens": 2,
+            "total_tokens": 6
+        }
+    }))
+    .await;
+
+    let mut plan = sample_plan("rte_missing_cacheable", "gpt-4o-mini");
+    plan.upstream.base_url = format!("{}/v1", upstream.base_url);
+    plan.judge = None;
+    let router = RouterStub::start(RouterResponseConfig::Plan(Box::new(plan))).await;
+    let state = build_app_state(&router.url(), 60_000);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(config_routes),
+    )
+    .await;
+    let body = json!({
+        "model": "nano-basic",
+        "messages": [{"role": "user", "content": "do not cache without metadata"}],
+        "stream": false
+    });
+
+    for _ in 0..2 {
+        let req = test::TestRequest::post()
+            .uri("/v1/chat/completions")
+            .insert_header(("Authorization", "Bearer router-test"))
+            .set_json(&body)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_ne!(
+            resp.headers()
+                .get("x-routiium-cache")
+                .and_then(|value| value.to_str().ok()),
+            Some("hit")
+        );
+    }
+    assert_eq!(
+        upstream.calls(),
+        2,
+        "missing explicit judge.cacheable=true metadata must bypass exact response cache"
+    );
+    clear_router_env();
+}
+
+#[actix_web::test]
+async fn exact_response_cache_misses_when_policy_revision_changes() {
+    let _guard = ENV_GUARD.lock().await;
+    clear_router_env();
+    std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9/v1");
+    std::env::set_var("ROUTIIUM_EXACT_RESPONSE_CACHE", "1");
+
+    let upstream = MockUpstream::start_responses(json!({
+        "id": "rsp-policy-cache",
+        "object": "response",
+        "created": 1_720_000_000u64,
+        "model": "gpt-4o-mini",
+        "output_text": "policy scoped answer",
+        "output": [{
+            "id": "msg-policy-cache",
+            "type": "assistant_message",
+            "content": "policy scoped answer"
+        }],
+        "usage": {
+            "input_tokens": 4,
+            "output_tokens": 2,
+            "total_tokens": 6
+        }
+    }))
+    .await;
+
+    let mut first = sample_plan("rte_exact_cache_policy", "gpt-4o-mini");
+    first.upstream.base_url = format!("{}/v1", upstream.base_url);
+    first.judge = Some(cacheable_judge());
+    first.policy_rev = Some("router_policy_v1".to_string());
+
+    let mut second = first.clone();
+    second.policy_rev = Some("router_policy_v2".to_string());
+    if let Some(judge) = second.judge.as_mut() {
+        judge.policy_rev = Some("cache_policy_v2".to_string());
+        judge.policy_fingerprint = Some("sha256:test-cache-policy-v2".to_string());
+    }
+
+    let router = RouterStub::start(RouterResponseConfig::Plans(vec![first, second])).await;
+    let state = build_app_state(&router.url(), 0);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(config_routes),
+    )
+    .await;
+    let body = json!({
+        "model": "nano-basic",
+        "messages": [{"role": "user", "content": "cache policy scoped"}],
+        "stream": false
+    });
+
+    for _ in 0..2 {
+        let req = test::TestRequest::post()
+            .uri("/v1/chat/completions")
+            .insert_header(("Authorization", "Bearer router-test"))
+            .set_json(&body)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_ne!(
+            resp.headers()
+                .get("x-routiium-cache")
+                .and_then(|value| value.to_str().ok()),
+            Some("hit")
+        );
+    }
+    assert_eq!(router.calls(), 2);
+    assert_eq!(
+        upstream.calls(),
+        2,
+        "policy revision changes must not reuse exact cache entries"
+    );
+    clear_router_env();
+}
+
+#[actix_web::test]
+async fn chat_non_streaming_uses_router_fallback_after_primary_transport_failure() {
+    let _guard = ENV_GUARD.lock().await;
+    clear_router_env();
+    std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9/v1");
+
+    let upstream = MockUpstream::start_responses(json!({
+        "id": "rsp-fallback-1",
+        "object": "response",
+        "created": 1_720_000_000u64,
+        "model": "gpt-4o-mini",
+        "output_text": "fallback answer",
+        "output": [{
+            "id": "msg-fallback-1",
+            "type": "assistant_message",
+            "content": "fallback answer"
+        }],
+        "usage": {
+            "input_tokens": 4,
+            "output_tokens": 2,
+            "total_tokens": 6
+        }
+    }))
+    .await;
+
+    let mut plan = sample_plan("rte_chat_fallback", "primary-model");
+    plan.upstream.base_url = "http://127.0.0.1:9/v1".to_string();
+    plan.fallbacks = vec![routiium::router_client::FallbackConfig {
+        base_url: format!("{}/v1", upstream.base_url),
+        mode: routiium::router_client::UpstreamMode::Responses,
+        model_id: "fallback-model".to_string(),
+        reason: Some("primary_transport".to_string()),
+        auth_env: None,
+        penalty: None,
+    }];
+    let router = RouterStub::start(RouterResponseConfig::Plan(Box::new(plan))).await;
+    let state = build_app_state(&router.url(), 60_000);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(config_routes),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/chat/completions")
+        .insert_header(("Authorization", "Bearer router-test"))
+        .set_json(json!({
+            "model": "nano-basic",
+            "messages": [{"role": "user", "content": "use fallback"}],
+            "stream": false
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(body["choices"][0]["message"]["content"], "fallback answer");
+    assert_eq!(router.calls(), 1);
+    assert_eq!(upstream.calls(), 1);
+    clear_router_env();
+}
+
+#[actix_web::test]
+async fn chat_non_streaming_converts_responses_fallback_to_chat_schema() {
+    let _guard = ENV_GUARD.lock().await;
+    clear_router_env();
+    std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9/v1");
+
+    let upstream = MockUpstream::start_responses(json!({
+        "id": "rsp-cross-mode-fallback",
+        "object": "response",
+        "created": 1_720_000_000u64,
+        "model": "gpt-4o-mini",
+        "output_text": "responses fallback answer",
+        "output": [{
+            "id": "msg-cross-mode-fallback",
+            "type": "assistant_message",
+            "content": "responses fallback answer"
+        }],
+        "usage": {
+            "input_tokens": 4,
+            "output_tokens": 2,
+            "total_tokens": 6
+        }
+    }))
+    .await;
+
+    let mut plan = sample_plan("rte_chat_to_responses_fallback", "primary-chat-model");
+    plan.upstream.mode = routiium::router_client::UpstreamMode::Chat;
+    plan.upstream.base_url = "http://127.0.0.1:9/v1".to_string();
+    plan.fallbacks = vec![routiium::router_client::FallbackConfig {
+        base_url: format!("{}/v1", upstream.base_url),
+        mode: routiium::router_client::UpstreamMode::Responses,
+        model_id: "fallback-responses-model".to_string(),
+        reason: Some("primary_transport".to_string()),
+        auth_env: None,
+        penalty: None,
+    }];
+    let router = RouterStub::start(RouterResponseConfig::Plan(Box::new(plan))).await;
+    let state = build_app_state(&router.url(), 60_000);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(config_routes),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/chat/completions")
+        .insert_header(("Authorization", "Bearer router-test"))
+        .set_json(json!({
+            "model": "nano-basic",
+            "messages": [{"role": "user", "content": "use responses fallback"}],
+            "stream": false
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(body["object"], "chat.completion");
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        "responses fallback answer"
+    );
+    assert!(body.get("output").is_none(), "raw Responses schema leaked");
+    assert_eq!(upstream.calls(), 1);
+    clear_router_env();
+}
+
+#[actix_web::test]
+async fn exact_response_cache_does_not_store_fallback_terminal_response_under_primary_key() {
+    let _guard = ENV_GUARD.lock().await;
+    clear_router_env();
+    std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9/v1");
+    std::env::set_var("ROUTIIUM_EXACT_RESPONSE_CACHE", "1");
+
+    let upstream = MockUpstream::start_responses(json!({
+        "id": "rsp-fallback-no-cache",
+        "object": "response",
+        "created": 1_720_000_000u64,
+        "model": "gpt-4o-mini",
+        "output_text": "fallback should not cache",
+        "output": [{
+            "id": "msg-fallback-no-cache",
+            "type": "assistant_message",
+            "content": "fallback should not cache"
+        }],
+        "usage": {
+            "input_tokens": 4,
+            "output_tokens": 2,
+            "total_tokens": 6
+        }
+    }))
+    .await;
+
+    let mut plan = sample_plan("rte_fallback_no_exact_cache", "primary-chat-model");
+    plan.upstream.mode = routiium::router_client::UpstreamMode::Chat;
+    plan.upstream.base_url = "http://127.0.0.1:9/v1".to_string();
+    plan.judge = Some(cacheable_judge());
+    plan.fallbacks = vec![routiium::router_client::FallbackConfig {
+        base_url: format!("{}/v1", upstream.base_url),
+        mode: routiium::router_client::UpstreamMode::Responses,
+        model_id: "fallback-responses-model".to_string(),
+        reason: Some("primary_transport".to_string()),
+        auth_env: None,
+        penalty: None,
+    }];
+    let router = RouterStub::start(RouterResponseConfig::Plan(Box::new(plan))).await;
+    let state = build_app_state(&router.url(), 60_000);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(config_routes),
+    )
+    .await;
+
+    let body = json!({
+        "model": "nano-basic",
+        "messages": [{"role": "user", "content": "fallback cache safety"}],
+        "stream": false
+    });
+
+    for _ in 0..2 {
+        let req = test::TestRequest::post()
+            .uri("/v1/chat/completions")
+            .insert_header(("Authorization", "Bearer router-test"))
+            .set_json(&body)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_ne!(
+            resp.headers()
+                .get("x-routiium-cache")
+                .and_then(|value| value.to_str().ok()),
+            Some("hit")
+        );
+        let body: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "fallback should not cache"
+        );
+    }
+    assert_eq!(
+        upstream.calls(),
+        2,
+        "fallback terminal responses must not be inserted under the primary exact-cache key"
+    );
+    clear_router_env();
+}
+
+#[actix_web::test]
+async fn responses_non_streaming_converts_chat_fallback_to_responses_schema() {
+    let _guard = ENV_GUARD.lock().await;
+    clear_router_env();
+    std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9/v1");
+
+    let upstream = MockUpstream::start_chat(json!({
+        "id": "chatcmpl-cross-mode-fallback",
+        "object": "chat.completion",
+        "created": 1_720_000_000u64,
+        "model": "gpt-4o-mini",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "chat fallback answer"
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 4,
+            "completion_tokens": 2,
+            "total_tokens": 6
+        }
+    }))
+    .await;
+
+    let mut plan = sample_plan("rte_responses_to_chat_fallback", "primary-responses-model");
+    plan.upstream.base_url = "http://127.0.0.1:9/v1".to_string();
+    plan.upstream.mode = routiium::router_client::UpstreamMode::Responses;
+    plan.fallbacks = vec![routiium::router_client::FallbackConfig {
+        base_url: format!("{}/v1", upstream.base_url),
+        mode: routiium::router_client::UpstreamMode::Chat,
+        model_id: "fallback-chat-model".to_string(),
+        reason: Some("primary_transport".to_string()),
+        auth_env: None,
+        penalty: None,
+    }];
+    let router = RouterStub::start(RouterResponseConfig::Plan(Box::new(plan))).await;
+    let state = build_app_state(&router.url(), 60_000);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(config_routes),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/responses")
+        .insert_header(("Authorization", "Bearer router-test"))
+        .set_json(basic_responses_body())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(body["object"], "response");
+    assert_eq!(body["output_text"], "chat fallback answer");
+    assert!(
+        body.get("choices").is_none(),
+        "raw Chat Completions schema leaked"
+    );
+    assert_eq!(upstream.calls(), 1);
     clear_router_env();
 }
 

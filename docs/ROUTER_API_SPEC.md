@@ -201,7 +201,7 @@ Legacy routers may still emit `action: "needs_approval"` or `verdict: "needs_app
 
 - `ttl_ms` defines the soft lifetime for reuse. Routiium also honours `valid_until` when provided.
 - Routers that run a request judge SHOULD set `ttl_ms: 0` for non-cacheable/content-sensitive safety decisions unless their cache key includes content fingerprints, tool set, tenant, and safety policy revision.
-- `freeze_key` lets routers invalidate a single cached plan without altering revisions.
+- `freeze_key` marks a plan as requiring Router revalidation. Routiium does not store freeze-keyed plans in its local router-plan cache, which avoids serving a plan across freeze-key changes.
 - `stickiness.plan_token` (with optional `max_turns`/`expires_at`) instructs Routiium to reuse the plan for future turns by sending the token back in `RouteRequest.plan_token`.
 
 ---

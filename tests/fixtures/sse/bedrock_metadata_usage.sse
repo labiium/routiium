@@ -1,0 +1,5 @@
+event: contentBlockDelta
+data: {"contentBlockIndex":0,"delta":{"text":"hello"}}
+
+event: metadata
+data: {"usage":{"inputTokens":13,"outputTokens":8,"totalTokens":21},"metrics":{"latencyMs":42}}

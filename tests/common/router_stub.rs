@@ -22,8 +22,10 @@ pub struct RouterStub {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub enum RouterResponseConfig {
     Plan(Box<RoutePlan>),
+    Plans(Vec<RoutePlan>),
     Error {
         status: StatusCode,
         body: serde_json::Value,
@@ -106,13 +108,20 @@ async fn plan_handler(
     State(state): State<Arc<StubState>>,
     Json(req): Json<RouteRequest>,
 ) -> Result<Json<RoutePlan>, (StatusCode, Json<serde_json::Value>)> {
-    state.calls.fetch_add(1, Ordering::SeqCst);
+    let call_idx = state.calls.fetch_add(1, Ordering::SeqCst);
     if let Ok(mut guard) = state.requests.lock() {
         guard.push(req.clone());
     }
 
     match &state.response {
         RouterResponseConfig::Plan(plan) => Ok(Json((**plan).clone())),
+        RouterResponseConfig::Plans(plans) => {
+            let plan = plans
+                .get(call_idx)
+                .or_else(|| plans.last())
+                .expect("plans response requires at least one plan");
+            Ok(Json(plan.clone()))
+        }
         RouterResponseConfig::Error { status, body } => Err((*status, Json(body.clone()))),
     }
 }

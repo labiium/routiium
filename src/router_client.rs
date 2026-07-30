@@ -632,6 +632,28 @@ pub struct FallbackConfig {
     pub penalty: Option<f32>,
 }
 
+/// Ordered upstream attempt derived from a route plan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RouteAttempt {
+    /// Zero-based hop. Hop 0 is the primary upstream.
+    pub hop: usize,
+    /// Base URL for this attempt.
+    pub base_url: String,
+    /// API mode for this attempt.
+    pub mode: UpstreamMode,
+    /// Model ID for this attempt.
+    pub model_id: String,
+    /// Auth env var for this attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_env: Option<String>,
+    /// Headers for this attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HashMap<String, String>>,
+    /// Router-provided reason for fallback attempts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// Cache control from Router
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheControl {
@@ -803,6 +825,41 @@ pub struct RoutePlan {
     /// Optional LLM-judge decision metadata for observability.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub judge: Option<JudgeMetadata>,
+}
+
+impl RoutePlan {
+    /// Return primary plus ordered fallback attempts.
+    ///
+    /// This is intentionally a pure projection so handlers can implement
+    /// bounded retry/failover without reinterpreting the fallback schema.
+    pub fn ordered_attempts(&self) -> Vec<RouteAttempt> {
+        let mut attempts = Vec::with_capacity(1 + self.fallbacks.len());
+        attempts.push(RouteAttempt {
+            hop: 0,
+            base_url: self.upstream.base_url.clone(),
+            mode: self.upstream.mode,
+            model_id: self.upstream.model_id.clone(),
+            auth_env: self.upstream.auth_env.clone(),
+            headers: self.upstream.headers.clone(),
+            reason: None,
+        });
+
+        attempts.extend(
+            self.fallbacks
+                .iter()
+                .enumerate()
+                .map(|(idx, fallback)| RouteAttempt {
+                    hop: idx + 1,
+                    base_url: fallback.base_url.clone(),
+                    mode: fallback.mode,
+                    model_id: fallback.model_id.clone(),
+                    auth_env: fallback.auth_env.clone(),
+                    headers: None,
+                    reason: fallback.reason.clone(),
+                }),
+        );
+        attempts
+    }
 }
 
 /// Token usage details for feedback
@@ -1778,7 +1835,6 @@ impl RouterCache {
         if let Some(token) = &req.plan_token {
             parts.push(token.clone());
         }
-
         parts.join("|")
     }
 
@@ -1815,12 +1871,12 @@ impl RouterCache {
 
     /// Store plan in cache
     pub fn put(&self, req: &RouteRequest, plan: RoutePlan) {
-        let key = Self::cache_key(req);
         let ttl_ms = plan
             .cache
             .as_ref()
             .map(|c| c.ttl_ms)
             .unwrap_or(self.default_ttl_ms);
+        let key = Self::cache_key(req);
 
         if self.default_ttl_ms == 0 || ttl_ms == 0 {
             if let Ok(mut cache) = self.cache.lock() {
@@ -1828,8 +1884,42 @@ impl RouterCache {
             }
             return;
         }
+        if plan
+            .cache
+            .as_ref()
+            .and_then(|c| c.freeze_key.as_ref())
+            .is_some()
+        {
+            if let Ok(mut cache) = self.cache.lock() {
+                cache.remove(&key);
+            }
+            return;
+        }
 
-        let expires_at = Instant::now() + Duration::from_millis(ttl_ms);
+        let mut expires_at = Instant::now() + Duration::from_millis(ttl_ms);
+        if let Some(valid_until) = plan.cache.as_ref().and_then(|c| c.valid_until.as_deref()) {
+            match parse_rfc3339_instant(valid_until) {
+                Some(valid_until) if valid_until <= Instant::now() => {
+                    if let Ok(mut cache) = self.cache.lock() {
+                        cache.remove(&key);
+                    }
+                    return;
+                }
+                Some(valid_until) => {
+                    expires_at = expires_at.min(valid_until);
+                }
+                None => {
+                    tracing::warn!(
+                        valid_until = valid_until,
+                        "Not caching router plan with invalid cache valid_until timestamp"
+                    );
+                    if let Ok(mut cache) = self.cache.lock() {
+                        cache.remove(&key);
+                    }
+                    return;
+                }
+            }
+        }
 
         let cached = CachedPlan { plan, expires_at };
 
@@ -1852,6 +1942,100 @@ impl RouterCache {
             cache.retain(|_, v| v.expires_at > now);
         }
     }
+}
+
+fn parse_rfc3339_instant(value: &str) -> Option<Instant> {
+    let system_time = parse_rfc3339_system_time(value)?;
+    let now_system = std::time::SystemTime::now();
+    let now_instant = Instant::now();
+    if system_time <= now_system {
+        return Some(now_instant);
+    }
+    system_time
+        .duration_since(now_system)
+        .ok()
+        .map(|duration| now_instant + duration)
+}
+
+fn parse_rfc3339_system_time(value: &str) -> Option<std::time::SystemTime> {
+    let (date, time) = value.split_once('T')?;
+    let (time, offset_seconds) = if let Some(time) = time.strip_suffix('Z') {
+        (time, 0)
+    } else {
+        let offset_start = time.rfind(['+', '-'])?;
+        let (time, offset) = time.split_at(offset_start);
+        let sign = if offset.starts_with('+') { 1 } else { -1 };
+        let offset = &offset[1..];
+        let (hours, minutes) = offset.split_once(':')?;
+        let hours = hours.parse::<i64>().ok()?;
+        let minutes = minutes.parse::<i64>().ok()?;
+        if hours > 23 || minutes > 59 {
+            return None;
+        }
+        (time, sign * (hours * 3_600 + minutes * 60))
+    };
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?.parse::<i32>().ok()?;
+    let month = date_parts.next()?.parse::<u32>().ok()?;
+    let day = date_parts.next()?.parse::<u32>().ok()?;
+    if date_parts.next().is_some() {
+        return None;
+    }
+
+    let time = time
+        .split_once('.')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(time);
+    let mut time_parts = time.split(':');
+    let hour = time_parts.next()?.parse::<u32>().ok()?;
+    let minute = time_parts.next()?.parse::<u32>().ok()?;
+    let second = time_parts.next()?.parse::<u32>().ok()?;
+    if time_parts.next().is_some()
+        || !(1..=12).contains(&month)
+        || day == 0
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+
+    let days = days_from_civil(year, month, day)?;
+    let seconds = days
+        .checked_mul(86_400)?
+        .checked_add(i64::from(hour) * 3_600)?
+        .checked_add(i64::from(minute) * 60)?
+        .checked_add(i64::from(second.min(59)))?
+        .checked_sub(offset_seconds)?;
+    if seconds < 0 {
+        return None;
+    }
+    Some(std::time::UNIX_EPOCH + Duration::from_secs(seconds as u64))
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if day > max_day {
+        return None;
+    }
+    let year = i64::from(year) - if month <= 2 { 1 } else { 0 };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 /// Router client with caching
@@ -2882,6 +3066,344 @@ mod tests {
             zero_ttl_cache.get(&base_request, Some("rev1")).is_none(),
             "zero default TTL must disable cache reads as well as writes"
         );
+    }
+
+    #[test]
+    fn test_router_cache_respects_valid_until_expiry() {
+        let cache = RouterCache::new(30_000);
+        let req = RouteRequest {
+            schema_version: Some("1.1".to_string()),
+            request_id: Some("req_valid_until".to_string()),
+            trace: None,
+            alias: "alias".to_string(),
+            api: "responses".to_string(),
+            privacy_mode: PrivacyMode::FeaturesOnly,
+            content_attestation: Some(ContentAttestation {
+                included: Some("none".to_string()),
+            }),
+            caps: vec!["text".to_string()],
+            stream: false,
+            params: None,
+            plan_token: None,
+            targets: Targets::default(),
+            budget: None,
+            estimates: Estimates {
+                tokenizer_id: Some("auto".to_string()),
+                ..Default::default()
+            },
+            conversation: ConversationSignals::default(),
+            org: OrgContext::default(),
+            geo: None,
+            tools: vec![],
+            overrides: None,
+            role: None,
+            task: None,
+            privacy: None,
+            hints: None,
+        };
+        let plan = RoutePlan {
+            schema_version: Some("1.1".to_string()),
+            route_id: "rte_expired_valid_until".to_string(),
+            upstream: UpstreamConfig {
+                base_url: "https://primary.example.com/v1".to_string(),
+                mode: UpstreamMode::Responses,
+                model_id: "gpt-4o-mini".to_string(),
+                auth_env: Some("OPENAI_API_KEY".to_string()),
+                headers: None,
+            },
+            limits: RouteLimits::default(),
+            prompt_overlays: None,
+            hints: RouteHints::default(),
+            fallbacks: vec![],
+            cache: Some(CacheControl {
+                ttl_ms: 30_000,
+                etag: None,
+                valid_until: Some("2000-01-01T00:00:00Z".to_string()),
+                freeze_key: None,
+            }),
+            policy_rev: Some("rev1".to_string()),
+            policy: None,
+            stickiness: None,
+            content_used: Some("none".to_string()),
+            judge: None,
+        };
+
+        cache.put(&req, plan);
+        assert!(
+            cache.get(&req, Some("rev1")).is_none(),
+            "expired valid_until plans must not be cached"
+        );
+    }
+
+    #[test]
+    fn test_router_cache_does_not_store_invalid_valid_until() {
+        let cache = RouterCache::new(30_000);
+        let req = RouteRequest {
+            schema_version: Some("1.1".to_string()),
+            request_id: Some("req_invalid_valid_until".to_string()),
+            trace: None,
+            alias: "alias".to_string(),
+            api: "responses".to_string(),
+            privacy_mode: PrivacyMode::FeaturesOnly,
+            content_attestation: Some(ContentAttestation {
+                included: Some("none".to_string()),
+            }),
+            caps: vec!["text".to_string()],
+            stream: false,
+            params: None,
+            plan_token: None,
+            targets: Targets::default(),
+            budget: None,
+            estimates: Estimates {
+                tokenizer_id: Some("auto".to_string()),
+                ..Default::default()
+            },
+            conversation: ConversationSignals::default(),
+            org: OrgContext::default(),
+            geo: None,
+            tools: vec![],
+            overrides: None,
+            role: None,
+            task: None,
+            privacy: None,
+            hints: None,
+        };
+        let plan = RoutePlan {
+            schema_version: Some("1.1".to_string()),
+            route_id: "rte_invalid_valid_until".to_string(),
+            upstream: UpstreamConfig {
+                base_url: "https://primary.example.com/v1".to_string(),
+                mode: UpstreamMode::Responses,
+                model_id: "gpt-4o-mini".to_string(),
+                auth_env: Some("OPENAI_API_KEY".to_string()),
+                headers: None,
+            },
+            limits: RouteLimits::default(),
+            prompt_overlays: None,
+            hints: RouteHints::default(),
+            fallbacks: vec![],
+            cache: Some(CacheControl {
+                ttl_ms: 30_000,
+                etag: None,
+                valid_until: Some("not-rfc3339".to_string()),
+                freeze_key: None,
+            }),
+            policy_rev: Some("rev1".to_string()),
+            policy: None,
+            stickiness: None,
+            content_used: Some("none".to_string()),
+            judge: None,
+        };
+
+        cache.put(&req, plan);
+        assert!(
+            cache.get(&req, Some("rev1")).is_none(),
+            "invalid valid_until must fail closed and bypass local cache"
+        );
+    }
+
+    #[test]
+    fn test_router_cache_accepts_offset_valid_until() {
+        let cache = RouterCache::new(30_000);
+        let req = RouteRequest {
+            schema_version: Some("1.1".to_string()),
+            request_id: Some("req_offset_valid_until".to_string()),
+            trace: None,
+            alias: "alias".to_string(),
+            api: "responses".to_string(),
+            privacy_mode: PrivacyMode::FeaturesOnly,
+            content_attestation: Some(ContentAttestation {
+                included: Some("none".to_string()),
+            }),
+            caps: vec!["text".to_string()],
+            stream: false,
+            params: None,
+            plan_token: None,
+            targets: Targets::default(),
+            budget: None,
+            estimates: Estimates {
+                tokenizer_id: Some("auto".to_string()),
+                ..Default::default()
+            },
+            conversation: ConversationSignals::default(),
+            org: OrgContext::default(),
+            geo: None,
+            tools: vec![],
+            overrides: None,
+            role: None,
+            task: None,
+            privacy: None,
+            hints: None,
+        };
+        let plan = RoutePlan {
+            schema_version: Some("1.1".to_string()),
+            route_id: "rte_offset_valid_until".to_string(),
+            upstream: UpstreamConfig {
+                base_url: "https://primary.example.com/v1".to_string(),
+                mode: UpstreamMode::Responses,
+                model_id: "gpt-4o-mini".to_string(),
+                auth_env: Some("OPENAI_API_KEY".to_string()),
+                headers: None,
+            },
+            limits: RouteLimits::default(),
+            prompt_overlays: None,
+            hints: RouteHints::default(),
+            fallbacks: vec![],
+            cache: Some(CacheControl {
+                ttl_ms: 30_000,
+                etag: None,
+                valid_until: Some("2999-01-01T00:00:00+00:00".to_string()),
+                freeze_key: None,
+            }),
+            policy_rev: Some("rev1".to_string()),
+            policy: None,
+            stickiness: None,
+            content_used: Some("none".to_string()),
+            judge: None,
+        };
+
+        cache.put(&req, plan);
+        assert!(
+            cache.get(&req, Some("rev1")).is_some(),
+            "offset-form RFC3339 valid_until should be honored"
+        );
+    }
+
+    #[test]
+    fn test_router_cache_does_not_store_freeze_keyed_plans() {
+        let cache = RouterCache::new(30_000);
+        let req = RouteRequest {
+            schema_version: Some("1.1".to_string()),
+            request_id: Some("req_freeze_key".to_string()),
+            trace: None,
+            alias: "alias".to_string(),
+            api: "responses".to_string(),
+            privacy_mode: PrivacyMode::FeaturesOnly,
+            content_attestation: Some(ContentAttestation {
+                included: Some("none".to_string()),
+            }),
+            caps: vec!["text".to_string()],
+            stream: false,
+            params: None,
+            plan_token: None,
+            targets: Targets::default(),
+            budget: None,
+            estimates: Estimates {
+                tokenizer_id: Some("auto".to_string()),
+                ..Default::default()
+            },
+            conversation: ConversationSignals::default(),
+            org: OrgContext::default(),
+            geo: None,
+            tools: vec![],
+            overrides: None,
+            role: None,
+            task: None,
+            privacy: None,
+            hints: None,
+        };
+        let mut plan = RoutePlan {
+            schema_version: Some("1.1".to_string()),
+            route_id: "rte_freeze_key".to_string(),
+            upstream: UpstreamConfig {
+                base_url: "https://primary.example.com/v1".to_string(),
+                mode: UpstreamMode::Responses,
+                model_id: "gpt-4o-mini".to_string(),
+                auth_env: Some("OPENAI_API_KEY".to_string()),
+                headers: None,
+            },
+            limits: RouteLimits::default(),
+            prompt_overlays: None,
+            hints: RouteHints::default(),
+            fallbacks: vec![],
+            cache: Some(CacheControl {
+                ttl_ms: 30_000,
+                etag: None,
+                valid_until: None,
+                freeze_key: Some("freeze-v1".to_string()),
+            }),
+            policy_rev: Some("rev1".to_string()),
+            policy: None,
+            stickiness: None,
+            content_used: Some("none".to_string()),
+            judge: None,
+        };
+
+        cache.put(&req, plan.clone());
+        assert!(
+            cache.get(&req, Some("rev1")).is_none(),
+            "freeze-keyed plans require router revalidation and must not be cached locally"
+        );
+
+        plan.cache.as_mut().unwrap().freeze_key = None;
+        cache.put(&req, plan);
+        assert!(cache.get(&req, Some("rev1")).is_some());
+    }
+
+    #[test]
+    fn route_plan_ordered_attempts_preserve_primary_and_fallbacks() {
+        let mut headers = HashMap::new();
+        headers.insert("X-Primary".to_string(), "yes".to_string());
+
+        let plan = RoutePlan {
+            schema_version: Some("1.1".to_string()),
+            route_id: "rte_attempts".to_string(),
+            upstream: UpstreamConfig {
+                base_url: "https://primary.example.com/v1".to_string(),
+                mode: UpstreamMode::Responses,
+                model_id: "primary-model".to_string(),
+                auth_env: Some("PRIMARY_KEY".to_string()),
+                headers: Some(headers.clone()),
+            },
+            limits: RouteLimits::default(),
+            prompt_overlays: None,
+            hints: RouteHints::default(),
+            fallbacks: vec![
+                FallbackConfig {
+                    base_url: "https://fallback-a.example.com/v1".to_string(),
+                    mode: UpstreamMode::Chat,
+                    model_id: "fallback-a".to_string(),
+                    reason: Some("primary_5xx".to_string()),
+                    auth_env: Some("FALLBACK_A_KEY".to_string()),
+                    penalty: Some(0.2),
+                },
+                FallbackConfig {
+                    base_url: "https://fallback-b.example.com/v1".to_string(),
+                    mode: UpstreamMode::Responses,
+                    model_id: "fallback-b".to_string(),
+                    reason: Some("fallback_a_5xx".to_string()),
+                    auth_env: None,
+                    penalty: Some(0.4),
+                },
+            ],
+            cache: None,
+            policy_rev: None,
+            policy: None,
+            stickiness: None,
+            content_used: None,
+            judge: None,
+        };
+
+        let attempts = plan.ordered_attempts();
+        assert_eq!(attempts.len(), 3);
+        assert_eq!(attempts[0].hop, 0);
+        assert_eq!(attempts[0].base_url, "https://primary.example.com/v1");
+        assert_eq!(attempts[0].model_id, "primary-model");
+        assert_eq!(attempts[0].auth_env.as_deref(), Some("PRIMARY_KEY"));
+        assert_eq!(attempts[0].headers.as_ref(), Some(&headers));
+        assert_eq!(attempts[0].reason, None);
+
+        assert_eq!(attempts[1].hop, 1);
+        assert_eq!(attempts[1].mode, UpstreamMode::Chat);
+        assert_eq!(attempts[1].model_id, "fallback-a");
+        assert_eq!(attempts[1].auth_env.as_deref(), Some("FALLBACK_A_KEY"));
+        assert_eq!(attempts[1].reason.as_deref(), Some("primary_5xx"));
+
+        assert_eq!(attempts[2].hop, 2);
+        assert_eq!(attempts[2].mode, UpstreamMode::Responses);
+        assert_eq!(attempts[2].model_id, "fallback-b");
+        assert_eq!(attempts[2].auth_env, None);
+        assert_eq!(attempts[2].reason.as_deref(), Some("fallback_a_5xx"));
     }
 
     #[tokio::test]

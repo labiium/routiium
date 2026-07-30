@@ -2,14 +2,14 @@
 name = "routiium"
 version = "0.3.0"
 edition = "2021"
-description = "Translate and proxy OpenAI Chat Completions requests to the Responses API."
+description = "OpenAI-compatible LLM gateway for routing, safety, analytics, and provider proxying."
 license = "Apache-2.0"
 readme = "README.md"
 homepage = "https://github.com/labiium/routiium"
 repository = "https://github.com/labiium/routiium"
 authors = ["Routiium Contributors"]
 categories = ["api-bindings", "web-programming::http-server"]
-keywords = ["openai", "responses", "chat-completions", "proxy", "converter"]
+keywords = ["openai", "llm", "gateway", "proxy", "routing"]
 
 
 [lib]
@@ -67,15 +67,14 @@ r2d2 = "0.8"
 redis = "1.0"
 
 # AWS Bedrock support
-aws-config = "1.1"
-aws-sdk-bedrockruntime = "1.13"
+aws-config = { version = "1.8", default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process", "sso"] }
+aws-sdk-bedrockruntime = { version = "1.135", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-smithy-runtime-api = "1.1"
 base64 = "0.21"
 async-stream = "0.3"
 
 # SQL support (optional features)
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls"], optional = true }
-libsql = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
@@ -86,4 +85,4 @@ default = ["sled"]
 sled = []
 sqlite = ["sqlx/sqlite"]
 postgres = ["sqlx/postgres"]
-turso = ["libsql"]
+turso = []

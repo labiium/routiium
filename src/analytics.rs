@@ -75,6 +75,18 @@ pub struct ResponseMetadata {
     pub success: bool,
     /// Error message if failed
     pub error_message: Option<String>,
+    /// How token usage was determined for this response
+    #[serde(default)]
+    pub usage_source: UsageSource,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageSource {
+    Measured,
+    Estimated,
+    #[default]
+    Absent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -805,6 +817,11 @@ mod tests {
                 output_tokens: response_output_tokens,
                 success: true,
                 error_message: None,
+                usage_source: if token_usage.is_some() {
+                    UsageSource::Measured
+                } else {
+                    UsageSource::Absent
+                },
             }),
             performance: PerformanceMetrics {
                 duration_ms: 10,

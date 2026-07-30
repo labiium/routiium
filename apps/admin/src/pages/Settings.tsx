@@ -73,6 +73,10 @@ function Settings() {
 
             <div className="section" style={{ display: "grid", gap: "var(--space-6)" }}>
                 <SettingsSection title="Auth" value={settings.auth} />
+                <SettingsSection
+                    title="Coding client subscriptions"
+                    value={settings.subscriptions}
+                />
                 <SettingsSection title="Server" value={settings.server} />
                 <SettingsSection title="CORS" value={settings.cors} />
                 <SettingsSection title="Analytics" value={settings.analytics} />

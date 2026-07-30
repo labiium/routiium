@@ -49,6 +49,9 @@ pub enum Command {
     Init(InitArgs),
     /// Validate local configuration and optional live server/router health.
     Doctor(DoctorArgs),
+    /// Set up first-party coding-client subscription proxying.
+    #[command(subcommand)]
+    Subscription(SubscriptionCommand),
     /// Fetch /status from a running Routiium server.
     Status(StatusArgs),
     /// Manage Routiium API keys through the admin HTTP API.
@@ -62,6 +65,64 @@ pub enum Command {
     Judge(JudgeCommand),
     /// Print high-level documentation entry points.
     Docs(DocsArgs),
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum SubscriptionCommand {
+    /// Configure Routiium logging and client integration files for Claude Code or Codex.
+    Setup(SubscriptionSetupArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct SubscriptionSetupArgs {
+    /// Client integration to configure.
+    #[arg(long, value_enum, default_value_t = SubscriptionClient::Claude)]
+    pub client: SubscriptionClient,
+
+    /// Routiium URL that the coding client should use. Defaults to the effective BIND_ADDR, or http://127.0.0.1:8088.
+    #[arg(long)]
+    pub proxy_url: Option<String>,
+
+    /// Authorized Anthropic-compatible upstream for Claude Code.
+    #[arg(long, default_value = "https://api.anthropic.com")]
+    pub claude_upstream: String,
+
+    /// Authorized Codex-compatible upstream. Required for --client codex or both.
+    #[arg(long)]
+    pub codex_upstream: Option<String>,
+
+    /// Routiium env/config file to update. Defaults to the per-user config file.
+    #[arg(long, value_name = "PATH")]
+    pub config_path: Option<PathBuf>,
+
+    /// JSONL usage log path. Defaults to the per-user Routiium data directory.
+    #[arg(long, value_name = "PATH")]
+    pub log_path: Option<PathBuf>,
+
+    /// Codex home directory for the generated profile. Defaults to CODEX_HOME or ~/.codex.
+    #[arg(long, value_name = "PATH")]
+    pub codex_home: Option<PathBuf>,
+
+    /// Replace an existing generated Codex profile.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum SubscriptionClient {
+    Claude,
+    Codex,
+    Both,
+}
+
+impl std::fmt::Display for SubscriptionClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Both => "both",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Args, Default)]
@@ -672,6 +733,7 @@ pub async fn run(command: Command) -> Result<()> {
         Command::Config(command) => run_config(command),
         Command::Init(args) => run_init(args),
         Command::Doctor(args) => run_doctor(args).await,
+        Command::Subscription(command) => run_subscription(command),
         Command::Status(args) => run_status(args).await,
         Command::Key(command) => run_key(command).await,
         Command::Router(command) => run_router(command).await,
@@ -693,7 +755,17 @@ where
 
     let first = args[1].to_string_lossy();
     let known_subcommands = [
-        "serve", "config", "init", "doctor", "status", "key", "keys", "router", "judge", "docs",
+        "serve",
+        "config",
+        "init",
+        "doctor",
+        "subscription",
+        "status",
+        "key",
+        "keys",
+        "router",
+        "judge",
+        "docs",
         "help",
     ];
     let root_flags = ["--help", "-h", "--version", "-V"];
@@ -1291,9 +1363,34 @@ async fn run_doctor(args: DoctorArgs) -> Result<()> {
     let has_base = env_value(&file_env, "OPENAI_BASE_URL")
         .map(|v| is_real_env_value(&v))
         .unwrap_or(false);
+    let claude_subscription_upstream =
+        env_value(&file_env, "ROUTIIUM_CLAUDE_SUBSCRIPTION_BASE_URL")
+            .filter(|value| is_real_env_value(value));
+    let codex_subscription_upstream = env_value(&file_env, "ROUTIIUM_CODEX_SUBSCRIPTION_BASE_URL")
+        .filter(|value| is_real_env_value(value));
+    for (name, upstream) in [
+        (
+            "subscription_claude_upstream",
+            claude_subscription_upstream.as_deref(),
+        ),
+        (
+            "subscription_codex_upstream",
+            codex_subscription_upstream.as_deref(),
+        ),
+    ] {
+        if let Some(upstream) = upstream {
+            let (status, message) = match validate_http_url(name, upstream) {
+                Ok(()) => (CheckStatus::Ok, format!("configured: {upstream}")),
+                Err(error) => (CheckStatus::Error, error.to_string()),
+            };
+            checks.push(check(name, status, message));
+        }
+    }
+    let has_subscription =
+        claude_subscription_upstream.is_some() || codex_subscription_upstream.is_some();
     checks.push(check(
         "provider",
-        if has_openai || has_base {
+        if has_openai || has_base || has_subscription {
             CheckStatus::Ok
         } else {
             CheckStatus::Error
@@ -1302,8 +1399,10 @@ async fn run_doctor(args: DoctorArgs) -> Result<()> {
             "OPENAI_API_KEY is configured".to_string()
         } else if has_base {
             "OPENAI_BASE_URL is configured".to_string()
+        } else if has_subscription {
+            "a Claude Code or Codex subscription upstream is configured".to_string()
         } else {
-            "set OPENAI_API_KEY or OPENAI_BASE_URL before proxying real requests".to_string()
+            "set OPENAI_API_KEY, OPENAI_BASE_URL, or a subscription upstream before proxying real requests".to_string()
         },
     ));
 
@@ -1391,6 +1490,220 @@ async fn run_doctor(args: DoctorArgs) -> Result<()> {
     }
 
     emit_checks(&checks, args.json)
+}
+
+fn run_subscription(command: SubscriptionCommand) -> Result<()> {
+    match command {
+        SubscriptionCommand::Setup(args) => run_subscription_setup(args),
+    }
+}
+
+fn run_subscription_setup(args: SubscriptionSetupArgs) -> Result<()> {
+    let wants_claude = matches!(
+        args.client,
+        SubscriptionClient::Claude | SubscriptionClient::Both
+    );
+    let wants_codex = matches!(
+        args.client,
+        SubscriptionClient::Codex | SubscriptionClient::Both
+    );
+
+    if wants_claude {
+        validate_http_url("--claude-upstream", &args.claude_upstream)?;
+    }
+    let codex_upstream = if wants_codex {
+        let upstream = args.codex_upstream.as_deref().ok_or_else(|| {
+            anyhow!(
+                "--codex-upstream is required with --client {} because Codex subscription upstreams are deployment-specific",
+                args.client
+            )
+        })?;
+        validate_http_url("--codex-upstream", upstream)?;
+        Some(upstream.to_string())
+    } else {
+        None
+    };
+
+    let config_path = args.config_path.unwrap_or(default_config_path()?);
+    let log_path = args.log_path.unwrap_or_else(default_subscription_log_path);
+    let existing = read_env_file(&config_path).unwrap_or_default();
+    let effective_bind_addr = env::var("BIND_ADDR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            existing
+                .get("BIND_ADDR")
+                .filter(|value| !value.trim().is_empty())
+                .cloned()
+        });
+    let proxy_url = args.proxy_url.unwrap_or_else(|| {
+        effective_bind_addr
+            .as_deref()
+            .and_then(subscription_proxy_url_from_bind)
+            .unwrap_or_else(|| "http://127.0.0.1:8088".to_string())
+    });
+    validate_http_url("--proxy-url", &proxy_url)?;
+    if let Some(parent) = log_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating subscription log directory {}", parent.display()))?;
+    }
+
+    let mut updates = BTreeMap::new();
+    if effective_bind_addr.is_none() {
+        // A subscription proxy should not be exposed on the network by accident.
+        updates.insert(
+            "BIND_ADDR".to_string(),
+            local_bind_addr_for_proxy_url(&proxy_url)
+                .unwrap_or_else(|| "127.0.0.1:8088".to_string()),
+        );
+    }
+    updates.insert(
+        "ROUTIIUM_SUBSCRIPTION_LOG_PATH".to_string(),
+        log_path.display().to_string(),
+    );
+    if wants_claude {
+        updates.insert(
+            "ROUTIIUM_CLAUDE_SUBSCRIPTION_BASE_URL".to_string(),
+            args.claude_upstream.clone(),
+        );
+    }
+    if let Some(codex_upstream) = codex_upstream.as_deref() {
+        updates.insert(
+            "ROUTIIUM_CODEX_SUBSCRIPTION_BASE_URL".to_string(),
+            codex_upstream.to_string(),
+        );
+    }
+    update_env_file(&config_path, &updates, args.force)?;
+
+    let codex_profile_path = if wants_codex {
+        let codex_home = args
+            .codex_home
+            .or_else(|| env::var_os("CODEX_HOME").map(PathBuf::from))
+            .or_else(|| {
+                env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|home| home.join(".codex"))
+            })
+            .ok_or_else(|| anyhow!("could not resolve Codex home; pass --codex-home"))?;
+        let profile_path = codex_home.join("routiium_subscription.config.toml");
+        write_new_file(
+            &profile_path,
+            &codex_profile_contents(&proxy_url),
+            args.force,
+        )?;
+        Some(profile_path)
+    } else {
+        None
+    };
+
+    if let Some(bind_addr) = effective_bind_addr.as_deref() {
+        if !subscription_bind_is_local(bind_addr) {
+            println!();
+            println!(
+                "Warning: existing BIND_ADDR={} is not local-only; protect the proxy with authenticated TLS and an access boundary.",
+                bind_addr
+            );
+        }
+    }
+
+    println!("Routiium subscription setup complete for {}.", args.client);
+    println!("Server config: {}", config_path.display());
+    println!("Usage log: {}", log_path.display());
+    println!();
+    println!("Start the proxy in another terminal:");
+    println!("  routiium serve --config {}", config_path.display());
+    println!(
+        "  routiium doctor --env-file {} --require-server",
+        config_path.display()
+    );
+    println!();
+    if wants_claude {
+        let claude_url = format!("{}/subscriptions/claude", proxy_url.trim_end_matches('/'));
+        println!("Claude Code:");
+        println!("  claude login");
+        println!("  ANTHROPIC_BASE_URL={} claude", claude_url);
+    }
+    if wants_codex {
+        println!("Codex:");
+        println!("  codex login");
+        println!("  codex --profile routiium_subscription");
+        if let Some(path) = codex_profile_path {
+            println!("  profile: {}", path.display());
+        }
+    }
+    println!();
+    println!("Routiium never stores the client login token; it appends redacted request/response records to the usage log.");
+    Ok(())
+}
+
+fn validate_http_url(flag: &str, value: &str) -> Result<()> {
+    let url =
+        reqwest::Url::parse(value.trim()).with_context(|| format!("{flag} must be a valid URL"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(anyhow!("{flag} must use http or https"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(anyhow!("{flag} must not contain embedded credentials"));
+    }
+    Ok(())
+}
+
+fn subscription_proxy_url_from_bind(bind_addr: &str) -> Option<String> {
+    let address = bind_addr.parse::<std::net::SocketAddr>().ok()?;
+    let host = match address.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_string(),
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => "127.0.0.1".to_string(),
+        std::net::IpAddr::V4(ip) => ip.to_string(),
+        std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    Some(format!("http://{host}:{}", address.port()))
+}
+
+fn local_bind_addr_for_proxy_url(proxy_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(proxy_url).ok()?;
+    let host = url.host_str()?;
+    if !matches!(host, "127.0.0.1" | "localhost" | "::1") {
+        return None;
+    }
+    Some(format!("127.0.0.1:{}", url.port()?))
+}
+
+fn subscription_bind_is_local(bind_addr: &str) -> bool {
+    bind_addr
+        .parse::<std::net::SocketAddr>()
+        .map(|address| address.ip().is_loopback())
+        .unwrap_or(false)
+}
+
+fn default_subscription_log_path() -> PathBuf {
+    if let Some(data_home) = env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(data_home)
+            .join("routiium")
+            .join("subscription_usage.jsonl");
+    }
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(local_app_data)
+            .join("routiium")
+            .join("subscription_usage.jsonl");
+    }
+    if let Some(home) = env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("routiium")
+            .join("subscription_usage.jsonl");
+    }
+    PathBuf::from("./data/subscription_usage.jsonl")
+}
+
+fn codex_profile_contents(proxy_url: &str) -> String {
+    format!(
+        "# Generated by routiium subscription setup.\n# Codex continues to own login and token refresh.\nmodel_provider = \"routiium_subscription\"\n\n[model_providers.routiium_subscription]\nname = \"Routiium subscription proxy\"\nbase_url = \"{}/subscriptions/codex\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
+        proxy_url.trim_end_matches('/')
+    )
 }
 
 async fn run_status(args: StatusArgs) -> Result<()> {
@@ -2445,15 +2758,29 @@ fn append_production_checks(checks: &mut Vec<Check>, file_env: &BTreeMap<String,
     ));
 
     let managed_mode = env_value_or_default(file_env, "ROUTIIUM_MANAGED_MODE", "1");
+    let subscription_mode = [
+        "ROUTIIUM_CLAUDE_SUBSCRIPTION_BASE_URL",
+        "ROUTIIUM_CODEX_SUBSCRIPTION_BASE_URL",
+    ]
+    .into_iter()
+    .any(|key| {
+        env_value(file_env, key)
+            .map(|value| is_real_env_value(&value))
+            .unwrap_or(false)
+    });
     checks.push(check(
         "production_managed_auth",
-        if env_value_enabled(&managed_mode) {
+        if env_value_enabled(&managed_mode) || subscription_mode {
             CheckStatus::Ok
         } else {
             CheckStatus::Error
         },
-        "production should use managed auth/API keys instead of passthrough client provider keys"
-            .to_string(),
+        if subscription_mode {
+            "subscription mode keeps login and token refresh in Claude Code/Codex; protect the proxy with localhost binding or authenticated TLS".to_string()
+        } else {
+            "production should use managed auth/API keys instead of passthrough client provider keys"
+                .to_string()
+        },
     ));
 
     let keys_backend = env_value_or_default(file_env, "ROUTIIUM_KEYS_BACKEND", "memory");
@@ -2903,6 +3230,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_subscription_setup() {
+        let cli = Cli::parse_from_compat([
+            "routiium",
+            "subscription",
+            "setup",
+            "--client",
+            "both",
+            "--codex-upstream",
+            "https://codex.example.test",
+            "--config-path",
+            "config.env",
+        ]);
+        match cli.command.unwrap() {
+            Command::Subscription(SubscriptionCommand::Setup(args)) => {
+                assert_eq!(args.client, SubscriptionClient::Both);
+                assert_eq!(
+                    args.codex_upstream.as_deref(),
+                    Some("https://codex.example.test")
+                );
+                assert_eq!(args.proxy_url, None);
+                assert_eq!(args.config_path, Some(PathBuf::from("config.env")));
+            }
+            _ => panic!("expected subscription setup"),
+        }
+    }
+
+    #[test]
     fn key_list_uses_standard_query_encoding_for_special_characters() {
         let args = KeyListArgs {
             http: AdminHttpArgs {
@@ -2975,6 +3329,29 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[tokio::test]
+    async fn doctor_accepts_subscription_only_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_file = dir.path().join(".env");
+        fs::write(
+            &env_file,
+            "BIND_ADDR=127.0.0.1:8088\nROUTIIUM_CLAUDE_SUBSCRIPTION_BASE_URL=https://api.anthropic.com\nROUTIIUM_SUBSCRIPTION_LOG_PATH=./data/subscription_usage.jsonl\n",
+        )
+        .unwrap();
+
+        let result = run_doctor(DoctorArgs {
+            url: "http://127.0.0.1:9".to_string(),
+            env_file: Some(env_file),
+            json: true,
+            check_router: false,
+            require_server: false,
+            production: false,
+        })
+        .await;
+
+        assert!(result.is_ok());
+    }
+
     #[test]
     fn parses_config_commands_and_synthetic_profile() {
         let cli = Cli::parse_from_compat([
@@ -3041,6 +3418,53 @@ mod tests {
         assert!(contents.contains("ROUTIIUM_CACHE_TTL_MS=0"));
         assert!(contents.contains("ROUTIIUM_JUDGE_MAX_TOKENS=1024"));
         assert!(contents.contains("A=1"));
+    }
+
+    #[test]
+    fn subscription_setup_writes_server_config_and_codex_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.env");
+        let log_path = dir.path().join("logs").join("subscription.jsonl");
+        let codex_home = dir.path().join("codex");
+
+        run_subscription_setup(SubscriptionSetupArgs {
+            client: SubscriptionClient::Both,
+            proxy_url: Some("http://127.0.0.1:8088".to_string()),
+            claude_upstream: "https://api.anthropic.com".to_string(),
+            codex_upstream: Some("https://codex.example.test".to_string()),
+            config_path: Some(config_path.clone()),
+            log_path: Some(log_path.clone()),
+            codex_home: Some(codex_home.clone()),
+            force: false,
+        })
+        .unwrap();
+
+        let config = fs::read_to_string(config_path).unwrap();
+        assert!(config.contains("BIND_ADDR=127.0.0.1:8088"));
+        assert!(config.contains("ROUTIIUM_CLAUDE_SUBSCRIPTION_BASE_URL=https://api.anthropic.com"));
+        assert!(config.contains("ROUTIIUM_CODEX_SUBSCRIPTION_BASE_URL=https://codex.example.test"));
+        assert!(config.contains(&format!(
+            "ROUTIIUM_SUBSCRIPTION_LOG_PATH={}",
+            log_path.display()
+        )));
+        let profile =
+            fs::read_to_string(codex_home.join("routiium_subscription.config.toml")).unwrap();
+        assert!(profile.contains("model_provider = \"routiium_subscription\""));
+        assert!(profile.contains("base_url = \"http://127.0.0.1:8088/subscriptions/codex\""));
+        assert!(log_path.parent().unwrap().is_dir());
+    }
+
+    #[test]
+    fn subscription_setup_derives_client_url_from_existing_bind() {
+        assert_eq!(
+            subscription_proxy_url_from_bind("0.0.0.0:8099").as_deref(),
+            Some("http://127.0.0.1:8099")
+        );
+        assert_eq!(
+            local_bind_addr_for_proxy_url("http://localhost:9000").as_deref(),
+            Some("127.0.0.1:9000")
+        );
+        assert!(local_bind_addr_for_proxy_url("https://proxy.example.test:443").is_none());
     }
 
     #[test]

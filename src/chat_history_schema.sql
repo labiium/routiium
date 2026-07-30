@@ -1,5 +1,5 @@
 -- Chat History SQL Schema
--- Compatible with SQLite, PostgreSQL, and Turso (libsql)
+-- Compatible with SQLite and PostgreSQL.
 
 -- Conversations table
 CREATE TABLE IF NOT EXISTS conversations (

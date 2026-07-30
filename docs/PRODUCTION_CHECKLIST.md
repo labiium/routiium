@@ -2,6 +2,8 @@
 
 Use this checklist before putting Routiium in front of untrusted users or tools.
 
+Read `docs/PRODUCTION_READINESS_REPORT.md` before rollout. Treat the documented constraints as deployment requirements, especially Router-delegated governance and the disabled Turso/libsql backend.
+
 ## 1. Start from the production doctor
 
 ```bash
@@ -78,6 +80,10 @@ MCP/browser/shell/database/cloud/payment tools should be available only to scope
 - [ ] Managed mode has a persistent API key store; startup must fail if managed mode cannot initialize the store.
 - [ ] `ROUTIIUM_ALLOW_MCP_CONFIG_UPDATE` is unset unless runtime MCP edits are required and admin access is strongly protected.
 - [ ] `/convert?include_internal_config=true` is not exposed publicly; it requires admin auth by default.
+- [ ] `cargo audit` exits 0; current accepted audit output is limited to `sled` unmaintained warnings.
+- [ ] Chat history does not use `ROUTIIUM_CHAT_HISTORY_PRIMARY=turso` or `libsql`; those backends are disabled until upstream RustSec advisories are resolved.
+- [ ] If `ROUTIIUM_GOVERNANCE_MODE=router`, `/ready` is healthy only with strict Router behavior and `ROUTIIUM_CACHE_TTL_MS=0`.
+- [ ] If `ROUTIIUM_EXACT_RESPONSE_CACHE=1`, the deployment accepts per-process cache scope or provides an external invalidation strategy.
 
 ## npm release publishing
 

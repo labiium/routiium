@@ -147,7 +147,12 @@ ROUTIIUM_ROUTER_URL=http://router:9090
 ROUTIIUM_ROUTER_STRICT=1
 ROUTIIUM_ROUTER_PRIVACY_MODE=full
 ROUTIIUM_CACHE_TTL_MS=0
+ROUTIIUM_GOVERNANCE_MODE=router
 ```
+
+`ROUTIIUM_GOVERNANCE_MODE=router` marks the Router as the budget/token/safety enforcement authority. In this mode `/ready` fails closed unless Routiium has an active router client, `ROUTIIUM_ROUTER_STRICT=1`, and `ROUTIIUM_CACHE_TTL_MS=0`. This prevents load balancers from sending production traffic through a gateway that would silently fall back or reuse stale route plans while governance is delegated out of process.
+
+`ROUTIIUM_EXACT_RESPONSE_CACHE=1` enables a narrow in-memory exact-match response cache for non-streaming responses. Routiium only caches successful responses for route plans with explicit safe cache metadata: `content_used: "none"` and judge metadata with `cacheable: true`. Plans that use request content, omit judge cache metadata, set `cache.ttl_ms: 0`, stream output, or receive client `Cache-Control: no-store`/`no-cache` bypass the cache. Exact response caching is disabled when `ROUTIIUM_GOVERNANCE_MODE=router` so governed requests reach the Router fail-closed boundary. Use `POST /admin/cache/exact/clear` with admin auth to invalidate all entries.
 
 ---
 
@@ -897,7 +902,11 @@ curl http://localhost:8088/analytics/events?limit=500 | jq '
 | `ROUTIIUM_JUDGE_RECENT_TOKEN_BUDGET` | `4000` | Approximate full-mode token budget for router/judge recent-message context. |
 | `ROUTIIUM_ROUTER_STRICT` | unset | When truthy (`1`, `true`, `yes`, `on`), fail client requests if routing fails. |
 | `ROUTIIUM_ROUTER_MTLS` | unset | Enable mutual TLS for router calls (certs must already exist on the host). |
-| `ROUTIIUM_CACHE_TTL_MS` | `15000` | Cache horizon for router plans when using `HttpRouterClient`. |
+| `ROUTIIUM_CACHE_TTL_MS` | `15000` | Cache horizon for router plans when using `HttpRouterClient`; bounded by Router `valid_until`, and bypassed for freeze-keyed plans. |
+| `ROUTIIUM_GOVERNANCE_MODE` | `off` | Set to `router` only when Router is the fail-closed budget/token/safety enforcement authority. Requires strict router mode and zero plan cache for `/ready`. |
+| `ROUTIIUM_EXACT_RESPONSE_CACHE` | unset | Enable opt-in non-streaming exact response caching for route plans with safe cache metadata. |
+| `ROUTIIUM_EXACT_RESPONSE_CACHE_TTL_MS` | `60000` | TTL for exact response cache entries. |
+| `ROUTIIUM_EXACT_RESPONSE_CACHE_MAX_ENTRIES` | `1024` | Maximum in-memory exact response cache entries per gateway process. |
 | `ROUTIIUM_BACKENDS` | unset | Semicolon-separated fallback rules (`prefix=edu,base=https://...,key_env=OPENAI_API_KEY,mode=responses`). |
 | `ROUTER_JUDGE_MODE` | `off` | Example Router judge mode (`off`, `shadow`, `enforce`). |
 | `ROUTER_JUDGE_CONTEXT` | `full` | Example Router judge context profile (`features`, `summary`, `full`). |
