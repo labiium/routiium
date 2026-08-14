@@ -315,6 +315,7 @@ async fn test_status_endpoint_includes_new_routes() {
     let source_revision = body_json["component_profile"]["source_revision"]
         .as_str()
         .unwrap();
+    assert_eq!(source_revision, env!("ROUTIIUM_BUILD_REVISION"));
     assert!(
         source_revision == "unknown" || {
             source_revision.len() == 40
