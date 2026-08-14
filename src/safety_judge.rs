@@ -197,6 +197,8 @@ pub struct SafetyDecision {
     pub cacheable: bool,
     pub llm_used: bool,
     pub selector: Option<JudgeSelectorDecision>,
+    pub profile: String,
+    pub gates: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -303,6 +305,8 @@ impl SafetyDecision {
             cacheable: true,
             llm_used: false,
             selector: None,
+            profile: "standard".to_string(),
+            gates: vec!["content".to_string(), "safety_judge".to_string()],
         }
     }
 
@@ -333,6 +337,8 @@ impl SafetyDecision {
     #[must_use]
     pub fn metadata(&self) -> JudgeMetadata {
         JudgeMetadata {
+            profile: Some(self.profile.clone()),
+            gates: Some(self.gates.clone()),
             id: Some(self.id.clone()),
             action: Some(self.action.as_str().to_string()),
             mode: Some(self.mode.as_str().to_string()),
@@ -390,6 +396,37 @@ pub struct SafetyJudgeConfig {
     pub policy_fingerprint: String,
     pub web_judge: WebJudgeMode,
     pub selector: Option<JudgeSelectorConfig>,
+    /// Explicit traffic profile. `bench` disables content/safety judge gates.
+    pub profile: String,
+}
+
+#[must_use]
+pub fn patchbay_profile_from_env() -> String {
+    match std::env::var("PATCHBAY_PROFILE") {
+        Ok(value) if value.trim().eq_ignore_ascii_case("bench") => "bench".to_string(),
+        _ => "standard".to_string(),
+    }
+}
+
+#[must_use]
+pub fn is_bench_profile() -> bool {
+    patchbay_profile_from_env() == "bench"
+}
+
+fn profile_gates(profile: &str) -> Vec<String> {
+    if profile == "bench" {
+        Vec::new()
+    } else {
+        vec!["content".to_string(), "safety_judge".to_string()]
+    }
+}
+
+impl SafetyDecision {
+    fn with_profile(mut self, config: &SafetyJudgeConfig) -> Self {
+        self.profile.clone_from(&config.profile);
+        self.gates = profile_gates(&config.profile);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -550,6 +587,7 @@ impl SafetyJudgeConfig {
             policy_fingerprint: policy_fingerprint(&policy),
             web_judge: WebJudgeMode::from_env(),
             selector: JudgeSelectorConfig::from_policy_and_env(policy.judge_selector.clone()),
+            profile: patchbay_profile_from_env(),
         }
     }
 
@@ -605,6 +643,7 @@ impl SafetyJudgeConfig {
             policy_fingerprint: app_policy_fingerprint(policy),
             web_judge: base.web_judge,
             selector: policy.selector.clone().or(base.selector),
+            profile: base.profile,
         }
     }
 }
@@ -755,8 +794,15 @@ pub async fn judge_request(
     client: Option<&reqwest::Client>,
     req: &RouteRequest,
 ) -> SafetyDecision {
+    if config.profile == "bench" {
+        return SafetyDecision::allow(
+            config.mode,
+            "bench profile: content and safety judge gates disabled",
+        )
+        .with_profile(config);
+    }
     if matches!(config.mode, SafetyMode::Off) {
-        return SafetyDecision::allow(config.mode, "judge disabled");
+        return SafetyDecision::allow(config.mode, "judge disabled").with_profile(config);
     }
 
     let text = request_text(req);
@@ -777,10 +823,10 @@ pub async fn judge_request(
                     .policy_fingerprint
                     .clone_from(&config.policy_fingerprint);
                 decision.selector = selector;
-                return decision;
+                return decision.with_profile(config);
             }
             Some(JudgeSelectorAction::Deny) => {
-                return selector_denial(config, selector);
+                return selector_denial(config, selector).with_profile(config);
             }
             Some(JudgeSelectorAction::Judge) | None => {}
         }
@@ -793,7 +839,7 @@ pub async fn judge_request(
         decision.selector.as_ref().map(|selector| selector.action),
         Some(JudgeSelectorAction::Deny)
     ) {
-        return selector_denial(config, decision.selector);
+        return selector_denial(config, decision.selector).with_profile(config);
     }
 
     let selector_allows_llm = decision
@@ -830,7 +876,7 @@ pub async fn judge_request(
         }
     }
 
-    decision
+    decision.with_profile(config)
 }
 
 fn selector_denial(
@@ -855,11 +901,16 @@ fn selector_denial(
         cacheable: false,
         llm_used: false,
         selector,
+        profile: config.profile.clone(),
+        gates: profile_gates(&config.profile),
     }
 }
 
 #[must_use]
 pub fn response_guard_mode_from_env() -> SafetyMode {
+    if patchbay_profile_from_env() == "bench" {
+        return SafetyMode::Off;
+    }
     let value = std::env::var("ROUTIIUM_RESPONSE_GUARD")
         .or_else(|_| std::env::var("ROUTIIUM_RESPONSE_GUARD_MODE"));
     value.map_or_else(
@@ -875,6 +926,9 @@ pub fn response_guard_mode_from_env() -> SafetyMode {
 
 #[must_use]
 pub fn streaming_safety_mode_from_env() -> StreamingSafetyMode {
+    if patchbay_profile_from_env() == "bench" {
+        return StreamingSafetyMode::Off;
+    }
     StreamingSafetyMode::from_env()
 }
 
@@ -976,6 +1030,9 @@ pub fn guard_response_text_with_mode(text: &str, mode: SafetyMode) -> ResponseGu
 }
 
 pub fn guard_tool_results_in_request(body: &mut Value) -> Option<ToolResultGuardOutcome> {
+    if patchbay_profile_from_env() == "bench" {
+        return None;
+    }
     let policy = JudgePolicyFile::from_env().tool_result_guard;
     let mode = std::env::var("ROUTIIUM_TOOL_RESULT_GUARD")
         .ok()
@@ -1038,6 +1095,9 @@ pub fn guard_tool_results_with_policy(
     body: &mut Value,
     policy: Option<&crate::app_config::ToolResultPolicyConfig>,
 ) -> Option<ToolResultGuardOutcome> {
+    if patchbay_profile_from_env() == "bench" {
+        return None;
+    }
     let Some(policy) = policy else {
         return guard_tool_results_in_request(body);
     };
@@ -1301,6 +1361,8 @@ fn deterministic_decision(
         cacheable,
         llm_used: false,
         selector: None,
+        profile: config.profile.clone(),
+        gates: profile_gates(&config.profile),
     }
 }
 
@@ -1671,6 +1733,8 @@ fn decision_from_llm_payload(
         cacheable: false,
         llm_used: true,
         selector: None,
+        profile: config.profile.clone(),
+        gates: profile_gates(&config.profile),
     }
 }
 
@@ -2164,6 +2228,7 @@ mod tests {
             policy_fingerprint: builtin_policy_fingerprint(),
             web_judge: WebJudgeMode::Restricted,
             selector: None,
+            profile: "standard".to_string(),
         };
         let body = llm_judge_body(
             &config,
@@ -2235,6 +2300,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bench_profile_disables_response_stream_and_tool_gates() {
+        std::env::set_var("PATCHBAY_PROFILE", "bench");
+        std::env::set_var("ROUTIIUM_RESPONSE_GUARD", "enforce");
+        std::env::set_var("ROUTIIUM_STREAMING_SAFETY", "force_non_stream");
+        std::env::set_var("ROUTIIUM_TOOL_RESULT_GUARD", "omit");
+        let mut body = serde_json::json!({
+            "messages": [{"role": "tool", "content": "secret"}]
+        });
+        assert_eq!(response_guard_mode_from_env(), SafetyMode::Off);
+        assert_eq!(streaming_safety_mode_from_env(), StreamingSafetyMode::Off);
+        assert!(guard_tool_results_in_request(&mut body).is_none());
+        std::env::remove_var("PATCHBAY_PROFILE");
+        std::env::remove_var("ROUTIIUM_RESPONSE_GUARD");
+        std::env::remove_var("ROUTIIUM_STREAMING_SAFETY");
+        std::env::remove_var("ROUTIIUM_TOOL_RESULT_GUARD");
+    }
+
     #[tokio::test]
     async fn deterministic_judge_denies_secret_exfiltration() {
         let config = SafetyJudgeConfig {
@@ -2254,6 +2337,7 @@ mod tests {
             policy_fingerprint: builtin_policy_fingerprint(),
             web_judge: WebJudgeMode::Restricted,
             selector: None,
+            profile: "standard".to_string(),
         };
         let decision = judge_request(
             &config,
@@ -2285,6 +2369,7 @@ mod tests {
             policy_fingerprint: builtin_policy_fingerprint(),
             web_judge: WebJudgeMode::Restricted,
             selector: None,
+            profile: "standard".to_string(),
         };
         let decision = judge_request(
             &config,

@@ -276,6 +276,7 @@ async fn test_convert_with_system_prompt() {
 )]
 #[actix_web::test]
 async fn test_status_endpoint_includes_new_routes() {
+    std::env::remove_var("PATCHBAY_PROFILE");
     let app_state = AppState::default();
     let app = test::init_service(
         App::new()
@@ -305,6 +306,18 @@ async fn test_status_endpoint_includes_new_routes() {
     assert!(route_strings.contains(&"/reload/mcp".to_string()));
     assert!(route_strings.contains(&"/reload/system_prompt".to_string()));
     assert!(route_strings.contains(&"/reload/all".to_string()));
+    assert_eq!(
+        body_json["component_profile"]["schema"],
+        "mesurii.component-profile.v1"
+    );
+    assert_eq!(body_json["component_profile"]["component"], "patchbay");
+    assert_eq!(body_json["component_profile"]["profile"], "standard");
+    assert_eq!(body_json["component_profile"]["ready"], true);
+    assert_eq!(body_json["component_profile"]["effective_mode"], "protect");
+    assert_eq!(
+        body_json["component_profile"]["gates"],
+        json!(["content", "safety_judge"])
+    );
 }
 
 #[allow(

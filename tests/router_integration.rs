@@ -113,6 +113,8 @@ fn basic_responses_body() -> serde_json::Value {
 
 fn cacheable_judge() -> JudgeMetadata {
     JudgeMetadata {
+        profile: Some("standard".to_string()),
+        gates: Some(vec!["content".to_string(), "safety_judge".to_string()]),
         id: Some("jdg_cacheable".to_string()),
         action: Some("route".to_string()),
         mode: Some("enforce".to_string()),
@@ -140,6 +142,7 @@ fn clear_router_env() {
     std::env::remove_var("ROUTIIUM_EXACT_RESPONSE_CACHE_TTL_MS");
     std::env::remove_var("ROUTIIUM_EXACT_RESPONSE_CACHE_MAX_ENTRIES");
     std::env::remove_var("ROUTIIUM_REJECTION_MODE");
+    std::env::remove_var("PATCHBAY_PROFILE");
     std::env::remove_var("ROUTIIUM_ADMIN_TOKEN");
     std::env::remove_var("OPENAI_BASE_URL");
 }
@@ -257,6 +260,86 @@ async fn router_headers_are_forwarded() {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
+    reason = "Bench handshake integration fixtures intentionally fail fast"
+)]
+#[actix_web::test]
+async fn bench_accepts_certified_remote_plan_without_legacy_fallback() {
+    let _guard = ENV_GUARD.lock().await;
+    clear_router_env();
+    std::env::set_var("PATCHBAY_PROFILE", "bench");
+    let mut plan = sample_plan("rte_bench_certified", "gpt-4o-mini");
+    plan.judge = Some(JudgeMetadata {
+        profile: Some("bench".to_string()),
+        gates: Some(Vec::new()),
+        action: Some("allow".to_string()),
+        verdict: Some("allow".to_string()),
+        ..Default::default()
+    });
+    let router = RouterStub::start(RouterResponseConfig::Plan(Box::new(plan))).await;
+    let state = build_app_state(&router.url(), 0);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(config_routes),
+    )
+    .await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/v1/responses")
+            .insert_header(("Authorization", "Bearer router-test"))
+            .set_json(basic_responses_body())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(router.calls(), 1);
+    assert_ne!(resp.status().as_u16(), 503);
+    std::env::remove_var("PATCHBAY_PROFILE");
+}
+
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "Bench handshake integration fixtures intentionally fail fast"
+)]
+#[actix_web::test]
+async fn bench_rejects_uncertified_remote_plan_without_legacy_fallback() {
+    let _guard = ENV_GUARD.lock().await;
+    clear_router_env();
+    std::env::set_var("PATCHBAY_PROFILE", "bench");
+    let router = RouterStub::start(RouterResponseConfig::Plan(Box::new(sample_plan(
+        "rte_bench_uncertified",
+        "gpt-4o-mini",
+    ))))
+    .await;
+    let state = build_app_state(&router.url(), 0);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(config_routes),
+    )
+    .await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/v1/responses")
+            .insert_header(("Authorization", "Bearer router-test"))
+            .set_json(basic_responses_body())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(router.calls(), 1);
+    assert_eq!(resp.status().as_u16(), 503);
+    let body: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(body["error"]["code"], "BENCH_ROUTER_UNCERTIFIED");
+    std::env::remove_var("PATCHBAY_PROFILE");
+}
+
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
     reason = "integration tests intentionally fail fast on malformed fixtures"
 )]
 #[actix_web::test]
@@ -267,6 +350,8 @@ async fn router_judge_headers_are_forwarded() {
 
     let mut plan = sample_plan("rte_judged", "gpt-4o-mini");
     plan.judge = Some(JudgeMetadata {
+        profile: Some("standard".to_string()),
+        gates: Some(vec!["content".to_string(), "safety_judge".to_string()]),
         id: None,
         action: Some("route".to_string()),
         mode: Some("enforce".to_string()),

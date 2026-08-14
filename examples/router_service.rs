@@ -371,6 +371,8 @@ async fn get_catalog(state: web::Data<RouterState>, req: HttpRequest) -> impl Re
 
 fn judge_metadata(config: &JudgeConfig, decision: &JudgeDecision) -> JudgeMetadata {
     JudgeMetadata {
+        profile: Some("standard".to_string()),
+        gates: Some(vec!["content".to_string(), "safety_judge".to_string()]),
         id: None,
         action: Some(
             match decision.verdict.as_str() {

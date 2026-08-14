@@ -211,6 +211,9 @@ fn apply_yaml_system_prompt(
 fn alias_response_guard_mode(
     alias: Option<&crate::app_config::EffectiveAliasConfig>,
 ) -> crate::safety_judge::SafetyMode {
+    if crate::safety_judge::is_bench_profile() {
+        return crate::safety_judge::SafetyMode::Off;
+    }
     alias
         .and_then(|alias| alias.response_guard_policy.as_ref())
         .map_or_else(
@@ -222,6 +225,9 @@ fn alias_response_guard_mode(
 fn alias_streaming_safety_mode(
     alias: Option<&crate::app_config::EffectiveAliasConfig>,
 ) -> crate::safety_judge::StreamingSafetyMode {
+    if crate::safety_judge::is_bench_profile() {
+        return crate::safety_judge::StreamingSafetyMode::Off;
+    }
     alias
         .and_then(|alias| alias.response_guard_policy.as_ref())
         .map_or_else(
@@ -1508,6 +1514,36 @@ fn strip_high_risk_tools(body: &mut serde_json::Value) {
     }
 }
 
+fn bench_remote_rejection(message: impl Into<String>) -> RouteError {
+    let message = message.into();
+    RouteError::Rejected {
+        status: 503,
+        code: Some("BENCH_ROUTER_UNCERTIFIED".to_string()),
+        message: message.clone(),
+        policy_rev: None,
+        retry_hint_ms: None,
+        body: Some(serde_json::json!({
+            "error": {
+                "code": "BENCH_ROUTER_UNCERTIFIED",
+                "message": message,
+                "component": "patchbay",
+                "profile": "bench",
+                "effective_mode": "off",
+                "gates": []
+            }
+        })),
+    }
+}
+
+fn bench_plan_is_certified(plan: &RoutePlan) -> bool {
+    plan.judge.as_ref().is_some_and(|judge| {
+        judge.profile.as_deref() == Some("bench")
+            && judge.gates.as_deref().is_some_and(<[String]>::is_empty)
+            && judge.action.as_deref() == Some("allow")
+            && judge.verdict.as_deref() == Some("allow")
+    })
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "Endpoint orchestration preserves existing request flow"
@@ -1595,6 +1631,11 @@ async fn resolve_upstream(
                 extract_route_request(requested_model.as_str(), api, body, privacy_mode);
             match router.plan(&route_request).await {
                 Ok(mut plan) => {
+                    if crate::safety_judge::is_bench_profile() && !bench_plan_is_certified(&plan) {
+                        return Err(bench_remote_rejection(
+                            "remote router plan did not advertise profile=bench and gates=[]",
+                        ));
+                    }
                     if judge_route_requires_tool_stripping(&plan) {
                         strip_high_risk_tools(body);
                         if let Some(judge) = plan.judge.as_mut() {
@@ -1622,7 +1663,10 @@ async fn resolve_upstream(
                     });
                 }
                 Err(e) => {
-                    if strict_mode || matches!(e, RouteError::Rejected { .. }) {
+                    if strict_mode
+                        || crate::safety_judge::is_bench_profile()
+                        || matches!(e, RouteError::Rejected { .. })
+                    {
                         return Err(e);
                     }
                     tracing::debug!(
@@ -5436,6 +5480,7 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
         .ok()
         .is_some_and(|value| !value.trim().is_empty());
     let (_, governance) = governance_readiness(&state);
+    let patchbay_bench = crate::safety_judge::is_bench_profile();
 
     // Get analytics status
     let analytics_enabled = state.analytics.is_some();
@@ -5498,6 +5543,14 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
             "web_judge": safety_config.web_judge.as_str(),
             "response_guard_mode": response_guard_mode.as_str(),
             "streaming_safety": streaming_safety_mode.as_str()
+        },
+        "component_profile": {
+            "schema": "mesurii.component-profile.v1",
+            "component": "patchbay",
+            "profile": safety_config.profile.clone(),
+            "ready": true,
+            "effective_mode": if patchbay_bench { "off" } else { safety_config.mode.as_str() },
+            "gates": if patchbay_bench { serde_json::json!([]) } else { serde_json::json!(["content", "safety_judge"]) }
         },
         "features": {
             "auth": {
