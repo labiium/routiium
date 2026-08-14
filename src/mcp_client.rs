@@ -127,7 +127,9 @@ impl McpServerClient {
     async fn send_request(&mut self, method: &str, params: Value) -> Result<JsonRpcMessage> {
         let mut id_guard = self.next_id.lock().await;
         let id = *id_guard;
-        *id_guard += 1;
+        *id_guard = id_guard
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("MCP request id exhausted"))?;
         drop(id_guard);
 
         let message = JsonRpcMessage {
@@ -141,7 +143,7 @@ impl McpServerClient {
 
         let message_json = serde_json::to_string(&message)?;
         self.stdin
-            .write_all(format!("{}\n", message_json).as_bytes())
+            .write_all(format!("{message_json}\n").as_bytes())
             .await?;
         self.stdin.flush().await?;
 
@@ -167,7 +169,7 @@ impl McpServerClient {
 
         let message_json = serde_json::to_string(&message)?;
         self.stdin
-            .write_all(format!("{}\n", message_json).as_bytes())
+            .write_all(format!("{message_json}\n").as_bytes())
             .await?;
         self.stdin.flush().await?;
 
@@ -228,6 +230,9 @@ pub struct McpClientManager {
 
 impl McpClientManager {
     /// Create a new MCP client manager from configuration
+    ///
+    /// # Errors
+    /// Returns an error if client manager initialization fails.
     pub async fn new(config: McpConfig) -> Result<Self> {
         let mut clients = HashMap::new();
 
@@ -248,10 +253,13 @@ impl McpClientManager {
 
         info!("Connected to {} MCP servers", clients.len());
 
-        Ok(McpClientManager { clients, config })
+        Ok(Self { clients, config })
     }
 
     /// Get all available tools from all connected MCP servers
+    ///
+    /// # Errors
+    /// Returns an error if an internal client operation fails.
     pub async fn list_all_tools(&self) -> Result<Vec<McpTool>> {
         let mut all_tools = Vec::new();
 
@@ -282,6 +290,9 @@ impl McpClientManager {
     }
 
     /// Execute a tool on the appropriate MCP server
+    ///
+    /// # Errors
+    /// Returns an error when the server is unavailable or tool execution fails.
     pub async fn call_tool(
         &self,
         server_name: &str,
@@ -291,7 +302,7 @@ impl McpClientManager {
         let client_mutex = self
             .clients
             .get(server_name)
-            .ok_or_else(|| anyhow::anyhow!("MCP server '{}' not found", server_name))?;
+            .ok_or_else(|| anyhow::anyhow!("MCP server '{server_name}' not found"))?;
 
         debug!(
             "Calling tool {} on server {} with args: {}",
@@ -303,6 +314,7 @@ impl McpClientManager {
     }
 
     /// Get the list of connected server names
+    #[must_use]
     pub fn connected_servers(&self) -> Vec<String> {
         self.clients.keys().cloned().collect()
     }
@@ -318,7 +330,8 @@ pub struct McpTool {
 }
 
 impl McpTool {
-    /// Convert to OpenAI tool definition format
+    /// Convert to `OpenAI` tool definition format
+    #[must_use]
     pub fn to_openai_tool(&self) -> Value {
         serde_json::json!({
             "type": "function",
@@ -330,14 +343,11 @@ impl McpTool {
         })
     }
 
-    /// Extract server name and tool name from a combined tool name (e.g., "filesystem_read_file")
+    /// Extract server name and tool name from a combined tool name (e.g., "`filesystem_read_file`")
+    #[must_use]
     pub fn parse_combined_name(combined_name: &str) -> Option<(String, String)> {
-        if let Some(pos) = combined_name.find('_') {
-            let server_name = combined_name[..pos].to_string();
-            let tool_name = combined_name[pos + 1..].to_string();
-            Some((server_name, tool_name))
-        } else {
-            None
-        }
+        combined_name
+            .split_once('_')
+            .map(|(server_name, tool_name)| (server_name.to_string(), tool_name.to_string()))
     }
 }

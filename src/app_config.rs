@@ -68,20 +68,23 @@ pub struct ProviderConfig {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderMode {
     #[default]
     Responses,
     Chat,
     Bedrock,
+    #[serde(alias = "bedrock-mantle", alias = "mantle")]
+    BedrockMantle,
 }
 
 impl From<ProviderMode> for UpstreamMode {
     fn from(value: ProviderMode) -> Self {
         match value {
-            ProviderMode::Responses => UpstreamMode::Responses,
-            ProviderMode::Chat => UpstreamMode::Chat,
-            ProviderMode::Bedrock => UpstreamMode::Bedrock,
+            ProviderMode::Responses => Self::Responses,
+            ProviderMode::Chat => Self::Chat,
+            ProviderMode::Bedrock => Self::Bedrock,
+            ProviderMode::BedrockMantle => Self::BedrockMantle,
         }
     }
 }
@@ -108,7 +111,7 @@ pub struct SystemPromptPolicyConfig {
     pub prompts: Vec<String>,
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
@@ -234,15 +237,23 @@ pub struct EffectiveAliasConfig {
 }
 
 impl RoutiiumConfig {
+    /// # Errors
+    /// Returns an error when the file cannot be read, parsed, or compiled.
     pub fn load_yaml(path: impl AsRef<Path>) -> Result<CompiledRuntimeConfig> {
         let path_ref = path.as_ref();
         let contents = std::fs::read_to_string(path_ref)
             .with_context(|| format!("reading {}", path_ref.display()))?;
-        let raw: RoutiiumConfig = serde_yaml::from_str(&contents)
+        let raw: Self = serde_yaml::from_str(&contents)
             .with_context(|| format!("parsing YAML {}", path_ref.display()))?;
         raw.compile(Some(path_ref.display().to_string()))
     }
 
+    /// # Errors
+    /// Returns an error when any alias references invalid or missing configuration.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "configuration compilation is intentionally kept together"
+    )]
     pub fn compile(self, path: Option<String>) -> Result<CompiledRuntimeConfig> {
         let mut aliases = HashMap::new();
         for (alias, model_alias) in &self.model_aliases {
@@ -288,14 +299,13 @@ impl RoutiiumConfig {
                 "system_prompt_policy",
             )?;
             let (system_prompt_policy_id, system_prompt_policy) =
-                if let Some(inline) = model_alias.system_prompt.clone() {
-                    (Some(format!("inline:{alias}")), Some(inline))
-                } else {
+                model_alias.system_prompt.clone().map_or(
                     (
                         referenced_system_prompt_policy_id,
                         referenced_system_prompt_policy,
-                    )
-                };
+                    ),
+                    |inline| (Some(format!("inline:{alias}")), Some(inline)),
+                );
             let response_guard_policy_id = model_alias
                 .response_guard_policy
                 .clone()
@@ -319,14 +329,18 @@ impl RoutiiumConfig {
             if let Some(bundle) = &mcp_bundle {
                 for server in &bundle.servers {
                     if !self.mcp_servers.contains_key(server) {
-                        return Err(anyhow!("model_aliases.{alias} mcp_bundle references unknown MCP server {server}"));
+                        return Err(anyhow!(
+                            "model_aliases.{alias} mcp_bundle references unknown MCP server {server}"
+                        ));
                     }
                 }
             }
             if let Some(policy) = &tool_result_policy {
                 for pattern in &policy.tool_regex {
                     Regex::new(pattern).with_context(|| {
-                        format!("model_aliases.{alias} tool_result_policy has invalid regex {pattern:?}")
+                        format!(
+                            "model_aliases.{alias} tool_result_policy has invalid regex {pattern:?}"
+                        )
                     })?;
                 }
             }
@@ -345,7 +359,7 @@ impl RoutiiumConfig {
                     ));
                 }
             }
-            let policy_fingerprint = alias_policy_fingerprint(serde_json::json!({
+            let policy_fingerprint = alias_policy_fingerprint(&serde_json::json!({
                 "alias": alias,
                 "provider_id": provider_id,
                 "model_alias": model_alias,
@@ -363,7 +377,9 @@ impl RoutiiumConfig {
             let policy_rev = format!(
                 "yaml:{}:{}",
                 alias.replace(|c: char| !c.is_ascii_alphanumeric(), "_"),
-                &policy_fingerprint["sha256:".len()..]
+                policy_fingerprint
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&policy_fingerprint)
                     .chars()
                     .take(12)
                     .collect::<String>()
@@ -400,21 +416,28 @@ impl RoutiiumConfig {
     }
 }
 
-fn alias_policy_fingerprint(value: serde_json::Value) -> Result<String> {
-    let canonical = serde_json::to_string(&value)?;
+fn alias_policy_fingerprint(value: &serde_json::Value) -> Result<String> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    canonical.hash(&mut hasher);
+    serde_json::to_string(value)?.hash(&mut hasher);
     Ok(format!("sha256:{:016x}", hasher.finish()))
 }
 
 fn validate_response_guard_policy(alias: &str, policy: &ResponseGuardPolicyConfig) -> Result<()> {
     match policy.mode.trim().to_ascii_lowercase().as_str() {
         "off" | "shadow" | "protect" | "enforce" => {}
-        _ => return Err(anyhow!("model_aliases.{alias} response_guard_policy.mode must be off, shadow, protect, or enforce")),
+        _ => {
+            return Err(anyhow!(
+                "model_aliases.{alias} response_guard_policy.mode must be off, shadow, protect, or enforce"
+            ));
+        }
     }
     match policy.streaming_safety.trim().to_ascii_lowercase().as_str() {
         "off" | "chunk" | "buffer" | "force_non_stream" | "forcenonstream" => {}
-        _ => return Err(anyhow!("model_aliases.{alias} response_guard_policy.streaming_safety must be off, chunk, buffer, or force_non_stream")),
+        _ => {
+            return Err(anyhow!(
+                "model_aliases.{alias} response_guard_policy.streaming_safety must be off, chunk, buffer, or force_non_stream"
+            ));
+        }
     }
     Ok(())
 }
@@ -425,25 +448,26 @@ fn resolve_optional<T: Clone>(
     alias: &str,
     field: &str,
 ) -> Result<Option<T>> {
-    match id {
-        Some(id) => map
-            .get(id)
+    id.map_or(Ok(None), |id| {
+        map.get(id)
             .cloned()
             .map(Some)
-            .ok_or_else(|| anyhow!("model_aliases.{alias} references unknown {field} {id}")),
-        None => Ok(None),
-    }
+            .ok_or_else(|| anyhow!("model_aliases.{alias} references unknown {field} {id}"))
+    })
 }
 
 impl CompiledRuntimeConfig {
+    #[must_use]
     pub fn alias(&self, alias: &str) -> Option<Arc<EffectiveAliasConfig>> {
         self.aliases.get(alias).cloned()
     }
 
+    #[must_use]
     pub fn alias_count(&self) -> usize {
         self.aliases.len()
     }
 
+    #[must_use]
     pub fn mcp_config(&self) -> Option<McpConfig> {
         (!self.raw.mcp_servers.is_empty()).then(|| McpConfig {
             mcp_servers: self.raw.mcp_servers.clone(),
@@ -452,6 +476,7 @@ impl CompiledRuntimeConfig {
 }
 
 impl EffectiveAliasConfig {
+    #[must_use]
     pub fn upstream_config(&self) -> UpstreamConfig {
         UpstreamConfig {
             base_url: self.provider.base_url.clone(),
@@ -462,6 +487,7 @@ impl EffectiveAliasConfig {
         }
     }
 
+    #[must_use]
     pub fn route_plan(&self, judge: Option<JudgeMetadata>) -> RoutePlan {
         let upstream = self.upstream_config();
         RoutePlan {
@@ -472,9 +498,9 @@ impl EffectiveAliasConfig {
                     .replace(|c: char| !c.is_ascii_alphanumeric(), "_")
             ),
             upstream,
-            limits: Default::default(),
+            limits: crate::router_client::RouteLimits::default(),
             prompt_overlays: None,
-            hints: Default::default(),
+            hints: crate::router_client::RouteHints::default(),
             fallbacks: Vec::new(),
             cache: Some(crate::router_client::CacheControl {
                 ttl_ms: 0,
@@ -498,7 +524,8 @@ impl EffectiveAliasConfig {
     }
 }
 
-pub fn sample_yaml() -> &'static str {
+#[must_use]
+pub const fn sample_yaml() -> &'static str {
     r#"defaults:
   provider: openai
   judge_policy: protect_default
@@ -560,6 +587,7 @@ model_aliases:
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test fixtures are fixed")]
 mod tests {
     use super::*;
 

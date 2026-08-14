@@ -33,6 +33,7 @@ pub struct AnalyticsOutcome {
 }
 
 impl AnalyticsContext {
+    #[must_use]
     pub fn new(req: &ServiceRequest) -> Self {
         let start_time = Instant::now();
         let timestamp = current_timestamp();
@@ -45,7 +46,7 @@ impl AnalyticsContext {
             .headers()
             .get("user-agent")
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
 
         // Try to extract client IP from various headers
         let client_ip = req
@@ -93,31 +94,37 @@ impl AnalyticsContext {
         }
     }
 
+    #[must_use]
     pub fn with_model(mut self, model: Option<String>) -> Self {
         self.request_metadata.model = model;
         self
     }
 
-    pub fn with_stream(mut self, stream: bool) -> Self {
+    #[must_use]
+    pub const fn with_stream(mut self, stream: bool) -> Self {
         self.request_metadata.stream = stream;
         self
     }
 
-    pub fn with_size(mut self, size_bytes: usize) -> Self {
+    #[must_use]
+    pub const fn with_size(mut self, size_bytes: usize) -> Self {
         self.request_metadata.size_bytes = size_bytes;
         self
     }
 
-    pub fn with_message_count(mut self, count: usize) -> Self {
+    #[must_use]
+    pub const fn with_message_count(mut self, count: usize) -> Self {
         self.request_metadata.message_count = Some(count);
         self
     }
 
-    pub fn with_input_tokens(mut self, tokens: u64) -> Self {
+    #[must_use]
+    pub const fn with_input_tokens(mut self, tokens: u64) -> Self {
         self.request_metadata.input_tokens = Some(tokens);
         self
     }
 
+    #[must_use]
     pub fn with_auth(
         mut self,
         authenticated: bool,
@@ -133,6 +140,7 @@ impl AnalyticsContext {
         self
     }
 
+    #[must_use]
     pub fn with_routing(
         mut self,
         backend: String,
@@ -155,7 +163,7 @@ impl AnalyticsContext {
         pricing: &crate::pricing::PricingConfig,
         outcome: AnalyticsOutcome,
     ) {
-        let duration_ms = self.start_time.elapsed().as_millis() as u64;
+        let duration_ms = u64::try_from(self.start_time.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         let response_metadata = ResponseMetadata {
             status_code: outcome.status_code,
@@ -167,15 +175,13 @@ impl AnalyticsContext {
         };
 
         // Calculate tokens per second if we have output tokens
-        let tokens_per_second = if let Some(tokens) = outcome.output_tokens {
-            if duration_ms > 0 {
-                Some((tokens as f64 / duration_ms as f64) * 1000.0)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let tokens_per_second = outcome.output_tokens.and_then(|tokens| {
+            (duration_ms > 0).then(|| {
+                (f64::from(u32::try_from(tokens).unwrap_or(u32::MAX))
+                    / f64::from(u32::try_from(duration_ms).unwrap_or(u32::MAX)))
+                    * 1000.0
+            })
+        });
 
         let performance_metrics = PerformanceMetrics {
             duration_ms,
@@ -218,6 +224,13 @@ impl AnalyticsContext {
 }
 
 /// Middleware to automatically capture analytics for all requests
+///
+/// # Errors
+/// Returns the downstream middleware error when request processing fails.
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix middleware service future is framework-managed and request-local"
+)]
 pub async fn analytics_middleware(
     req: ServiceRequest,
     next: Next<impl MessageBody>,
@@ -245,7 +258,7 @@ pub fn update_context_from_body(ctx: &mut AnalyticsContext, body: &serde_json::V
     }
 
     // Extract stream flag
-    if let Some(stream) = body.get("stream").and_then(|v| v.as_bool()) {
+    if let Some(stream) = body.get("stream").and_then(serde_json::Value::as_bool) {
         ctx.request_metadata.stream = stream;
     }
 
@@ -261,6 +274,7 @@ pub fn update_context_from_body(ctx: &mut AnalyticsContext, body: &serde_json::V
 }
 
 /// Extract token usage from OpenAI-style response
+#[must_use]
 pub fn extract_token_usage(
     response_body: &serde_json::Value,
 ) -> Option<crate::analytics::TokenUsage> {
@@ -271,39 +285,47 @@ pub fn extract_token_usage(
     let prompt_tokens = usage
         .get("prompt_tokens")
         .or_else(|| usage.get("input_tokens"))
-        .and_then(|v| v.as_u64())?;
+        .and_then(serde_json::Value::as_u64)?;
     let completion_tokens = usage
         .get("completion_tokens")
         .or_else(|| usage.get("output_tokens"))
-        .and_then(|v| v.as_u64())?;
+        .and_then(serde_json::Value::as_u64)?;
     let total_tokens = usage
         .get("total_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(prompt_tokens + completion_tokens);
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens));
 
     let cached_tokens = usage
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .or_else(|| {
             usage
                 .get("input_tokens_details")
                 .and_then(|d| d.get("cached_tokens"))
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
         })
-        .or_else(|| usage.get("cached_tokens").and_then(|v| v.as_u64()));
+        .or_else(|| {
+            usage
+                .get("cached_tokens")
+                .and_then(serde_json::Value::as_u64)
+        });
 
     let reasoning_tokens = usage
         .get("completion_tokens_details")
         .and_then(|d| d.get("reasoning_tokens"))
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .or_else(|| {
             usage
                 .get("output_tokens_details")
                 .and_then(|d| d.get("reasoning_tokens"))
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
         })
-        .or_else(|| usage.get("reasoning_tokens").and_then(|v| v.as_u64()));
+        .or_else(|| {
+            usage
+                .get("reasoning_tokens")
+                .and_then(serde_json::Value::as_u64)
+        });
 
     Some(crate::analytics::TokenUsage {
         prompt_tokens,
@@ -319,6 +341,7 @@ pub fn extract_token_usage(
 /// Supports Chat Completions chunks, Responses `response.completed` events, and
 /// Bedrock metadata events. The caller is responsible for feeding complete SSE
 /// events and keeping only a small rolling event buffer while streaming.
+#[must_use]
 pub fn extract_streaming_token_usage_from_sse_event(
     event: &[u8],
 ) -> Option<crate::analytics::TokenUsage> {
@@ -360,16 +383,16 @@ fn extract_bedrock_metadata_usage(
     let prompt_tokens = usage
         .get("inputTokens")
         .or_else(|| usage.get("input_tokens"))
-        .and_then(|v| v.as_u64())?;
+        .and_then(serde_json::Value::as_u64)?;
     let completion_tokens = usage
         .get("outputTokens")
         .or_else(|| usage.get("output_tokens"))
-        .and_then(|v| v.as_u64())?;
+        .and_then(serde_json::Value::as_u64)?;
     let total_tokens = usage
         .get("totalTokens")
         .or_else(|| usage.get("total_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(prompt_tokens + completion_tokens);
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens));
 
     Some(crate::analytics::TokenUsage {
         prompt_tokens,
@@ -388,12 +411,15 @@ fn trim_ascii(bytes: &[u8]) -> &[u8] {
     let end = bytes
         .iter()
         .rposition(|b| !b.is_ascii_whitespace())
-        .map(|idx| idx + 1)
-        .unwrap_or(start);
-    &bytes[start..end]
+        .map_or(start, |idx| idx.saturating_add(1));
+    bytes.get(start..end).unwrap_or(&[])
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "unit tests use expect for fixture setup"
+)]
 mod tests {
     use super::extract_token_usage;
     use serde_json::json;

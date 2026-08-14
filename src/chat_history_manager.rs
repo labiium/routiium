@@ -36,9 +36,9 @@ pub struct ChatHistoryConfig {
     pub jsonl_path: Option<String>,
     /// Max messages for memory backend
     pub memory_max_messages: Option<usize>,
-    /// SQLite database URL
+    /// `SQLite` database URL
     pub sqlite_url: Option<String>,
-    /// PostgreSQL database URL
+    /// `PostgreSQL` database URL
     pub postgres_url: Option<String>,
     /// Turso database URL
     pub turso_url: Option<String>,
@@ -53,7 +53,7 @@ impl Default for ChatHistoryConfig {
             primary_backend: "memory".to_string(),
             sink_backends: Vec::new(),
             privacy_level: PrivacyLevel::Full,
-            ttl_seconds: 2592000, // 30 days
+            ttl_seconds: 2_592_000, // 30 days
             strict: false,
             jsonl_path: Some("./data/chat_history.jsonl".to_string()),
             memory_max_messages: Some(10000),
@@ -67,6 +67,7 @@ impl Default for ChatHistoryConfig {
 
 impl ChatHistoryConfig {
     /// Load configuration from environment variables
+    #[must_use]
     pub fn from_env() -> Self {
         let enabled = std::env::var("ROUTIIUM_CHAT_HISTORY_ENABLED")
             .unwrap_or_else(|_| "false".to_string())
@@ -96,7 +97,7 @@ impl ChatHistoryConfig {
         let ttl_seconds = std::env::var("ROUTIIUM_CHAT_HISTORY_TTL_SECONDS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(2592000);
+            .unwrap_or(2_592_000);
 
         let strict = std::env::var("ROUTIIUM_CHAT_HISTORY_STRICT")
             .unwrap_or_else(|_| "false".to_string())
@@ -142,6 +143,7 @@ pub struct ChatHistoryManager {
     config: ChatHistoryConfig,
 }
 
+#[allow(clippy::missing_errors_doc)]
 impl ChatHistoryManager {
     /// Create a new chat history manager with the given configuration
     pub async fn new(config: ChatHistoryConfig) -> Result<Self> {
@@ -177,11 +179,10 @@ impl ChatHistoryManager {
     ) -> Result<Box<dyn ChatHistoryStore>> {
         match backend {
             "memory" => {
-                let store = if let Some(max) = config.memory_max_messages {
-                    MemoryChatHistoryStore::with_max_messages(max)
-                } else {
-                    MemoryChatHistoryStore::new()
-                };
+                let store = config.memory_max_messages.map_or_else(
+                    MemoryChatHistoryStore::new,
+                    MemoryChatHistoryStore::with_max_messages,
+                );
                 Ok(Box::new(store))
             }
             "jsonl" => {
@@ -212,19 +213,20 @@ impl ChatHistoryManager {
                 ))
             }
             _ => Err(ChatHistoryError::InvalidInput(format!(
-                "Unknown backend: {}",
-                backend
+                "Unknown backend: {backend}"
             ))),
         }
     }
 
     /// Check if chat history is enabled
-    pub fn is_enabled(&self) -> bool {
+    #[must_use]
+    pub const fn is_enabled(&self) -> bool {
         self.config.enabled
     }
 
     /// Get the privacy level
-    pub fn privacy_level(&self) -> PrivacyLevel {
+    #[must_use]
+    pub const fn privacy_level(&self) -> PrivacyLevel {
         self.config.privacy_level
     }
 
@@ -295,6 +297,7 @@ impl ChatHistoryManager {
 mod tests {
     use super::*;
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[test]
     fn test_config_default() {
         let config = ChatHistoryConfig::default();
@@ -303,6 +306,7 @@ mod tests {
         assert_eq!(config.privacy_level, PrivacyLevel::Full);
     }
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_manager_memory_backend() {
         let config = ChatHistoryConfig {
@@ -321,6 +325,7 @@ mod tests {
         assert_eq!(retrieved.conversation_id, "conv_123");
     }
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_manager_disabled() {
         let config = ChatHistoryConfig {
@@ -336,6 +341,7 @@ mod tests {
         manager.record_conversation(&conv).await.unwrap();
     }
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_manager_jsonl_backend() {
         use tempfile::NamedTempFile;
@@ -359,6 +365,7 @@ mod tests {
         assert_eq!(retrieved.conversation_id, "conv_123");
     }
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_manager_composite_backend() {
         use tempfile::NamedTempFile;

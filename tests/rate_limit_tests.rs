@@ -1,16 +1,16 @@
 //! Comprehensive tests for the rate limiting subsystem.
 //!
 //! Covers:
-//! - Core types (WindowType, RateLimitBucket, RateLimitPolicy, ConcurrencyConfig)
-//! - MemoryRateLimitStore (all CRUD + check_and_increment for fixed/sliding)
-//! - RateLimitManager: policy resolution hierarchy, check_rate_limit, emergency blocks,
+//! - Core types (`WindowType`, `RateLimitBucket`, `RateLimitPolicy`, `ConcurrencyConfig`)
+//! - `MemoryRateLimitStore` (all CRUD + `check_and_increment` for fixed/sliding)
+//! - `RateLimitManager`: policy resolution hierarchy, `check_rate_limit`, emergency blocks,
 //!   multi-bucket enforcement, metrics recording, header generation
-//! - ConcurrencyManager: acquire / release, config updates
-//! - MetricsStore: record, get_metrics, get_all_metrics, get_events, clear
+//! - `ConcurrencyManager`: acquire / release, config updates
+//! - `MetricsStore`: record, `get_metrics`, `get_all_metrics`, `get_events`, clear
 //! - File config: load, key overrides, default policy
 //! - Admin HTTP endpoints (via actix-web test harness): CRUD for policies,
 //!   key assignment, emergency block lifecycle, default policy, reload, analytics
-//! - rate_limit_headers generation
+//! - `rate_limit_headers` generation
 
 use actix_web::test as atest;
 use actix_web::{http::StatusCode, web, App};
@@ -24,6 +24,7 @@ use routiium::{
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Serialize tests that mutate environment variables.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -32,11 +33,29 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 // Helpers
 // ---------------------------------------------------------------------------
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 fn memory_manager() -> Arc<RateLimitManager> {
     let store = Arc::new(MemoryRateLimitStore::new());
     Arc::new(RateLimitManager::new(store))
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 fn simple_policy(id: &str, requests: u64, window_seconds: u64) -> RateLimitPolicy {
     RateLimitPolicy {
         id: id.to_string(),
@@ -49,6 +68,15 @@ fn simple_policy(id: &str, requests: u64, window_seconds: u64) -> RateLimitPolic
     }
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 fn multi_bucket_policy(id: &str) -> RateLimitPolicy {
     RateLimitPolicy {
         id: id.to_string(),
@@ -69,7 +97,7 @@ fn multi_bucket_policy(id: &str) -> RateLimitPolicy {
     }
 }
 
-fn admin_bearer() -> (&'static str, &'static str) {
+const fn admin_bearer() -> (&'static str, &'static str) {
     ("Authorization", "Bearer admin-test")
 }
 
@@ -96,18 +124,45 @@ macro_rules! make_app {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 fn window_type_default_is_fixed() {
-    let w: WindowType = Default::default();
+    let w: WindowType = WindowType::default();
     assert_eq!(w, WindowType::Fixed);
 }
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 fn queue_strategy_default_is_reject() {
-    let q: QueueStrategy = Default::default();
+    let q: QueueStrategy = QueueStrategy::default();
     assert_eq!(q, QueueStrategy::Reject);
 }
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 fn rate_limit_policy_round_trip() {
     let policy = simple_policy("p1", 100, 60);
     let json = serde_json::to_string(&policy).unwrap();
@@ -118,6 +173,15 @@ fn rate_limit_policy_round_trip() {
 }
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 fn sliding_window_type_roundtrip() {
     let bucket = RateLimitBucket {
         name: "x".into(),
@@ -135,6 +199,15 @@ fn sliding_window_type_roundtrip() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn memory_store_policy_crud() {
     let store = MemoryRateLimitStore::new();
     let policy = simple_policy("p1", 10, 60);
@@ -159,6 +232,15 @@ async fn memory_store_policy_crud() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn memory_store_key_policy_assignment() {
     let store = MemoryRateLimitStore::new();
 
@@ -178,6 +260,15 @@ async fn memory_store_key_policy_assignment() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn memory_store_default_policy_id() {
     let store = MemoryRateLimitStore::new();
 
@@ -190,6 +281,15 @@ async fn memory_store_default_policy_id() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn memory_store_block_lifecycle() {
     let store = MemoryRateLimitStore::new();
 
@@ -218,6 +318,15 @@ async fn memory_store_block_lifecycle() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn fixed_window_allows_then_rejects() {
     let store = MemoryRateLimitStore::new();
     let bucket = RateLimitBucket {
@@ -227,7 +336,6 @@ async fn fixed_window_allows_then_rejects() {
         window_type: WindowType::Fixed,
     };
 
-    use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -236,7 +344,7 @@ async fn fixed_window_allows_then_rejects() {
     // First 3 requests allowed
     for i in 1..=3 {
         let status = store.check_and_increment("k1", &bucket, now).await.unwrap();
-        assert!(status.allowed, "request {} should be allowed", i);
+        assert!(status.allowed, "request {i} should be allowed");
         assert_eq!(status.used, i);
         assert_eq!(status.remaining, 3 - i);
     }
@@ -248,6 +356,15 @@ async fn fixed_window_allows_then_rejects() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn fixed_window_resets_after_window_expires() {
     let store = MemoryRateLimitStore::new();
     let bucket = RateLimitBucket {
@@ -279,6 +396,15 @@ async fn fixed_window_resets_after_window_expires() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn sliding_window_check_and_increment() {
     let store = MemoryRateLimitStore::new();
     let bucket = RateLimitBucket {
@@ -315,6 +441,15 @@ async fn sliding_window_check_and_increment() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn manager_no_policy_returns_unlimited() {
     let mgr = memory_manager();
     // No policies stored, no default configured → unlimited
@@ -325,6 +460,15 @@ async fn manager_no_policy_returns_unlimited() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn manager_default_policy_applied() {
     let mgr = memory_manager();
     let pol = simple_policy("default", 2, 3600);
@@ -341,6 +485,15 @@ async fn manager_default_policy_applied() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn manager_per_key_policy_overrides_default() {
     let mgr = memory_manager();
 
@@ -363,13 +516,22 @@ async fn manager_per_key_policy_overrides_default() {
     // VIP key: 5 allowed
     for i in 1..=5 {
         let r = mgr.check_rate_limit("vip-key", "/", None).await.unwrap();
-        assert!(r.allowed, "vip request {} should be allowed", i);
+        assert!(r.allowed, "vip request {i} should be allowed");
     }
     let r6 = mgr.check_rate_limit("vip-key", "/", None).await.unwrap();
     assert!(!r6.allowed);
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn manager_multi_bucket_stops_at_first_exhausted_bucket() {
     let mgr = memory_manager();
     let pol = multi_bucket_policy("multi");
@@ -394,6 +556,15 @@ async fn manager_multi_bucket_stops_at_first_exhausted_bucket() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn emergency_block_prevents_requests() {
     let mgr = memory_manager();
 
@@ -414,6 +585,15 @@ async fn emergency_block_prevents_requests() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn emergency_block_removal_unblocks_key() {
     let mgr = memory_manager();
     mgr.set_emergency_block("key2", Some(3600), "remove test")
@@ -431,6 +611,15 @@ async fn emergency_block_removal_unblocks_key() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn list_emergency_blocks_reflects_active_blocks() {
     let mgr = memory_manager();
     mgr.set_emergency_block("b1", Some(3600), "r1")
@@ -450,6 +639,15 @@ async fn list_emergency_blocks_reflects_active_blocks() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn get_block_returns_none_when_unblocked() {
     let mgr = memory_manager();
     let b = mgr.get_block("no-block-key").await;
@@ -457,6 +655,15 @@ async fn get_block_returns_none_when_unblocked() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn get_block_returns_block_info() {
     let mgr = memory_manager();
     mgr.set_emergency_block("blk-key", Some(7200), "manual block")
@@ -472,6 +679,15 @@ async fn get_block_returns_block_info() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn manager_create_and_get_policy() {
     let mgr = memory_manager();
     let pol = simple_policy("p-create", 10, 60);
@@ -483,6 +699,15 @@ async fn manager_create_and_get_policy() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn manager_update_policy() {
     let mgr = memory_manager();
     let pol = simple_policy("upd", 10, 60);
@@ -505,6 +730,15 @@ async fn manager_update_policy() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn manager_update_nonexistent_policy_returns_false() {
     let mgr = memory_manager();
     let pol = simple_policy("ghost", 1, 1);
@@ -514,6 +748,15 @@ async fn manager_update_nonexistent_policy_returns_false() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn manager_delete_policy() {
     let mgr = memory_manager();
     let pol = simple_policy("del-me", 1, 1);
@@ -527,10 +770,19 @@ async fn manager_delete_policy() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn manager_list_policies_all_created() {
     let mgr = memory_manager();
     for i in 0..5 {
-        mgr.create_policy(simple_policy(&format!("p{}", i), 10, 60))
+        mgr.create_policy(simple_policy(&format!("p{i}"), 10, 60))
             .await
             .unwrap();
     }
@@ -543,6 +795,15 @@ async fn manager_list_policies_all_created() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn get_current_usage_shows_bucket_counters() {
     let mgr = memory_manager();
     let pol = simple_policy("usage-pol", 10, 3600);
@@ -564,6 +825,15 @@ async fn get_current_usage_shows_bucket_counters() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn get_current_usage_unlimited_when_no_policy() {
     let mgr = memory_manager();
     let (policy_id, statuses) = mgr.get_current_usage("no-policy-key").await.unwrap();
@@ -576,6 +846,15 @@ async fn get_current_usage_unlimited_when_no_policy() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn rate_limit_headers_contain_expected_keys() {
     let mgr = memory_manager();
     let pol = simple_policy("hdr-pol", 5, 60);
@@ -590,19 +869,16 @@ async fn rate_limit_headers_contain_expected_keys() {
     assert!(
         header_names.contains(&"X-RateLimit-Policy")
             || header_names.contains(&"X-RateLimit-Policy-Id"),
-        "expected policy header, got: {:?}",
-        header_names
+        "expected policy header, got: {header_names:?}"
     );
     // Should have limit/remaining/reset headers
     assert!(
         header_names.contains(&"X-RateLimit-Limit"),
-        "got: {:?}",
-        header_names
+        "got: {header_names:?}"
     );
     assert!(
         header_names.contains(&"X-RateLimit-Remaining"),
-        "got: {:?}",
-        header_names
+        "got: {header_names:?}"
     );
 }
 
@@ -611,6 +887,15 @@ async fn rate_limit_headers_contain_expected_keys() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn metrics_records_allowed_and_rejected_events() {
     let mgr = memory_manager();
     let pol = simple_policy("m-pol", 2, 3600);
@@ -629,6 +914,15 @@ async fn metrics_records_allowed_and_rejected_events() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn metrics_get_events_with_limit() {
     let mgr = memory_manager();
     let pol = simple_policy("ev-pol", 100, 3600);
@@ -649,6 +943,15 @@ async fn metrics_get_events_with_limit() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn metrics_get_all_metrics_returns_all_keys() {
     let mgr = memory_manager();
     let pol = simple_policy("all-pol", 100, 3600);
@@ -664,6 +967,15 @@ async fn metrics_get_all_metrics_returns_all_keys() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn metrics_clear_wipes_events() {
     let mgr = memory_manager();
     let pol = simple_policy("cl-pol", 100, 3600);
@@ -682,6 +994,16 @@ async fn metrics_clear_wipes_events() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    clippy::significant_drop_tightening,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn concurrency_manager_acquire_release() {
     use routiium::rate_limit::ConcurrencyResult as CR;
 
@@ -703,6 +1025,7 @@ async fn concurrency_manager_acquire_release() {
     // 3rd should be rejected since max_concurrent=2 and no queue
     let r3 = mgr.concurrency.acquire("ck", &cc).await.unwrap();
     assert!(matches!(r3, CR::Rejected { .. }));
+    drop(r3);
 
     // Release a permit by dropping an OwnedSemaphorePermit (the real semaphore release).
     drop(r1);
@@ -714,6 +1037,15 @@ async fn concurrency_manager_acquire_release() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn concurrency_manager_no_entry_no_semaphore_needed() {
     // Without any entry configured, get_status returns None
     let mgr = memory_manager();
@@ -722,6 +1054,15 @@ async fn concurrency_manager_no_entry_no_semaphore_needed() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn concurrency_status_reflects_active_count() {
     let mgr = memory_manager();
     let cc = ConcurrencyConfig {
@@ -746,6 +1087,15 @@ async fn concurrency_status_reflects_active_count() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn file_config_load_and_policies_populated() {
     use routiium::rate_limit::{PolicyDef, RateLimitFileConfig};
     use std::collections::HashMap;
@@ -792,6 +1142,15 @@ async fn file_config_load_and_policies_populated() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn file_config_key_overrides_are_applied() {
     use routiium::rate_limit::{PolicyDef, RateLimitFileConfig};
     use std::collections::HashMap;
@@ -848,6 +1207,15 @@ async fn file_config_key_overrides_are_applied() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 fn default_policy_from_env_parses_daily_and_minute() {
     let _guard = ENV_LOCK.lock().unwrap();
     std::env::set_var("ROUTIIUM_RATE_LIMIT_DAILY", "500");
@@ -871,6 +1239,15 @@ fn default_policy_from_env_parses_daily_and_minute() {
 }
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 fn default_policy_from_env_returns_none_when_no_env() {
     let _guard = ENV_LOCK.lock().unwrap();
     std::env::remove_var("ROUTIIUM_RATE_LIMIT_DAILY");
@@ -886,6 +1263,15 @@ fn default_policy_from_env_returns_none_when_no_env() {
 // ---------------------------------------------------------------------------
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_list_policies_empty() {
     let mgr = memory_manager();
     let app = make_app!(mgr);
@@ -901,6 +1287,15 @@ async fn http_list_policies_empty() {
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_create_and_list_policy() {
     let mgr = memory_manager();
     let app = make_app!(mgr);
@@ -929,6 +1324,15 @@ async fn http_create_and_list_policy() {
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_get_policy_not_found() {
     let mgr = memory_manager();
     let app = make_app!(mgr);
@@ -942,6 +1346,15 @@ async fn http_get_policy_not_found() {
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_get_policy_found() {
     let mgr = memory_manager();
     mgr.create_policy(simple_policy("found-pol", 42, 60))
@@ -960,6 +1373,15 @@ async fn http_get_policy_found() {
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_update_policy() {
     let mgr = memory_manager();
     mgr.create_policy(simple_policy("upd-pol", 10, 60))
@@ -984,6 +1406,15 @@ async fn http_update_policy() {
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_delete_policy() {
     let mgr = memory_manager();
     mgr.create_policy(simple_policy("del-pol", 5, 60))
@@ -1003,6 +1434,15 @@ async fn http_delete_policy() {
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_delete_policy_not_found() {
     let mgr = memory_manager();
     let app = make_app!(mgr);
@@ -1016,6 +1456,15 @@ async fn http_delete_policy_not_found() {
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_assign_and_remove_key_policy() {
     let mgr = memory_manager();
     mgr.create_policy(simple_policy("assign-pol", 10, 60))
@@ -1045,6 +1494,15 @@ async fn http_assign_and_remove_key_policy() {
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_key_status() {
     let mgr = memory_manager();
     mgr.create_policy(simple_policy("ks-pol", 10, 60))
@@ -1065,6 +1523,15 @@ async fn http_key_status() {
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_set_and_get_default_policy() {
     let mgr = memory_manager();
     mgr.create_policy(simple_policy("def-pol", 100, 3600))
@@ -1092,6 +1559,15 @@ async fn http_set_and_get_default_policy() {
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_emergency_block_and_list() {
     let mgr = memory_manager();
     let app = make_app!(mgr);
@@ -1128,6 +1604,15 @@ async fn http_emergency_block_and_list() {
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_remove_emergency_block() {
     let mgr = memory_manager();
     mgr.set_emergency_block("rm-blk", Some(3600), "test")
@@ -1146,6 +1631,15 @@ async fn http_remove_emergency_block() {
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_concurrency_status_no_config() {
     let mgr = memory_manager();
     let app = make_app!(mgr);
@@ -1162,6 +1656,15 @@ async fn http_concurrency_status_no_config() {
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_rl_analytics_empty() {
     let mgr = memory_manager();
     let app = make_app!(mgr);
@@ -1177,6 +1680,15 @@ async fn http_rl_analytics_empty() {
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_rl_analytics_with_events() {
     let mgr = memory_manager();
     let pol = simple_policy("an-pol", 100, 3600);
@@ -1195,10 +1707,19 @@ async fn http_rl_analytics_with_events() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value = atest::read_body_json(resp).await;
     let count = body["count"].as_u64().unwrap_or(0);
-    assert!(count > 0, "expected events, got {}", count);
+    assert!(count > 0, "expected events, got {count}");
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_reload_config_no_path_is_ok() {
     let mgr = memory_manager();
     // No config_path set → reload is a no-op and should succeed
@@ -1213,6 +1734,15 @@ async fn http_reload_config_no_path_is_ok() {
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_endpoints_require_admin_auth() {
     let mgr = memory_manager();
     std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
@@ -1236,6 +1766,15 @@ async fn http_endpoints_require_admin_auth() {
 }
 
 #[actix_web::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn http_rate_limit_not_enabled_returns_503() {
     // AppState without rate_limit_manager
     std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");

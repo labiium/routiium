@@ -2,8 +2,8 @@
 //! Data models for the Chat Completions and Responses APIs.
 //!
 //! This module groups two submodules:
-//! - `chat`: Types representing a commonly used subset of the OpenAI Chat Completions request models.
-//! - `responses`: Types representing a minimal yet robust subset of the OpenAI Responses API request models.
+//! - `chat`: Types representing a commonly used subset of the `OpenAI` Chat Completions request models.
+//! - `responses`: Types representing a minimal yet robust subset of the `OpenAI` Responses API request models.
 //!
 //! The mapping logic that converts `chat::ChatCompletionRequest` to
 //! `responses::ResponsesRequest` is implemented in `crate::conversion`.

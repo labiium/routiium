@@ -39,7 +39,7 @@ pub enum WindowType {
 /// A single rate limit constraint with a specific time window.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitBucket {
-    /// Human-readable name, e.g. "daily", "burst", "five_hour".
+    /// Human-readable name, e.g. "daily", "burst", "`five_hour`".
     pub name: String,
     /// Maximum requests allowed within the window.
     pub requests: u64,
@@ -86,7 +86,7 @@ pub struct ConcurrencyConfig {
     pub strategy: QueueStrategy,
 }
 
-fn default_queue_timeout_ms() -> u64 {
+const fn default_queue_timeout_ms() -> u64 {
     30_000
 }
 
@@ -119,7 +119,7 @@ pub struct RateLimitFileConfig {
     /// Named policies.
     #[serde(default)]
     pub policies: HashMap<String, PolicyDef>,
-    /// key_id → policy_id overrides.
+    /// `key_id` → `policy_id` overrides.
     #[serde(default)]
     pub key_overrides: HashMap<String, String>,
 }
@@ -129,16 +129,19 @@ fn default_version() -> String {
 }
 
 impl RateLimitFileConfig {
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
     pub fn load_from_file(path: &str) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         Ok(serde_json::from_str(&content)?)
     }
 
+    #[must_use]
     pub fn empty() -> Self {
         Self::default()
     }
 
     /// Convert to a flat list of `RateLimitPolicy` objects.
+    #[must_use]
     pub fn to_policies(&self) -> Vec<RateLimitPolicy> {
         self.policies
             .iter()
@@ -308,7 +311,11 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-fn window_start_for(now_secs: u64, window_seconds: u64) -> u64 {
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "window arithmetic is bounded by caller-provided nonzero duration"
+)]
+const fn window_start_for(now_secs: u64, window_seconds: u64) -> u64 {
     if window_seconds == 0 {
         return 0;
     }
@@ -316,7 +323,7 @@ fn window_start_for(now_secs: u64, window_seconds: u64) -> u64 {
 }
 
 fn counter_key(key_id: &str, bucket_name: &str, ws: u64) -> String {
-    format!("rl:c:{}:{}:{}", key_id, bucket_name, ws)
+    format!("rl:c:{key_id}:{bucket_name}:{ws}")
 }
 
 // ============================================================================
@@ -324,7 +331,7 @@ fn counter_key(key_id: &str, bucket_name: &str, ws: u64) -> String {
 // ============================================================================
 
 struct MemoryInner {
-    /// counter_key → (count, window_start, expiry_secs)
+    /// `counter_key` → (count, `window_start`, `expiry_secs`)
     counters: HashMap<String, (u64, u64, u64)>,
     policies: HashMap<String, RateLimitPolicy>,
     key_policies: HashMap<String, String>,
@@ -332,6 +339,14 @@ struct MemoryInner {
     blocks: HashMap<String, BlockInfo>,
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "rate-window interpolation intentionally uses floating point and bounded counters"
+)]
 impl MemoryInner {
     fn new() -> Self {
         Self {
@@ -397,7 +412,8 @@ impl MemoryInner {
         let prev_count = self.get_count(prev_ck, prev_ws, now_secs);
         let curr_count = self.get_count(curr_ck, ws, now_secs);
 
-        let estimated_with = (prev_count as f64 * prev_weight + (curr_count + 1) as f64) as u64;
+        let estimated_with =
+            (prev_count as f64).mul_add(prev_weight, (curr_count + 1) as f64) as u64;
 
         if estimated_with <= limit {
             let expiry = ws + window_seconds * 2;
@@ -411,7 +427,7 @@ impl MemoryInner {
             entry.0 += 1;
             (true, estimated_with)
         } else {
-            let estimated = (prev_count as f64 * prev_weight + curr_count as f64) as u64;
+            let estimated = (prev_count as f64).mul_add(prev_weight, curr_count as f64) as u64;
             (false, estimated)
         }
     }
@@ -429,7 +445,7 @@ impl MemoryInner {
         let prev_weight = 1.0 - (elapsed as f64 / window_seconds as f64);
         let prev_count = self.get_count(prev_ck, prev_ws, now_secs);
         let curr_count = self.get_count(curr_ck, ws, now_secs);
-        (prev_count as f64 * prev_weight + curr_count as f64) as u64
+        (prev_count as f64).mul_add(prev_weight, curr_count as f64) as u64
     }
 }
 
@@ -439,6 +455,7 @@ pub struct MemoryRateLimitStore {
 }
 
 impl MemoryRateLimitStore {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(MemoryInner::new()),
@@ -453,6 +470,10 @@ impl Default for MemoryRateLimitStore {
 }
 
 #[async_trait]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "counter and reset arithmetic is bounded by rate-limit inputs"
+)]
 impl RateLimitStore for MemoryRateLimitStore {
     async fn check_and_increment(
         &self,
@@ -651,15 +672,21 @@ impl RateLimitStore for MemoryRateLimitStore {
     }
 
     async fn get_block(&self, key_id: &str) -> Result<Option<BlockInfo>> {
-        let mut inner = self.inner.lock().map_err(|_| anyhow!("lock poisoned"))?;
         let now = now_secs();
-        if let Some(block) = inner.blocks.get(key_id) {
-            if block.until_secs == 0 || block.until_secs > now {
-                return Ok(Some(block.clone()));
+        let result = {
+            let mut inner = self.inner.lock().map_err(|_| anyhow!("lock poisoned"))?;
+            if inner
+                .blocks
+                .get(key_id)
+                .is_some_and(|block| block.until_secs == 0 || block.until_secs > now)
+            {
+                inner.blocks.get(key_id).cloned()
+            } else {
+                inner.blocks.remove(key_id);
+                None
             }
-            inner.blocks.remove(key_id); // auto-expire
-        }
-        Ok(None)
+        };
+        Ok(result)
     }
 
     async fn list_blocks(&self) -> Result<Vec<BlockInfo>> {
@@ -676,7 +703,7 @@ impl RateLimitStore for MemoryRateLimitStore {
 // Sled store (persistent, embedded, single-node)
 // ============================================================================
 
-/// Counter value stored in sled: (count, window_start, expiry_secs).
+/// Counter value stored in sled: (count, `window_start`, `expiry_secs`).
 type SledCounter = (u64, u64, u64);
 
 /// Persistent embedded rate limit store backed by sled.
@@ -690,12 +717,14 @@ pub struct SledRateLimitStore {
 }
 
 impl SledRateLimitStore {
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
     pub fn open_default() -> Result<Self> {
         let path = std::env::var("ROUTIIUM_RL_SLED_PATH")
             .unwrap_or_else(|_| "./data/rate_limit.db".to_string());
         Self::open_path(&path)
     }
 
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
     pub fn open_path(path: &str) -> Result<Self> {
         if let Some(parent) = std::path::Path::new(path).parent() {
             std::fs::create_dir_all(parent).ok();
@@ -713,6 +742,15 @@ impl SledRateLimitStore {
 }
 
 #[async_trait]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::needless_continue,
+    reason = "persistent rate-window interpolation and counters intentionally use bounded arithmetic"
+)]
 impl RateLimitStore for SledRateLimitStore {
     async fn check_and_increment(
         &self,
@@ -765,7 +803,7 @@ impl RateLimitStore for SledRateLimitStore {
                     let curr_ck = counter_key(&key_id, &bucket_name, ws);
 
                     // Read previous count
-                    let prev_count: u64 = if let Some(iv) = counters.get(prev_ck.as_bytes())? {
+                    let prev_count: f64 = if let Some(iv) = counters.get(prev_ck.as_bytes())? {
                         let (count, pws, exp): SledCounter = serde_json::from_slice(&iv)?;
                         if exp > now_secs && pws == prev_ws {
                             count
@@ -774,7 +812,7 @@ impl RateLimitStore for SledRateLimitStore {
                         }
                     } else {
                         0
-                    };
+                    } as f64;
 
                     let elapsed = now_secs - ws;
                     let prev_weight = 1.0 - (elapsed as f64 / window_seconds as f64);
@@ -791,11 +829,12 @@ impl RateLimitStore for SledRateLimitStore {
                         } else {
                             (curr_count, cur_ws, expiry)
                         };
-                        let estimated =
-                            (prev_count as f64 * prev_weight + (curr_count + 1) as f64) as u64;
+                        let estimated = (prev_count as f64)
+                            .mul_add(prev_weight, (curr_count + 1) as f64)
+                            as u64;
                         if estimated > limit {
                             let curr_est =
-                                (prev_count as f64 * prev_weight + curr_count as f64) as u64;
+                                (prev_count as f64).mul_add(prev_weight, curr_count as f64) as u64;
                             return Ok((false, curr_est));
                         }
                         let new_count = curr_count + 1;
@@ -877,7 +916,7 @@ impl RateLimitStore for SledRateLimitStore {
                     };
                     let elapsed = now_secs - ws;
                     let prev_weight = 1.0 - (elapsed as f64 / window_seconds as f64);
-                    Ok((prev_count as f64 * prev_weight + curr_count as f64) as u64)
+                    Ok((prev_count as f64).mul_add(prev_weight, curr_count as f64) as u64)
                 }
             }
         })
@@ -909,7 +948,7 @@ impl RateLimitStore for SledRateLimitStore {
     }
 
     async fn get_policy(&self, id: &str) -> Result<Option<RateLimitPolicy>> {
-        let key = format!("rl:p:{}", id).into_bytes();
+        let key = format!("rl:p:{id}").into_bytes();
         let tree = self.policies.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<RateLimitPolicy>> {
             Ok(tree
@@ -921,7 +960,7 @@ impl RateLimitStore for SledRateLimitStore {
     }
 
     async fn delete_policy(&self, id: &str) -> Result<bool> {
-        let key = format!("rl:p:{}", id).into_bytes();
+        let key = format!("rl:p:{id}").into_bytes();
         let tree = self.policies.clone();
         tokio::task::spawn_blocking(move || -> Result<bool> {
             let existed = tree.remove(key)?.is_some();
@@ -935,7 +974,7 @@ impl RateLimitStore for SledRateLimitStore {
         let tree = self.policies.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<RateLimitPolicy>> {
             let mut out = Vec::new();
-            for item in tree.iter() {
+            for item in &tree {
                 let (_, v) = item?;
                 if let Ok(p) = serde_json::from_slice::<RateLimitPolicy>(&v) {
                     out.push(p);
@@ -947,7 +986,7 @@ impl RateLimitStore for SledRateLimitStore {
     }
 
     async fn set_key_policy(&self, key_id: &str, policy_id: &str) -> Result<()> {
-        let key = format!("rl:k:{}", key_id).into_bytes();
+        let key = format!("rl:k:{key_id}").into_bytes();
         let val = policy_id.as_bytes().to_vec();
         let tree = self.key_policies.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -960,7 +999,7 @@ impl RateLimitStore for SledRateLimitStore {
     }
 
     async fn get_key_policy(&self, key_id: &str) -> Result<Option<String>> {
-        let key = format!("rl:k:{}", key_id).into_bytes();
+        let key = format!("rl:k:{key_id}").into_bytes();
         let tree = self.key_policies.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<String>> {
             Ok(tree
@@ -971,7 +1010,7 @@ impl RateLimitStore for SledRateLimitStore {
     }
 
     async fn remove_key_policy(&self, key_id: &str) -> Result<bool> {
-        let key = format!("rl:k:{}", key_id).into_bytes();
+        let key = format!("rl:k:{key_id}").into_bytes();
         let tree = self.key_policies.clone();
         tokio::task::spawn_blocking(move || -> Result<bool> {
             let existed = tree.remove(key)?.is_some();
@@ -1009,7 +1048,7 @@ impl RateLimitStore for SledRateLimitStore {
             until_secs,
             reason: reason.to_string(),
         };
-        let key = format!("rl:block:{}", key_id).into_bytes();
+        let key = format!("rl:block:{key_id}").into_bytes();
         let val = serde_json::to_vec(&block)?;
         let tree = self.blocks.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -1022,7 +1061,7 @@ impl RateLimitStore for SledRateLimitStore {
     }
 
     async fn unblock_key(&self, key_id: &str) -> Result<()> {
-        let key = format!("rl:block:{}", key_id).into_bytes();
+        let key = format!("rl:block:{key_id}").into_bytes();
         let tree = self.blocks.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             tree.remove(key)?;
@@ -1034,7 +1073,7 @@ impl RateLimitStore for SledRateLimitStore {
     }
 
     async fn get_block(&self, key_id: &str) -> Result<Option<BlockInfo>> {
-        let key_str = format!("rl:block:{}", key_id);
+        let key_str = format!("rl:block:{key_id}");
         let key_bytes = key_str.as_bytes().to_vec();
         let tree = self.blocks.clone();
         let del_tree = self.blocks.clone();
@@ -1058,7 +1097,7 @@ impl RateLimitStore for SledRateLimitStore {
         tokio::task::spawn_blocking(move || -> Result<Vec<BlockInfo>> {
             let mut out = Vec::new();
             let mut to_remove: Vec<sled::IVec> = Vec::new();
-            for item in tree.iter() {
+            for item in &tree {
                 let (k, v) = item?;
                 if let Ok(block) = serde_json::from_slice::<BlockInfo>(&v) {
                     if block.until_secs == 0 || block.until_secs > now {
@@ -1110,6 +1149,7 @@ pub struct RedisRateLimitStore {
 }
 
 impl RedisRateLimitStore {
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
     pub fn connect(url: &str) -> Result<Self> {
         let client = redis::Client::open(url)?;
         let max_size = std::env::var("ROUTIIUM_REDIS_POOL_MAX")
@@ -1125,6 +1165,7 @@ impl RedisRateLimitStore {
         })
     }
 
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
     pub fn connect_default() -> Result<Self> {
         let url = std::env::var("ROUTIIUM_REDIS_URL")
             .unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
@@ -1139,8 +1180,8 @@ impl RedisRateLimitStore {
 /// Lua script for atomic fixed-window increment.
 /// KEYS[1] = counter key
 /// ARGV[1] = window TTL seconds, ARGV[2] = limit
-/// Returns [allowed (1/0), current_count]
-const FIXED_WINDOW_LUA: &str = r#"
+/// Returns [allowed (1/0), `current_count`]
+const FIXED_WINDOW_LUA: &str = r"
 local current = tonumber(redis.call('GET', KEYS[1])) or 0
 local limit = tonumber(ARGV[2])
 if current >= limit then
@@ -1155,13 +1196,13 @@ if new > limit then
     return {0, new - 1}
 end
 return {1, new}
-"#;
+";
 
 /// Lua script for sliding window (two-bucket approximation).
 /// KEYS[1] = current window key, KEYS[2] = previous window key
-/// ARGV[1] = TTL (2×window_seconds), ARGV[2] = limit, ARGV[3] = prev_weight×1000
-/// Returns [allowed (1/0), estimated_count]
-const SLIDING_WINDOW_LUA: &str = r#"
+/// ARGV[1] = TTL (`2×window_seconds`), ARGV[2] = limit, ARGV[3] = `prev_weight×1000`
+/// Returns [allowed (1/0), `estimated_count`]
+const SLIDING_WINDOW_LUA: &str = r"
 local prev_count = tonumber(redis.call('GET', KEYS[2])) or 0
 local curr_count = tonumber(redis.call('GET', KEYS[1])) or 0
 local prev_weight = tonumber(ARGV[3]) / 1000
@@ -1176,9 +1217,17 @@ if new_curr == 1 then
     redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
 end
 return {1, estimated_with}
-"#;
+";
 
 #[async_trait]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "Redis rate-window interpolation intentionally uses floating point and bounded conversions"
+)]
 impl RateLimitStore for RedisRateLimitStore {
     async fn check_and_increment(
         &self,
@@ -1198,7 +1247,7 @@ impl RateLimitStore for RedisRateLimitStore {
 
         let (allowed, used) = tokio::task::spawn_blocking(move || -> Result<(bool, u64)> {
             let mut conn = pool.get()?;
-            let curr_key = format!("{}:rl:c:{}:{}:{}", ns, key_id, bucket_name, ws);
+            let curr_key = format!("{ns}:rl:c:{key_id}:{bucket_name}:{ws}");
             match window_type {
                 WindowType::Fixed => {
                     let result: Vec<i64> = redis::Script::new(FIXED_WINDOW_LUA)
@@ -1212,7 +1261,7 @@ impl RateLimitStore for RedisRateLimitStore {
                 }
                 WindowType::Sliding => {
                     let prev_ws = ws.saturating_sub(window_seconds);
-                    let prev_key = format!("{}:rl:c:{}:{}:{}", ns, key_id, bucket_name, prev_ws);
+                    let prev_key = format!("{ns}:rl:c:{key_id}:{bucket_name}:{prev_ws}");
                     let elapsed = now_secs - ws;
                     let prev_weight = 1.0 - (elapsed as f64 / window_seconds as f64);
                     let prev_weight_int = (prev_weight * 1000.0) as i64;
@@ -1261,7 +1310,7 @@ impl RateLimitStore for RedisRateLimitStore {
 
         let used = tokio::task::spawn_blocking(move || -> Result<u64> {
             let mut conn = pool.get()?;
-            let curr_key = format!("{}:rl:c:{}:{}:{}", ns, key_id, bucket_name, ws);
+            let curr_key = format!("{ns}:rl:c:{key_id}:{bucket_name}:{ws}");
             match window_type {
                 WindowType::Fixed => {
                     let count: Option<u64> = redis::cmd("GET").arg(&curr_key).query(&mut *conn)?;
@@ -1269,7 +1318,7 @@ impl RateLimitStore for RedisRateLimitStore {
                 }
                 WindowType::Sliding => {
                     let prev_ws = ws.saturating_sub(window_seconds);
-                    let prev_key = format!("{}:rl:c:{}:{}:{}", ns, key_id, bucket_name, prev_ws);
+                    let prev_key = format!("{ns}:rl:c:{key_id}:{bucket_name}:{prev_ws}");
                     let elapsed = now_secs - ws;
                     let prev_weight = 1.0 - (elapsed as f64 / window_seconds as f64);
                     let curr: u64 = redis::cmd("GET")
@@ -1280,7 +1329,7 @@ impl RateLimitStore for RedisRateLimitStore {
                         .arg(&prev_key)
                         .query::<Option<u64>>(&mut *conn)?
                         .unwrap_or(0);
-                    Ok((prev as f64 * prev_weight + curr as f64) as u64)
+                    Ok((prev as f64).mul_add(prev_weight, curr as f64) as u64)
                 }
             }
         })
@@ -1312,7 +1361,7 @@ impl RateLimitStore for RedisRateLimitStore {
     }
 
     async fn get_policy(&self, id: &str) -> Result<Option<RateLimitPolicy>> {
-        let key = self.ns(&format!("rl:p:{}", id));
+        let key = self.ns(&format!("rl:p:{id}"));
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<RateLimitPolicy>> {
             let mut conn = pool.get()?;
@@ -1324,7 +1373,7 @@ impl RateLimitStore for RedisRateLimitStore {
     }
 
     async fn delete_policy(&self, id: &str) -> Result<bool> {
-        let key = self.ns(&format!("rl:p:{}", id));
+        let key = self.ns(&format!("rl:p:{id}"));
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || -> Result<bool> {
             let mut conn = pool.get()?;
@@ -1357,7 +1406,7 @@ impl RateLimitStore for RedisRateLimitStore {
     }
 
     async fn set_key_policy(&self, key_id: &str, policy_id: &str) -> Result<()> {
-        let key = self.ns(&format!("rl:k:{}", key_id));
+        let key = self.ns(&format!("rl:k:{key_id}"));
         let val = policy_id.to_string();
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -1370,7 +1419,7 @@ impl RateLimitStore for RedisRateLimitStore {
     }
 
     async fn get_key_policy(&self, key_id: &str) -> Result<Option<String>> {
-        let key = self.ns(&format!("rl:k:{}", key_id));
+        let key = self.ns(&format!("rl:k:{key_id}"));
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<String>> {
             let mut conn = pool.get()?;
@@ -1380,7 +1429,7 @@ impl RateLimitStore for RedisRateLimitStore {
     }
 
     async fn remove_key_policy(&self, key_id: &str) -> Result<bool> {
-        let key = self.ns(&format!("rl:k:{}", key_id));
+        let key = self.ns(&format!("rl:k:{key_id}"));
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || -> Result<bool> {
             let mut conn = pool.get()?;
@@ -1419,7 +1468,7 @@ impl RateLimitStore for RedisRateLimitStore {
             until_secs,
             reason: reason.to_string(),
         };
-        let key = self.ns(&format!("rl:block:{}", key_id));
+        let key = self.ns(&format!("rl:block:{key_id}"));
         let val = serde_json::to_string(&block)?;
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -1432,7 +1481,7 @@ impl RateLimitStore for RedisRateLimitStore {
     }
 
     async fn unblock_key(&self, key_id: &str) -> Result<()> {
-        let key = self.ns(&format!("rl:block:{}", key_id));
+        let key = self.ns(&format!("rl:block:{key_id}"));
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get()?;
@@ -1444,7 +1493,7 @@ impl RateLimitStore for RedisRateLimitStore {
     }
 
     async fn get_block(&self, key_id: &str) -> Result<Option<BlockInfo>> {
-        let key = self.ns(&format!("rl:block:{}", key_id));
+        let key = self.ns(&format!("rl:block:{key_id}"));
         let pool = self.pool.clone();
         let now = now_secs();
         tokio::task::spawn_blocking(move || -> Result<Option<BlockInfo>> {
@@ -1520,7 +1569,15 @@ pub enum ConcurrencyResult {
     },
 }
 
+#[expect(
+    clippy::unwrap_used,
+    clippy::as_conversions,
+    clippy::cast_sign_loss,
+    clippy::option_if_let_else,
+    reason = "lock poisoning is treated as unrecoverable and atomic counters are nonnegative by invariant"
+)]
 impl ConcurrencyManager {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
@@ -1549,6 +1606,7 @@ impl ConcurrencyManager {
     }
 
     /// Try to acquire a concurrency slot for `key_id`.
+    #[doc = "# Errors\nReturns an error if the concurrency semaphore is closed."]
     pub async fn acquire(
         &self,
         key_id: &str,
@@ -1626,6 +1684,7 @@ impl ConcurrencyManager {
     }
 
     /// Returns `(active, queued, max_concurrent, max_queue_size)` or `None` if unknown.
+    #[doc = "# Panics\nPanics if the internal lock is poisoned."]
     pub fn get_status(&self, key_id: &str) -> Option<(u32, u32, u32, u32)> {
         let r = self.entries.read().unwrap();
         r.get(key_id).map(|e| {
@@ -1641,6 +1700,7 @@ impl ConcurrencyManager {
     }
 
     /// Reconfigure concurrency limits for a key (resets the semaphore).
+    #[doc = "# Panics\nPanics if the internal lock is poisoned."]
     pub fn update_config(&self, key_id: &str, config: ConcurrencyConfig) {
         let mut w = self.entries.write().unwrap();
         w.insert(
@@ -1676,7 +1736,14 @@ pub struct MetricsStore {
     inner: Mutex<MetricsInner>,
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::manual_let_else,
+    clippy::option_if_let_else,
+    reason = "metrics counters are monotonic and filtering branches preserve event order"
+)]
 impl MetricsStore {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(MetricsInner {
@@ -1785,6 +1852,12 @@ pub struct RateLimitManager {
     emergency_blocks: Arc<RwLock<HashMap<String, BlockInfo>>>,
 }
 
+#[expect(
+    clippy::unwrap_used,
+    clippy::arithmetic_side_effects,
+    clippy::too_many_lines,
+    reason = "manager lock poisoning is unrecoverable; timestamps and counters are bounded by API contracts"
+)]
 impl RateLimitManager {
     /// Create a manager with the given persistent store.
     pub fn new(store: Arc<dyn RateLimitStore>) -> Self {
@@ -1799,12 +1872,14 @@ impl RateLimitManager {
         }
     }
 
+    #[must_use]
     pub fn with_config_path(mut self, path: Option<String>) -> Self {
         self.config_path = path;
         self
     }
 
     /// Initialise from environment variables; falls back through Redis → Sled → Memory.
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
     pub fn from_env() -> Result<Self> {
         let backend = std::env::var("ROUTIIUM_RATE_LIMIT_BACKEND").ok();
         let store: Arc<dyn RateLimitStore> = if let Some(ref b) = backend {
@@ -1830,6 +1905,8 @@ impl RateLimitManager {
     // ---- File config -------------------------------------------------------
 
     /// Load a JSON config file and populate the store.
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
+    #[doc = "# Panics\nMay panic if an internal synchronization lock is poisoned."]
     pub async fn load_file_config(&self, path: &str) -> Result<()> {
         let config = RateLimitFileConfig::load_from_file(path)?;
 
@@ -1859,6 +1936,8 @@ impl RateLimitManager {
     }
 
     /// Hot-reload the config file (if a path was provided).
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
+    #[doc = "# Panics\nMay panic if an internal synchronization lock is poisoned."]
     pub async fn reload_file_config(&self) -> Result<()> {
         if let Some(ref path) = self.config_path.clone() {
             // Invalidate cache first.
@@ -1877,10 +1956,13 @@ impl RateLimitManager {
     /// 4. Default from store
     /// 5. Default from file config
     /// 6. `None` (unlimited)
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
     pub async fn resolve_policy(&self, key_id: &str) -> Result<Option<RateLimitPolicy>> {
         self.resolve_policy_with_fallback(key_id, None).await
     }
 
+    #[doc = "# Panics\nMay panic if an internal synchronization lock is poisoned."]
+    #[doc = "# Errors\nReturns an error if the backing store cannot be queried."]
     pub async fn resolve_policy_with_fallback(
         &self,
         key_id: &str,
@@ -1970,6 +2052,7 @@ impl RateLimitManager {
 
     /// Check rate limits for `key_id`. Increments counters if allowed.
     /// Returns `Err` if the key is blocked, `Ok(result)` otherwise.
+    #[doc = "# Errors\nReturns an error if policy resolution or counter storage fails."]
     pub async fn check_rate_limit(
         &self,
         key_id: &str,
@@ -1980,6 +2063,7 @@ impl RateLimitManager {
             .await
     }
 
+    #[doc = "# Errors\nReturns an error if policy resolution or counter storage fails."]
     pub async fn check_rate_limit_with_policy(
         &self,
         key_id: &str,
@@ -2121,6 +2205,7 @@ impl RateLimitManager {
     }
 
     /// Read current usage without incrementing (for status endpoints).
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
     pub async fn get_current_usage(&self, key_id: &str) -> Result<(String, Vec<BucketStatus>)> {
         let ts = now_secs();
         let policy = self.resolve_policy(key_id).await.unwrap_or_default();
@@ -2139,13 +2224,15 @@ impl RateLimitManager {
 
     /// Set an emergency block (in-memory + persistent).
     /// `duration_seconds = None` means permanent.
+    #[doc = "# Panics\nMay panic if an internal synchronization lock is poisoned."]
+    #[doc = "# Errors\nReturns an error if the persistent store cannot save the block."]
     pub async fn set_emergency_block(
         &self,
         key_id: &str,
         duration_seconds: Option<u64>,
         reason: &str,
     ) -> Result<()> {
-        let until_secs = duration_seconds.map(|d| now_secs() + d).unwrap_or(0);
+        let until_secs = duration_seconds.map_or(0, |d| now_secs() + d);
         let block = BlockInfo {
             key_id: key_id.to_string(),
             until_secs,
@@ -2163,17 +2250,21 @@ impl RateLimitManager {
         Ok(())
     }
 
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
+    #[doc = "# Panics\nMay panic if an internal synchronization lock is poisoned."]
     pub async fn remove_emergency_block(&self, key_id: &str) -> Result<()> {
         self.emergency_blocks.write().unwrap().remove(key_id);
         self.store.unblock_key(key_id).await?;
         Ok(())
     }
 
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
     pub async fn list_emergency_blocks(&self) -> Result<Vec<BlockInfo>> {
         self.store.list_blocks().await
     }
 
     /// Check whether a key is currently blocked (in-memory or persistent).
+    #[doc = "# Panics\nMay panic if an internal synchronization lock is poisoned."]
     pub async fn get_block(&self, key_id: &str) -> Option<BlockInfo> {
         // Fast in-memory path first.
         {
@@ -2191,6 +2282,8 @@ impl RateLimitManager {
 
     // ---- Policy CRUD -------------------------------------------------------
 
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
+    #[doc = "# Panics\nMay panic if an internal synchronization lock is poisoned."]
     pub async fn create_policy(&self, policy: RateLimitPolicy) -> Result<()> {
         self.store.save_policy(&policy).await?;
         self.policy_cache
@@ -2200,6 +2293,8 @@ impl RateLimitManager {
         Ok(())
     }
 
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
+    #[doc = "# Panics\nMay panic if an internal synchronization lock is poisoned."]
     pub async fn update_policy(&self, policy: RateLimitPolicy) -> Result<bool> {
         let existed = self.store.get_policy(&policy.id).await?.is_some();
         self.store.save_policy(&policy).await?;
@@ -2210,36 +2305,45 @@ impl RateLimitManager {
         Ok(existed)
     }
 
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
+    #[doc = "# Panics\nMay panic if an internal synchronization lock is poisoned."]
     pub async fn delete_policy(&self, id: &str) -> Result<bool> {
         let deleted = self.store.delete_policy(id).await?;
         self.policy_cache.write().unwrap().remove(id);
         Ok(deleted)
     }
 
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
     pub async fn get_policy(&self, id: &str) -> Result<Option<RateLimitPolicy>> {
         self.store.get_policy(id).await
     }
 
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
     pub async fn list_policies(&self) -> Result<Vec<RateLimitPolicy>> {
         self.store.list_policies().await
     }
 
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
     pub async fn assign_key_policy(&self, key_id: &str, policy_id: &str) -> Result<()> {
         self.store.set_key_policy(key_id, policy_id).await
     }
 
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
     pub async fn remove_key_policy(&self, key_id: &str) -> Result<bool> {
         self.store.remove_key_policy(key_id).await
     }
 
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
     pub async fn get_key_policy_id(&self, key_id: &str) -> Result<Option<String>> {
         self.store.get_key_policy(key_id).await
     }
 
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
     pub async fn set_default_policy(&self, policy_id: &str) -> Result<()> {
         self.store.set_default_policy_id(policy_id).await
     }
 
+    #[doc = "# Errors\nReturns an error if the underlying storage or configuration operation fails."]
     pub async fn get_default_policy_id(&self) -> Result<Option<String>> {
         self.store.get_default_policy_id().await
     }
@@ -2247,6 +2351,7 @@ impl RateLimitManager {
     // ---- Response headers --------------------------------------------------
 
     /// Build standard rate limit response headers from a check result.
+    #[must_use]
     pub fn rate_limit_headers(result: &RateLimitCheckResult) -> Vec<(String, String)> {
         let mut headers = Vec::new();
 
@@ -2318,6 +2423,7 @@ impl<T> Pipe for T {
 /// - `ROUTIIUM_RATE_LIMIT_DAILY` — daily request limit
 /// - `ROUTIIUM_RATE_LIMIT_PER_MINUTE` — per-minute request limit
 /// - `ROUTIIUM_RATE_LIMIT_CUSTOM_REQUESTS` + `ROUTIIUM_RATE_LIMIT_CUSTOM_WINDOW_SECONDS`
+#[must_use]
 pub fn default_policy_from_env() -> Option<RateLimitPolicy> {
     if let Ok(json) = std::env::var("ROUTIIUM_RATE_LIMIT_BUCKETS") {
         if let Ok(buckets) = serde_json::from_str::<Vec<RateLimitBucket>>(&json) {

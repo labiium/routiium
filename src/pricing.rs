@@ -15,6 +15,12 @@ pub struct ModelPricing {
 }
 
 impl ModelPricing {
+    fn token_count_as_f64(tokens: u64) -> f64 {
+        // Parsing avoids a silent numeric cast while preserving the full `u64` range.
+        tokens.to_string().parse::<f64>().unwrap_or(f64::MAX)
+    }
+
+    #[must_use]
     pub fn calculate_cost(
         &self,
         input_tokens: u64,
@@ -28,16 +34,18 @@ impl ModelPricing {
         let cached_token_count = cached_tokens.unwrap_or(0);
         let uncached_input_tokens = input_tokens.saturating_sub(cached_token_count);
 
-        let input_cost = (uncached_input_tokens as f64 / 1_000_000.0) * self.input_per_million;
-        let output_cost = (output_tokens as f64 / 1_000_000.0) * self.output_per_million;
+        let input_cost = (Self::token_count_as_f64(uncached_input_tokens) / 1_000_000.0)
+            * self.input_per_million;
+        let output_cost =
+            (Self::token_count_as_f64(output_tokens) / 1_000_000.0) * self.output_per_million;
 
         let cached_cost = self
             .cached_per_million
-            .map(|price| (cached_token_count as f64 / 1_000_000.0) * price);
+            .map(|price| (Self::token_count_as_f64(cached_token_count) / 1_000_000.0) * price);
 
         let reasoning_cost =
             if let (Some(tokens), Some(price)) = (reasoning_tokens, self.reasoning_per_million) {
-                Some((tokens as f64 / 1_000_000.0) * price)
+                Some((Self::token_count_as_f64(tokens) / 1_000_000.0) * price)
             } else {
                 None
             };
@@ -59,7 +67,8 @@ pub struct PricingConfig {
 }
 
 impl PricingConfig {
-    /// Create with OpenAI default pricing (as of 2024)
+    /// Create with `OpenAI` default pricing (as of 2024)
+    #[must_use]
     pub fn openai_defaults() -> Self {
         let mut models = HashMap::new();
 
@@ -175,6 +184,9 @@ impl PricingConfig {
     }
 
     /// Load from JSON file
+    ///
+    /// # Errors
+    /// Returns an error when the file cannot be read or contains invalid JSON.
     pub fn load_from_file(path: &str) -> Result<Self, std::io::Error> {
         let content = std::fs::read_to_string(path)?;
         serde_json::from_str(&content)
@@ -182,6 +194,7 @@ impl PricingConfig {
     }
 
     /// Get pricing for a model, with prefix matching and fallback
+    #[must_use]
     pub fn get_pricing(&self, model: &str) -> Option<&ModelPricing> {
         // Exact match first
         if let Some(pricing) = self.models.get(model) {
@@ -200,6 +213,7 @@ impl PricingConfig {
     }
 
     /// Calculate cost for a request
+    #[must_use]
     pub fn calculate_cost(
         &self,
         model: &str,
@@ -233,51 +247,65 @@ impl Default for PricingConfig {
 mod tests {
     use super::*;
 
+    fn assert_approx_eq(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
+    }
+
+    #[expect(
+        clippy::option_if_let_else,
+        clippy::panic,
+        reason = "test fixture helper fails loudly"
+    )]
+    fn test_cost(
+        config: &PricingConfig,
+        model: &str,
+        input: u64,
+        output: u64,
+        cached: Option<u64>,
+    ) -> crate::analytics::CostInfo {
+        match config.calculate_cost(model, input, output, cached, None) {
+            Some(cost) => cost,
+            None => panic!("pricing missing for test model {model}"),
+        }
+    }
+
     #[test]
     fn test_gpt4o_pricing() {
         let config = PricingConfig::openai_defaults();
-        let cost = config
-            .calculate_cost("gpt-4o", 1_000_000, 1_000_000, None, None)
-            .unwrap();
+        let cost = test_cost(&config, "gpt-4o", 1_000_000, 1_000_000, None);
 
-        assert_eq!(cost.input_cost, 2.50);
-        assert_eq!(cost.output_cost, 10.00);
-        assert_eq!(cost.total_cost, 12.50);
+        assert_approx_eq(cost.input_cost, 2.50);
+        assert_approx_eq(cost.output_cost, 10.00);
+        assert_approx_eq(cost.total_cost, 12.50);
     }
 
     #[test]
     fn test_gpt4o_mini_pricing() {
         let config = PricingConfig::openai_defaults();
-        let cost = config
-            .calculate_cost("gpt-4o-mini", 1_000_000, 1_000_000, None, None)
-            .unwrap();
+        let cost = test_cost(&config, "gpt-4o-mini", 1_000_000, 1_000_000, None);
 
-        assert_eq!(cost.input_cost, 0.150);
-        assert_eq!(cost.output_cost, 0.600);
-        assert_eq!(cost.total_cost, 0.750);
+        assert_approx_eq(cost.input_cost, 0.150);
+        assert_approx_eq(cost.output_cost, 0.600);
+        assert_approx_eq(cost.total_cost, 0.750);
     }
 
     #[test]
     fn test_cached_tokens() {
         let config = PricingConfig::openai_defaults();
-        let cost = config
-            .calculate_cost("gpt-4o", 1_000_000, 1_000_000, Some(1_000_000), None)
-            .unwrap();
+        let cost = test_cost(&config, "gpt-4o", 1_000_000, 1_000_000, Some(1_000_000));
 
         // Input tokens are fully cached, so base input cost should be 0 and
         // cost is charged via cached pricing only.
-        assert_eq!(cost.input_cost, 0.0);
-        assert_eq!(cost.output_cost, 10.00);
+        assert_approx_eq(cost.input_cost, 0.0);
+        assert_approx_eq(cost.output_cost, 10.00);
         assert_eq!(cost.cached_cost, Some(1.25));
-        assert_eq!(cost.total_cost, 11.25);
+        assert_approx_eq(cost.total_cost, 11.25);
     }
 
     #[test]
     fn test_partially_cached_tokens() {
         let config = PricingConfig::openai_defaults();
-        let cost = config
-            .calculate_cost("gpt-4o", 1_000_000, 0, Some(400_000), None)
-            .unwrap();
+        let cost = test_cost(&config, "gpt-4o", 1_000_000, 0, Some(400_000));
 
         // 600k uncached @ $2.50/M = $1.50
         assert!((cost.input_cost - 1.5).abs() < 1e-9);
@@ -289,11 +317,9 @@ mod tests {
     #[test]
     fn test_prefix_matching() {
         let config = PricingConfig::openai_defaults();
-        let cost = config
-            .calculate_cost("gpt-4o-2024-08-06", 1_000_000, 1_000_000, None, None)
-            .unwrap();
+        let cost = test_cost(&config, "gpt-4o-2024-08-06", 1_000_000, 1_000_000, None);
 
-        assert_eq!(cost.input_cost, 2.50);
-        assert_eq!(cost.output_cost, 10.00);
+        assert_approx_eq(cost.input_cost, 2.50);
+        assert_approx_eq(cost.output_cost, 10.00);
     }
 }

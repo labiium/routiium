@@ -1,4 +1,4 @@
-//! PostgreSQL chat history storage backend
+//! `PostgreSQL` chat history storage backend
 //!
 //! Production-grade storage with connection pooling and high performance.
 //! Ideal for multi-instance deployments and high-traffic scenarios.
@@ -10,24 +10,24 @@ use crate::chat_history::{
 };
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Row;
+use std::fmt::Write as _;
 
-/// PostgreSQL storage backend
+/// `PostgreSQL` storage backend
 #[derive(Clone)]
 pub struct PostgresChatHistoryStore {
     pool: PgPool,
 }
 
+#[allow(clippy::missing_errors_doc)]
 impl PostgresChatHistoryStore {
-    /// Create a new PostgreSQL store with the given database URL
+    /// Create a new `PostgreSQL` store with the given database URL
     /// URL format: "postgresql://user:password@host:port/database"
     pub async fn new(database_url: &str) -> Result<Self> {
         let pool = PgPoolOptions::new()
             .max_connections(10)
             .connect(database_url)
             .await
-            .map_err(|e| {
-                ChatHistoryError::Storage(format!("PostgreSQL connection error: {}", e))
-            })?;
+            .map_err(|e| ChatHistoryError::Storage(format!("PostgreSQL connection error: {e}")))?;
 
         Ok(Self { pool })
     }
@@ -80,6 +80,7 @@ impl PostgresChatHistoryStore {
 }
 
 #[async_trait::async_trait]
+#[allow(clippy::too_many_lines)]
 impl ChatHistoryStore for PostgresChatHistoryStore {
     async fn init(&self) -> Result<()> {
         self.init_schema().await
@@ -89,23 +90,23 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
         let metadata_json = Self::serialize_json(&conversation.metadata)?;
 
         sqlx::query(
-            r#"
+            r"
             INSERT INTO conversations (conversation_id, created_at, last_seen_at, title, metadata)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT(conversation_id) DO UPDATE SET
                 last_seen_at = EXCLUDED.last_seen_at,
                 title = EXCLUDED.title,
                 metadata = EXCLUDED.metadata
-            "#,
+            ",
         )
         .bind(&conversation.conversation_id)
-        .bind(conversation.created_at as i64)
-        .bind(conversation.last_seen_at as i64)
+        .bind(conversation.created_at.cast_signed())
+        .bind(conversation.last_seen_at.cast_signed())
         .bind(&conversation.title)
         .bind(&metadata_json)
         .execute(&self.pool)
         .await
-        .map_err(|e| ChatHistoryError::Storage(format!("Insert conversation error: {}", e)))?;
+        .map_err(|e| ChatHistoryError::Storage(format!("Insert conversation error: {e}")))?;
 
         Ok(())
     }
@@ -133,7 +134,7 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
         let privacy_level_json = Self::serialize_json(&message.privacy_level)?;
 
         sqlx::query(
-            r#"
+            r"
             INSERT INTO messages (
                 message_id, conversation_id, request_id, role, content, tool_calls,
                 created_at, requested_model, actual_model, backend, backend_url,
@@ -144,7 +145,7 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
                 $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
             )
-            "#,
+            ",
         )
         .bind(&message.message_id)
         .bind(&message.conversation_id)
@@ -152,7 +153,7 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
         .bind(&role_json)
         .bind(&content_json)
         .bind(&tool_calls_json)
-        .bind(message.created_at as i64)
+        .bind(message.created_at.cast_signed())
         .bind(&message.routing.requested_model)
         .bind(&message.routing.actual_model)
         .bind(&message.routing.backend)
@@ -160,23 +161,19 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
         .bind(&message.routing.upstream_mode)
         .bind(&message.routing.route_id)
         .bind(&transformations_json)
-        .bind(if message.mcp.mcp_enabled { 1i64 } else { 0i64 })
+        .bind(i64::from(message.mcp.mcp_enabled))
         .bind(&mcp_servers_json)
-        .bind(if message.mcp.system_prompt_applied {
-            1i64
-        } else {
-            0i64
-        })
-        .bind(message.tokens.input_tokens.map(|t| t as i64))
-        .bind(message.tokens.output_tokens.map(|t| t as i64))
-        .bind(message.tokens.cached_tokens.map(|t| t as i64))
-        .bind(message.tokens.reasoning_tokens.map(|t| t as i64))
+        .bind(i64::from(message.mcp.system_prompt_applied))
+        .bind(message.tokens.input_tokens.map(u64::cast_signed))
+        .bind(message.tokens.output_tokens.map(u64::cast_signed))
+        .bind(message.tokens.cached_tokens.map(u64::cast_signed))
+        .bind(message.tokens.reasoning_tokens.map(u64::cast_signed))
         .bind(&cost_info_json)
         .bind(&message.content_hash)
         .bind(&privacy_level_json)
         .execute(&self.pool)
         .await
-        .map_err(|e| ChatHistoryError::Storage(format!("Insert message error: {}", e)))?;
+        .map_err(|e| ChatHistoryError::Storage(format!("Insert message error: {e}")))?;
 
         Ok(())
     }
@@ -187,7 +184,7 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
             .pool
             .begin()
             .await
-            .map_err(|e| ChatHistoryError::Storage(format!("Transaction error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Transaction error: {e}")))?;
 
         for message in messages {
             let role_json = Self::serialize_json(&message.role)?;
@@ -212,7 +209,7 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
             let privacy_level_json = Self::serialize_json(&message.privacy_level)?;
 
             sqlx::query(
-                r#"
+                r"
                 INSERT INTO messages (
                     message_id, conversation_id, request_id, role, content, tool_calls,
                     created_at, requested_model, actual_model, backend, backend_url,
@@ -223,7 +220,7 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
                     $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
                 )
-                "#,
+                ",
             )
             .bind(&message.message_id)
             .bind(&message.conversation_id)
@@ -231,7 +228,7 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
             .bind(&role_json)
             .bind(&content_json)
             .bind(&tool_calls_json)
-            .bind(message.created_at as i64)
+            .bind(message.created_at.cast_signed())
             .bind(&message.routing.requested_model)
             .bind(&message.routing.actual_model)
             .bind(&message.routing.backend)
@@ -239,28 +236,24 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
             .bind(&message.routing.upstream_mode)
             .bind(&message.routing.route_id)
             .bind(&transformations_json)
-            .bind(if message.mcp.mcp_enabled { 1i64 } else { 0i64 })
+            .bind(i64::from(message.mcp.mcp_enabled))
             .bind(&mcp_servers_json)
-            .bind(if message.mcp.system_prompt_applied {
-                1i64
-            } else {
-                0i64
-            })
-            .bind(message.tokens.input_tokens.map(|t| t as i64))
-            .bind(message.tokens.output_tokens.map(|t| t as i64))
-            .bind(message.tokens.cached_tokens.map(|t| t as i64))
-            .bind(message.tokens.reasoning_tokens.map(|t| t as i64))
+            .bind(i64::from(message.mcp.system_prompt_applied))
+            .bind(message.tokens.input_tokens.map(u64::cast_signed))
+            .bind(message.tokens.output_tokens.map(u64::cast_signed))
+            .bind(message.tokens.cached_tokens.map(u64::cast_signed))
+            .bind(message.tokens.reasoning_tokens.map(u64::cast_signed))
             .bind(&cost_info_json)
             .bind(&message.content_hash)
             .bind(&privacy_level_json)
             .execute(&mut *tx)
             .await
-            .map_err(|e| ChatHistoryError::Storage(format!("Insert message error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Insert message error: {e}")))?;
         }
 
         tx.commit()
             .await
-            .map_err(|e| ChatHistoryError::Storage(format!("Transaction commit error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Transaction commit error: {e}")))?;
 
         Ok(())
     }
@@ -272,53 +265,55 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
         .bind(conversation_id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| ChatHistoryError::Storage(format!("Query error: {}", e)))?
-        .ok_or_else(|| ChatHistoryError::NotFound(format!("Conversation {} not found", conversation_id)))?;
+        .map_err(|e| ChatHistoryError::Storage(format!("Query error: {e}")))?
+        .ok_or_else(|| ChatHistoryError::NotFound(format!("Conversation {conversation_id} not found")))?;
 
         let metadata_str: String = row.get("metadata");
         let metadata = Self::deserialize_json(&metadata_str)?;
 
         Ok(Conversation {
             conversation_id: row.get("conversation_id"),
-            created_at: row.get::<i64, _>("created_at") as u64,
-            last_seen_at: row.get::<i64, _>("last_seen_at") as u64,
+            created_at: row.get::<i64, _>("created_at").cast_unsigned(),
+            last_seen_at: row.get::<i64, _>("last_seen_at").cast_unsigned(),
             title: row.get("title"),
             metadata,
         })
     }
 
     async fn list_conversations(&self, filters: &ConversationFilters) -> Result<Vec<Conversation>> {
-        let mut query = String::from("SELECT conversation_id, created_at, last_seen_at, title, metadata FROM conversations WHERE 1=1");
-        let mut param_count = 0;
+        let mut query = String::from(
+            "SELECT conversation_id, created_at, last_seen_at, title, metadata FROM conversations WHERE 1=1",
+        );
+        let mut param_count: usize = 0;
 
         if filters.start_time.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND created_at >= ${}", param_count));
+            param_count = param_count.saturating_add(1);
+            let _ = write!(query, " AND created_at >= ${param_count}");
         }
         if filters.end_time.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND created_at <= ${}", param_count));
+            param_count = param_count.saturating_add(1);
+            let _ = write!(query, " AND created_at <= ${param_count}");
         }
 
         query.push_str(" ORDER BY last_seen_at DESC");
 
         if let Some(limit) = filters.limit {
-            query.push_str(&format!(" LIMIT {}", limit));
+            let _ = write!(query, " LIMIT {limit}");
         }
 
         let mut sql_query = sqlx::query(&query);
 
         if let Some(start) = filters.start_time {
-            sql_query = sql_query.bind(start as i64);
+            sql_query = sql_query.bind(start.cast_signed());
         }
         if let Some(end) = filters.end_time {
-            sql_query = sql_query.bind(end as i64);
+            sql_query = sql_query.bind(end.cast_signed());
         }
 
         let rows = sql_query
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| ChatHistoryError::Storage(format!("Query error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Query error: {e}")))?;
 
         let mut conversations = Vec::new();
         for row in rows {
@@ -327,8 +322,8 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
 
             conversations.push(Conversation {
                 conversation_id: row.get("conversation_id"),
-                created_at: row.get::<i64, _>("created_at") as u64,
-                last_seen_at: row.get::<i64, _>("last_seen_at") as u64,
+                created_at: row.get::<i64, _>("created_at").cast_unsigned(),
+                last_seen_at: row.get::<i64, _>("last_seen_at").cast_unsigned(),
                 title: row.get("title"),
                 metadata,
             });
@@ -339,53 +334,53 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
 
     async fn list_messages(&self, filters: &MessageFilters) -> Result<Vec<Message>> {
         let mut query = String::from("SELECT * FROM messages WHERE 1=1");
-        let mut param_count = 0;
+        let mut param_count: usize = 0;
 
         if filters.conversation_id.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND conversation_id = ${}", param_count));
+            param_count = param_count.saturating_add(1);
+            let _ = write!(query, " AND conversation_id = ${param_count}");
         }
         if filters.request_id.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND request_id = ${}", param_count));
+            param_count = param_count.saturating_add(1);
+            let _ = write!(query, " AND request_id = ${param_count}");
         }
         if filters.start_time.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND created_at >= ${}", param_count));
+            param_count = param_count.saturating_add(1);
+            let _ = write!(query, " AND created_at >= ${param_count}");
         }
         if filters.end_time.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND created_at <= ${}", param_count));
+            param_count = param_count.saturating_add(1);
+            let _ = write!(query, " AND created_at <= ${param_count}");
         }
         if filters.backend.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND backend = ${}", param_count));
+            param_count = param_count.saturating_add(1);
+            let _ = write!(query, " AND backend = ${param_count}");
         }
         if filters.requested_model.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND requested_model = ${}", param_count));
+            param_count = param_count.saturating_add(1);
+            let _ = write!(query, " AND requested_model = ${param_count}");
         }
         if filters.actual_model.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND actual_model = ${}", param_count));
+            param_count = param_count.saturating_add(1);
+            let _ = write!(query, " AND actual_model = ${param_count}");
         }
         if filters.route_id.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND route_id = ${}", param_count));
+            param_count = param_count.saturating_add(1);
+            let _ = write!(query, " AND route_id = ${param_count}");
         }
         if filters.mcp_enabled.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND mcp_enabled = ${}", param_count));
+            param_count = param_count.saturating_add(1);
+            let _ = write!(query, " AND mcp_enabled = ${param_count}");
         }
         if filters.upstream_mode.is_some() {
-            param_count += 1;
-            query.push_str(&format!(" AND upstream_mode = ${}", param_count));
+            param_count = param_count.saturating_add(1);
+            let _ = write!(query, " AND upstream_mode = ${param_count}");
         }
 
         query.push_str(" ORDER BY created_at ASC");
 
         if let Some(limit) = filters.limit {
-            query.push_str(&format!(" LIMIT {}", limit));
+            let _ = write!(query, " LIMIT {limit}");
         }
 
         let mut sql_query = sqlx::query(&query);
@@ -397,10 +392,10 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
             sql_query = sql_query.bind(req_id);
         }
         if let Some(start) = filters.start_time {
-            sql_query = sql_query.bind(start as i64);
+            sql_query = sql_query.bind(start.cast_signed());
         }
         if let Some(end) = filters.end_time {
-            sql_query = sql_query.bind(end as i64);
+            sql_query = sql_query.bind(end.cast_signed());
         }
         if let Some(ref backend) = filters.backend {
             sql_query = sql_query.bind(backend);
@@ -415,7 +410,7 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
             sql_query = sql_query.bind(route_id);
         }
         if let Some(mcp) = filters.mcp_enabled {
-            sql_query = sql_query.bind(if mcp { 1i64 } else { 0i64 });
+            sql_query = sql_query.bind(i64::from(mcp));
         }
         if let Some(ref mode) = filters.upstream_mode {
             sql_query = sql_query.bind(mode);
@@ -424,7 +419,7 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
         let rows = sql_query
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| ChatHistoryError::Storage(format!("Query error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Query error: {e}")))?;
 
         let mut messages = Vec::new();
         for row in rows {
@@ -468,7 +463,7 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
                 role,
                 content,
                 tool_calls,
-                created_at: row.get::<i64, _>("created_at") as u64,
+                created_at: row.get::<i64, _>("created_at").cast_unsigned(),
                 routing: RoutingInfo {
                     requested_model: row.get("requested_model"),
                     actual_model: row.get("actual_model"),
@@ -484,12 +479,18 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
                     system_prompt_applied: row.get::<i64, _>("system_prompt_applied") != 0,
                 },
                 tokens: TokenInfo {
-                    input_tokens: row.get::<Option<i64>, _>("input_tokens").map(|t| t as u64),
-                    output_tokens: row.get::<Option<i64>, _>("output_tokens").map(|t| t as u64),
-                    cached_tokens: row.get::<Option<i64>, _>("cached_tokens").map(|t| t as u64),
+                    input_tokens: row
+                        .get::<Option<i64>, _>("input_tokens")
+                        .map(i64::cast_unsigned),
+                    output_tokens: row
+                        .get::<Option<i64>, _>("output_tokens")
+                        .map(i64::cast_unsigned),
+                    cached_tokens: row
+                        .get::<Option<i64>, _>("cached_tokens")
+                        .map(i64::cast_unsigned),
                     reasoning_tokens: row
                         .get::<Option<i64>, _>("reasoning_tokens")
-                        .map(|t| t as u64),
+                        .map(i64::cast_unsigned),
                 },
                 cost_info,
                 content_hash: row.get("content_hash"),
@@ -505,7 +506,7 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
             .bind(conversation_id)
             .execute(&self.pool)
             .await
-            .map_err(|e| ChatHistoryError::Storage(format!("Delete error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Delete error: {e}")))?;
         Ok(())
     }
 
@@ -533,8 +534,10 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
             .map_err(|e| ChatHistoryError::Storage(e.to_string()))?;
 
         Ok(StorageStats {
-            total_conversations: conv_count as usize,
-            total_messages: msg_count as usize,
+            total_conversations: usize::try_from(conv_count)
+                .map_err(|_| ChatHistoryError::Storage("conversation count out of range".into()))?,
+            total_messages: usize::try_from(msg_count)
+                .map_err(|_| ChatHistoryError::Storage("message count out of range".into()))?,
             backend_type: "postgres".to_string(),
             storage_path: None,
         })
@@ -545,12 +548,13 @@ impl ChatHistoryStore for PostgresChatHistoryStore {
         sqlx::query("SELECT 1")
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| ChatHistoryError::Storage(format!("Health check error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Health check error: {e}")))?;
         Ok(true)
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use crate::chat_history::{MessageRole, PrivacyLevel};
@@ -560,7 +564,7 @@ mod tests {
     // Example: DATABASE_URL=postgresql://postgres:password@localhost/test_db
 
     #[tokio::test]
-    #[ignore] // Requires PostgreSQL instance
+    #[ignore = "Requires PostgreSQL instance"]
     async fn test_postgres_store_conversation() {
         let db_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgresql://postgres:password@localhost/test_db".to_string());
@@ -579,7 +583,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires PostgreSQL instance
+    #[ignore = "Requires PostgreSQL instance"]
     async fn test_postgres_store_message() {
         let db_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgresql://postgres:password@localhost/test_db".to_string());
@@ -614,7 +618,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires PostgreSQL instance
+    #[ignore = "Requires PostgreSQL instance"]
     async fn test_postgres_store_batch_messages() {
         let db_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgresql://postgres:password@localhost/test_db".to_string());
@@ -656,7 +660,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires PostgreSQL instance
+    #[ignore = "Requires PostgreSQL instance"]
     async fn test_postgres_store_health() {
         let db_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgresql://postgres:password@localhost/test_db".to_string());

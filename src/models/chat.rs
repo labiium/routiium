@@ -4,9 +4,9 @@ use std::collections::HashMap;
 
 /// Chat Completions role enumeration.
 ///
-/// Uses lowercase serialization to match the OpenAI Chat API:
+/// Uses lowercase serialization to match the `OpenAI` Chat API:
 /// "system" | "user" | "assistant" | "tool" | "function"
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
@@ -66,11 +66,11 @@ pub enum ToolDefinition {
 
 /// Response format hint for structured outputs in Chat Completions.
 ///
-/// Example: { "type": "json_object", "schema": { ... } }
+/// Example: { "type": "`json_object`", "schema": { ... } }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[skip_serializing_none]
 pub struct ResponseFormat {
-    /// e.g., "json_object"
+    /// e.g., "`json_object`"
     #[serde(rename = "type")]
     pub kind: String,
     /// Additional fields such as "schema" may be present.
@@ -125,7 +125,7 @@ pub struct ChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
 
-    /// Provider-specific extra options (e.g., Gemini thinking_config)
+    /// Provider-specific extra options (e.g., Gemini `thinking_config`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<serde_json::Value>,
 }
@@ -142,7 +142,7 @@ pub struct ToolCall {
     #[serde(rename = "type")]
     pub call_type: String, // "function"
     pub function: FunctionCall,
-    /// Provider-specific extra content (e.g., Gemini thought_signature)
+    /// Provider-specific extra content (e.g., Gemini `thought_signature`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_content: Option<serde_json::Value>,
 }
@@ -195,7 +195,7 @@ pub struct ChatChoice {
 
 /// Usage statistics in Chat Completions response
 ///
-/// Extended to support reasoning_tokens as a custom field for reasoning models.
+/// Extended to support `reasoning_tokens` as a custom field for reasoning models.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[skip_serializing_none]
 pub struct ChatUsage {
@@ -208,7 +208,7 @@ pub struct ChatUsage {
     #[serde(default)]
     pub reasoning_tokens: Option<u64>,
 
-    /// Cached tokens (subset of prompt_tokens)
+    /// Cached tokens (subset of `prompt_tokens`)
     #[serde(default)]
     pub cached_tokens: Option<u64>,
 }
@@ -257,7 +257,7 @@ pub struct ToolCallDelta {
     pub call_type: Option<String>,
     #[serde(default)]
     pub function: Option<FunctionCallDelta>,
-    /// Provider-specific extra content (e.g., Gemini thought_signature)
+    /// Provider-specific extra content (e.g., Gemini `thought_signature`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_content: Option<serde_json::Value>,
 }

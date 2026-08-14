@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Match strategy for routing rules
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchStrategy {
     /// Exact model name match
@@ -32,7 +32,7 @@ pub enum MatchStrategy {
 }
 
 /// Load balancing strategy for backend pools
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LoadBalanceStrategy {
     /// Use first available backend
@@ -46,28 +46,29 @@ pub enum LoadBalanceStrategy {
     Weighted,
 }
 
-/// Upstream mode (Responses API or Chat Completions API)
-/// Upstream mode (responses, chat, or bedrock)
+/// Upstream mode (Responses, Chat Completions, legacy Bedrock, or Bedrock Mantle)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum UpstreamMode {
     #[default]
     Responses,
     Chat,
     Bedrock,
+    #[serde(alias = "bedrock-mantle", alias = "mantle")]
+    BedrockMantle,
 }
 
 /// Backend configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendConfig {
-    /// Base URL for the backend (e.g., "https://api.openai.com/v1")
+    /// Base URL for the backend (e.g., "<https://api.openai.com/v1>")
     pub base_url: String,
 
     /// Environment variable name containing the API key
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key_env: Option<String>,
 
-    /// API mode (responses or chat)
+    /// API mode (responses, chat, legacy bedrock, or `bedrock_mantle`)
     #[serde(default)]
     pub mode: UpstreamMode,
 
@@ -84,7 +85,7 @@ pub struct BackendConfig {
     pub health_check_url: Option<String>,
 }
 
-fn default_weight() -> u32 {
+const fn default_weight() -> u32 {
     1
 }
 
@@ -107,7 +108,7 @@ pub struct RequestTransform {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub override_temperature: Option<f32>,
 
-    /// Override max_tokens
+    /// Override `max_tokens`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub override_max_tokens: Option<u32>,
 }
@@ -153,7 +154,7 @@ pub struct RoutingRule {
     regex_pattern: Option<Regex>,
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
@@ -167,19 +168,20 @@ impl RoutingRule {
         match &self.match_strategy {
             MatchStrategy::Exact { model: target } => model == target,
             MatchStrategy::Prefix { prefix } => model.starts_with(prefix),
-            MatchStrategy::Regex { .. } => {
-                if let Some(re) = &self.regex_pattern {
-                    re.is_match(model)
-                } else {
-                    false
-                }
-            }
+            MatchStrategy::Regex { .. } => self
+                .regex_pattern
+                .as_ref()
+                .is_some_and(|re| re.is_match(model)),
             MatchStrategy::Glob { pattern } => glob_match(pattern, model),
             MatchStrategy::Any => true,
         }
     }
 
     /// Select a backend based on load balancing strategy
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "backend selection uses bounded modulo and weighted subtraction"
+    )]
     pub fn select_backend(&self) -> Option<&BackendConfig> {
         if self.backends.is_empty() {
             return None;
@@ -202,19 +204,23 @@ impl RoutingRule {
                     return self.backends.first();
                 }
 
-                let mut rand_val = (rand::random::<f64>() * total_weight as f64) as u32;
+                let mut rand_val = rand::random::<u32>() % total_weight;
                 for backend in &self.backends {
                     if rand_val < backend.weight {
                         return Some(backend);
                     }
-                    rand_val -= backend.weight;
+                    rand_val = rand_val.saturating_sub(backend.weight);
                 }
                 self.backends.last()
             }
         }
     }
 
-    /// Apply transformations to the request body
+    /// Apply transformations to the request body.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a transformation backend reports one.
     pub fn apply_transform(&self, body: &mut serde_json::Value) -> Result<()> {
         let Some(transform) = &self.transform else {
             return Ok(());
@@ -333,10 +339,14 @@ pub struct RoutingConfig {
 }
 
 impl RoutingConfig {
-    /// Load routing config from file
+    /// Load routing config from file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read or parsed.
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let mut config: RoutingConfig = serde_json::from_str(&content)?;
+        let mut config: Self = serde_json::from_str(&content)?;
 
         // Sort rules by priority (highest first)
         config
@@ -359,7 +369,8 @@ impl RoutingConfig {
     }
 
     /// Create an empty routing config
-    pub fn empty() -> Self {
+    #[must_use]
+    pub const fn empty() -> Self {
         Self {
             aliases: vec![],
             rules: vec![],
@@ -369,6 +380,7 @@ impl RoutingConfig {
     }
 
     /// Resolve model name through aliases
+    #[must_use]
     pub fn resolve_alias(&self, model: &str) -> String {
         for alias in &self.aliases {
             if alias.enabled && alias.alias == model {
@@ -379,6 +391,7 @@ impl RoutingConfig {
     }
 
     /// Find matching routing rule for a model
+    #[must_use]
     pub fn find_rule(&self, model: &str) -> Option<&RoutingRule> {
         // First resolve aliases
         let resolved_model = self.resolve_alias(model);
@@ -388,6 +401,7 @@ impl RoutingConfig {
     }
 
     /// Get statistics about routing configuration
+    #[must_use]
     pub fn stats(&self) -> RoutingStats {
         let total_rules = self.rules.len();
         let enabled_rules = self.rules.iter().filter(|r| r.enabled).count();
@@ -395,7 +409,7 @@ impl RoutingConfig {
         let enabled_aliases = self.aliases.iter().filter(|a| a.enabled).count();
         let total_backends: usize = self.rules.iter().map(|r| r.backends.len()).sum();
 
-        let mut match_strategies = HashMap::new();
+        let mut match_strategies: HashMap<String, usize> = HashMap::new();
         for rule in &self.rules {
             if rule.enabled {
                 let strategy_name = match &rule.match_strategy {
@@ -405,9 +419,10 @@ impl RoutingConfig {
                     MatchStrategy::Glob { .. } => "glob",
                     MatchStrategy::Any => "any",
                 };
-                *match_strategies
+                let count = match_strategies
                     .entry(strategy_name.to_string())
-                    .or_insert(0) += 1;
+                    .or_insert(0);
+                *count = (*count).saturating_add(1usize);
             }
         }
 
@@ -448,7 +463,11 @@ pub struct ResolvedRoute {
 }
 
 impl RoutingConfig {
-    /// Resolve routing for a model and get backend configuration
+    /// Resolve routing for a model and get backend configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no backend is available and passthrough is disabled.
     pub fn resolve_route(&self, model: &str) -> Result<ResolvedRoute> {
         // Resolve through alias first
         let resolved_model = self.resolve_alias(model);
@@ -479,7 +498,7 @@ impl RoutingConfig {
 
         // No match and no default
         if !self.allow_passthrough {
-            return Err(anyhow!("No routing rule found for model: {}", model));
+            return Err(anyhow!("No routing rule found for model: {model}"));
         }
 
         // Passthrough with environment defaults
@@ -493,7 +512,11 @@ impl RoutingConfig {
         })
     }
 
-    /// Apply transformations to a request for a specific model
+    /// Apply transformations to a request for a specific model.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a matched rule's transformation fails.
     pub fn apply_transformations(
         &self,
         model: &str,
@@ -545,21 +568,21 @@ fn glob_match(pattern: &str, text: &str) -> bool {
                 return false;
             }
             text_pos = part.len();
-        } else if i == pattern_parts.len() - 1 {
+        } else if i == pattern_parts.len().saturating_sub(1) {
             // Last part - must match at end
             if !text.ends_with(part) {
                 return false;
             }
             // Verify it's after our current position
-            if let Some(pos) = text[text_pos..].find(part) {
-                text_pos += pos + part.len();
+            if let Some(pos) = text.get(text_pos..).and_then(|suffix| suffix.find(part)) {
+                text_pos = text_pos.saturating_add(pos).saturating_add(part.len());
             } else {
                 return false;
             }
         } else {
             // Middle part - find anywhere after current position
-            if let Some(pos) = text[text_pos..].find(part) {
-                text_pos += pos + part.len();
+            if let Some(pos) = text.get(text_pos..).and_then(|suffix| suffix.find(part)) {
+                text_pos = text_pos.saturating_add(pos).saturating_add(part.len());
             } else {
                 return false;
             }
@@ -603,6 +626,23 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "test fixture must fail fast on invalid protocol data"
+    )]
+    fn test_bedrock_mantle_mode_deserializes() {
+        let backend: BackendConfig = serde_json::from_value(json!({
+            "base_url": "https://bedrock-mantle.us-east-1.api.aws/openai/v1",
+            "key_env": "AWS_BEARER_TOKEN_BEDROCK",
+            "mode": "bedrock_mantle"
+        }))
+        .expect("Bedrock Mantle backend should deserialize");
+
+        assert_eq!(backend.mode, UpstreamMode::BedrockMantle);
+        assert_eq!(backend.key_env.as_deref(), Some("AWS_BEARER_TOKEN_BEDROCK"));
+    }
+
+    #[test]
     fn test_routing_match() {
         let rule = RoutingRule {
             id: "test".to_string(),
@@ -624,6 +664,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test fixture must fail fast on invalid route"
+    )]
     fn test_resolve_route_with_priority_and_default() {
         let alias = ModelAlias {
             alias: "friendly".to_string(),
@@ -701,6 +745,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test fixture must fail fast on invalid transformation"
+    )]
     fn test_apply_transformations_rewrites_and_updates_body() {
         let mut add_parameters = HashMap::new();
         add_parameters.insert("top_p".to_string(), json!(0.9));
@@ -757,13 +805,26 @@ mod tests {
             body.get("model").and_then(|v| v.as_str()),
             Some("llama-3.1-8b")
         );
-        assert_eq!(body.get("top_p").and_then(|v| v.as_f64()), Some(0.9));
-        assert_eq!(body.get("temperature").and_then(|v| v.as_f64()), Some(0.75));
-        assert_eq!(body.get("max_tokens").and_then(|v| v.as_u64()), Some(2048));
+        assert_eq!(
+            body.get("top_p").and_then(serde_json::Value::as_f64),
+            Some(0.9)
+        );
+        assert_eq!(
+            body.get("temperature").and_then(serde_json::Value::as_f64),
+            Some(0.75)
+        );
+        assert_eq!(
+            body.get("max_tokens").and_then(serde_json::Value::as_u64),
+            Some(2048)
+        );
         assert!(body.get("metadata").is_none());
     }
 
     #[test]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test fixture must fail fast when backend selection breaks"
+    )]
     fn test_round_robin_backend_selection() {
         let rule = RoutingRule {
             id: "round".to_string(),

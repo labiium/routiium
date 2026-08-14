@@ -5,17 +5,17 @@
 ///
 /// SETUP:
 /// 1. Configure required environment variables in .env:
-///    OPENAI_BASE_URL=https://api.openai.com/v1  (or your custom endpoint)
-///    OPENAI_API_KEY=sk-proj-...                  (your API key)
-///    MODEL=gpt-5-nano                            (model to test with)
+///    `OPENAI_BASE_URL=https://api.openai.com/v1`  (or your custom endpoint)
+///    `OPENAI_API_KEY=sk-proj-...`                  (your API key)
+///    `MODEL=gpt-5-nano`                            (model to test with)
 ///
 /// 2. Run tests with --ignored flag:
-///    cargo test --test integration_tests -- --ignored --nocapture
+///    cargo test --test `integration_tests` -- --ignored --nocapture
 ///
 /// NOTES:
 /// - These tests are marked #[ignore] to prevent accidental API calls
-/// - All environment variables (OPENAI_BASE_URL, OPENAI_API_KEY, MODEL) are required
-/// - Tests will skip if OPENAI_API_KEY is not set
+/// - All environment variables (`OPENAI_BASE_URL`, `OPENAI_API_KEY`, `MODEL`) are required
+/// - Tests will skip if `OPENAI_API_KEY` is not set
 /// - These tests will consume API credits
 use routiium::{
     chat::{ChatCompletionRequest, ChatMessage, FunctionDef, Role, ToolDefinition},
@@ -42,11 +42,11 @@ fn should_run_integration_tests() -> bool {
         let start = api_key_dbg.chars().take(4).collect::<String>();
         let end_rev = api_key_dbg.chars().rev().take(4).collect::<String>();
         let end = end_rev.chars().rev().collect::<String>();
-        format!("{}…{}", start, end)
+        format!("{start}…{end}")
     };
-    eprintln!("Env debug -> OPENAI_BASE_URL: {}", base_url_dbg);
-    eprintln!("Env debug -> MODEL: {}", model_dbg);
-    eprintln!("Env debug -> OPENAI_API_KEY: {}", masked_key);
+    eprintln!("Env debug -> OPENAI_BASE_URL: {base_url_dbg}");
+    eprintln!("Env debug -> MODEL: {model_dbg}");
+    eprintln!("Env debug -> OPENAI_API_KEY: {masked_key}");
 
     // Verify required variables are present and non-empty
     let mut missing: Vec<&'static str> = Vec::new();
@@ -64,10 +64,10 @@ fn should_run_integration_tests() -> bool {
     }
 
     if !missing.is_empty() {
-        eprintln!("⚠️  Missing required env vars: {:?}", missing);
+        eprintln!("⚠️  Missing required env vars: {missing:?}");
         eprintln!("    Ensure your .env contains these or export them in your shell.");
         eprintln!("    Example .env:");
-        eprintln!("      OPENAI_BASE_URL=https://api.openai.com/v1");
+        eprintln!("      `OPENAI_BASE_URL=https://api.openai.com/v1`");
         eprintln!("      OPENAI_API_KEY=sk-...");
         eprintln!("      MODEL=gpt-4.1-nano");
         return false;
@@ -79,7 +79,7 @@ fn should_run_integration_tests() -> bool {
             if let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) {
                 use std::net::{TcpStream, ToSocketAddrs};
                 use std::time::Duration;
-                let addr_str = format!("{}:{}", host, port);
+                let addr_str = format!("{host}:{port}");
                 let resolved = addr_str.to_socket_addrs().ok();
                 if let Some(addrs) = resolved {
                     let mut reachable = false;
@@ -91,16 +91,12 @@ fn should_run_integration_tests() -> bool {
                     }
                     if !reachable {
                         eprintln!(
-                            "⚠️  Upstream not reachable at {} ({}). Skipping integration tests.",
-                            base, addr_str
+                            "⚠️  Upstream not reachable at {base} ({addr_str}). Skipping integration tests."
                         );
                         return false;
                     }
                 } else {
-                    eprintln!(
-                        "⚠️  Could not resolve {}. Skipping integration tests.",
-                        addr_str
-                    );
+                    eprintln!("⚠️  Could not resolve {addr_str}. Skipping integration tests.");
                     return false;
                 }
             }
@@ -111,21 +107,37 @@ fn should_run_integration_tests() -> bool {
 }
 
 /// Helper to get API key from environment
+#[allow(
+    clippy::expect_used,
+    reason = "integration test setup intentionally fails fast when configuration is missing"
+)]
 fn get_api_key() -> String {
     env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set")
 }
 
 /// Helper to get base URL from environment
+#[allow(
+    clippy::expect_used,
+    reason = "integration test setup intentionally fails fast when configuration is missing"
+)]
 fn get_base_url() -> String {
     env::var("OPENAI_BASE_URL").expect("OPENAI_BASE_URL must be set in .env")
 }
 
 /// Helper to get model from environment
+#[allow(
+    clippy::expect_used,
+    reason = "integration test setup intentionally fails fast when configuration is missing"
+)]
 fn get_model() -> String {
     env::var("MODEL").expect("MODEL must be set in .env")
 }
 
 /// Create an HTTP client
+#[allow(
+    clippy::expect_used,
+    reason = "integration test setup intentionally fails fast when configuration is missing"
+)]
 fn create_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
@@ -137,6 +149,14 @@ fn create_client() -> reqwest::Client {
 // SECTION 1: Basic Integration Tests (Standard Models)
 // ============================================================================
 
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    clippy::items_after_statements
+)]
 #[tokio::test]
 
 async fn test_real_chat_completions_simple() {
@@ -186,8 +206,8 @@ async fn test_real_chat_completions_simple() {
     };
 
     let response = client
-        .post(format!("{}/chat/completions", base_url))
-        .header("Authorization", format!("Bearer {}", api_key))
+        .post(format!("{base_url}/chat/completions"))
+        .header("Authorization", format!("Bearer {api_key}"))
         .json(&request)
         .send()
         .await
@@ -196,10 +216,7 @@ async fn test_real_chat_completions_simple() {
     let status = response.status();
     if !status.is_success() {
         let error_text = response.text().await.unwrap_or_default();
-        eprintln!(
-            "⚠️  Upstream returned non-success: {} - {}",
-            status, error_text
-        );
+        eprintln!("⚠️  Upstream returned non-success: {status} - {error_text}");
         eprintln!("    Skipping integration test due to upstream error.");
         return;
     }
@@ -225,6 +242,14 @@ async fn test_real_chat_completions_simple() {
     assert!(response_json["choices"][0]["message"]["content"].is_string());
 }
 
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    clippy::items_after_statements
+)]
 #[tokio::test]
 
 async fn test_real_conversion_chat_to_responses() {
@@ -275,8 +300,8 @@ async fn test_real_conversion_chat_to_responses() {
 
     // Make actual API call with Chat format
     let chat_response = client
-        .post(format!("{}/chat/completions", base_url))
-        .header("Authorization", format!("Bearer {}", api_key))
+        .post(format!("{base_url}/chat/completions"))
+        .header("Authorization", format!("Bearer {api_key}"))
         .json(&chat_request)
         .send()
         .await
@@ -285,7 +310,7 @@ async fn test_real_conversion_chat_to_responses() {
     if !chat_response.status().is_success() {
         let status = chat_response.status();
         let err = chat_response.text().await.unwrap_or_default();
-        eprintln!("⚠️  Upstream error ({}): {}", status, err);
+        eprintln!("⚠️  Upstream error ({status}): {err}");
         eprintln!("    Skipping integration test due to upstream error.");
         return;
     }
@@ -306,6 +331,14 @@ async fn test_real_conversion_chat_to_responses() {
 // SECTION 2: Tool Calling Integration Tests
 // ============================================================================
 
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    clippy::items_after_statements
+)]
 #[tokio::test]
 
 async fn test_real_tool_calling() {
@@ -365,8 +398,8 @@ async fn test_real_tool_calling() {
     };
 
     let response = client
-        .post(format!("{}/chat/completions", base_url))
-        .header("Authorization", format!("Bearer {}", api_key))
+        .post(format!("{base_url}/chat/completions"))
+        .header("Authorization", format!("Bearer {api_key}"))
         .json(&request)
         .send()
         .await
@@ -375,7 +408,7 @@ async fn test_real_tool_calling() {
     if !response.status().is_success() {
         let status = response.status();
         let err = response.text().await.unwrap_or_default();
-        eprintln!("⚠️  Upstream error ({}): {}", status, err);
+        eprintln!("⚠️  Upstream error ({status}): {err}");
         eprintln!("    Skipping integration test due to upstream error.");
         return;
     }
@@ -393,8 +426,7 @@ async fn test_real_tool_calling() {
     // Model should either call the tool or respond directly
     assert!(
         finish_reason == Some("tool_calls") || finish_reason == Some("stop"),
-        "Expected tool_calls or stop, got {:?}",
-        finish_reason
+        "Expected tool_calls or stop, got {finish_reason:?}"
     );
 
     if finish_reason == Some("tool_calls") {
@@ -415,6 +447,14 @@ async fn test_real_tool_calling() {
 // SECTION 3: Reasoning Model Integration Tests
 // ============================================================================
 
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    clippy::items_after_statements
+)]
 #[tokio::test]
 
 async fn test_real_reasoning_model_o1_mini() {
@@ -455,8 +495,8 @@ async fn test_real_reasoning_model_o1_mini() {
         extra_body: None,    };
 
     let response = client
-        .post(format!("{}/chat/completions", base_url))
-        .header("Authorization", format!("Bearer {}", api_key))
+        .post(format!("{base_url}/chat/completions"))
+        .header("Authorization", format!("Bearer {api_key}"))
         .json(&request)
         .send()
         .await
@@ -464,7 +504,7 @@ async fn test_real_reasoning_model_o1_mini() {
 
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();
-        eprintln!("API Error: {}", error_text);
+        eprintln!("API Error: {error_text}");
         eprintln!("Note: o1-mini may not be available on your account");
         return;
     }
@@ -485,7 +525,7 @@ async fn test_real_reasoning_model_o1_mini() {
 
     if usage["reasoning_tokens"].is_number() {
         let reasoning_tokens = usage["reasoning_tokens"].as_u64().unwrap();
-        println!("✅ Reasoning tokens found: {}", reasoning_tokens);
+        println!("✅ Reasoning tokens found: {reasoning_tokens}");
 
         // Reasoning tokens should be present for o1 models
         assert!(
@@ -506,6 +546,14 @@ async fn test_real_reasoning_model_o1_mini() {
     }
 }
 
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    clippy::items_after_statements
+)]
 #[tokio::test]
 
 async fn test_real_reasoning_model_o1_preview() {
@@ -545,8 +593,8 @@ async fn test_real_reasoning_model_o1_preview() {
     };
 
     let response = client
-        .post(format!("{}/chat/completions", base_url))
-        .header("Authorization", format!("Bearer {}", api_key))
+        .post(format!("{base_url}/chat/completions"))
+        .header("Authorization", format!("Bearer {api_key}"))
         .json(&request)
         .send()
         .await
@@ -554,7 +602,7 @@ async fn test_real_reasoning_model_o1_preview() {
 
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();
-        eprintln!("API Error: {}", error_text);
+        eprintln!("API Error: {error_text}");
         eprintln!("Note: o1-preview may not be available on your account");
         return;
     }
@@ -568,7 +616,7 @@ async fn test_real_reasoning_model_o1_preview() {
 
     // Check for reasoning tokens
     if let Some(reasoning_tokens) = response_json["usage"]["reasoning_tokens"].as_u64() {
-        println!("✅ Reasoning tokens (o1-preview): {}", reasoning_tokens);
+        println!("✅ Reasoning tokens (o1-preview): {reasoning_tokens}");
         assert!(reasoning_tokens > 0);
     }
 }
@@ -577,6 +625,14 @@ async fn test_real_reasoning_model_o1_preview() {
 // SECTION 4: Streaming Integration Tests
 // ============================================================================
 
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    clippy::items_after_statements
+)]
 #[tokio::test]
 
 async fn test_real_streaming_response() {
@@ -617,8 +673,8 @@ async fn test_real_streaming_response() {
     };
 
     let response = client
-        .post(format!("{}/chat/completions", base_url))
-        .header("Authorization", format!("Bearer {}", api_key))
+        .post(format!("{base_url}/chat/completions"))
+        .header("Authorization", format!("Bearer {api_key}"))
         .json(&request)
         .send()
         .await
@@ -627,7 +683,7 @@ async fn test_real_streaming_response() {
     if !response.status().is_success() {
         let status = response.status();
         let err = response.text().await.unwrap_or_default();
-        eprintln!("⚠️  Upstream error ({}): {}", status, err);
+        eprintln!("⚠️  Upstream error ({status}): {err}");
         eprintln!("    Skipping integration test due to upstream error.");
         return;
     }
@@ -663,7 +719,7 @@ async fn test_real_streaming_response() {
         }
     }
 
-    println!("Received {} streaming chunks", chunk_count);
+    println!("Received {chunk_count} streaming chunks");
     assert!(chunk_count > 0, "Expected at least one chunk");
 
     // Note: Not all APIs return usage in streaming mode
@@ -676,6 +732,14 @@ async fn test_real_streaming_response() {
 // SECTION 5: Round-Trip Integration Tests
 // ============================================================================
 
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    clippy::items_after_statements
+)]
 #[tokio::test]
 
 async fn test_real_round_trip_conversion() {
@@ -729,8 +793,8 @@ async fn test_real_round_trip_conversion() {
 
     // Step 3: Make real API call
     let response = client
-        .post(format!("{}/chat/completions", base_url))
-        .header("Authorization", format!("Bearer {}", api_key))
+        .post(format!("{base_url}/chat/completions"))
+        .header("Authorization", format!("Bearer {api_key}"))
         .json(&chat_request)
         .send()
         .await
@@ -739,7 +803,7 @@ async fn test_real_round_trip_conversion() {
     if !response.status().is_success() {
         let status = response.status();
         let err = response.text().await.unwrap_or_default();
-        eprintln!("⚠️  Upstream error ({}): {}", status, err);
+        eprintln!("⚠️  Upstream error ({status}): {err}");
         eprintln!("    Skipping integration test due to upstream error.");
         return;
     }
@@ -766,6 +830,14 @@ async fn test_real_round_trip_conversion() {
 // SECTION 6: Error Handling Integration Tests
 // ============================================================================
 
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    clippy::items_after_statements
+)]
 #[tokio::test]
 
 async fn test_real_invalid_model_error() {
@@ -805,8 +877,8 @@ async fn test_real_invalid_model_error() {
     };
 
     let response = client
-        .post(format!("{}/chat/completions", base_url))
-        .header("Authorization", format!("Bearer {}", api_key))
+        .post(format!("{base_url}/chat/completions"))
+        .header("Authorization", format!("Bearer {api_key}"))
         .json(&request)
         .send()
         .await
@@ -817,15 +889,9 @@ async fn test_real_invalid_model_error() {
 
     let status = response.status();
     let body_text = response.text().await.unwrap_or_default();
-    let error_json: serde_json::Value = match serde_json::from_str(&body_text) {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!(
-                "⚠️  Non-JSON error body from upstream (status {}), skipping: {}",
-                status, body_text
-            );
-            return;
-        }
+    let Ok(error_json) = serde_json::from_str::<serde_json::Value>(&body_text) else {
+        eprintln!("⚠️  Non-JSON error body from upstream (status {status}), skipping: {body_text}");
+        return;
     };
 
     println!(

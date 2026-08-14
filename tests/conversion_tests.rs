@@ -5,8 +5,21 @@ use routiium::to_responses_request;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+fn message_at(
+    messages: &[routiium::models::responses::ResponsesMessage],
+    index: usize,
+) -> anyhow::Result<&routiium::models::responses::ResponsesMessage> {
+    messages
+        .get(index)
+        .ok_or_else(|| anyhow::anyhow!("missing converted message at index {index}"))
+}
+
 #[test]
-fn basic_role_and_message_mapping() {
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "test assertions intentionally fail the Result-returning test"
+)]
+fn basic_role_and_message_mapping() -> anyhow::Result<()> {
     let req = ChatCompletionRequest {
         model: "gpt-4o-mini".into(),
         messages: vec![
@@ -69,17 +82,30 @@ fn basic_role_and_message_mapping() {
     assert_eq!(out.messages.len(), 5);
 
     // Role mapping checks
-    assert_eq!(out.messages[0].role, "system");
-    assert_eq!(out.messages[1].role, "user");
-    assert_eq!(out.messages[2].role, "assistant");
-    assert_eq!(out.messages[3].role, "tool");
-    assert_eq!(out.messages[4].role, "tool"); // function -> tool
+    assert_eq!(message_at(&out.messages, 0)?.role, "system");
+    assert_eq!(message_at(&out.messages, 1)?.role, "user");
+    assert_eq!(message_at(&out.messages, 2)?.role, "assistant");
+    assert_eq!(message_at(&out.messages, 3)?.role, "tool");
+    assert_eq!(message_at(&out.messages, 4)?.role, "tool"); // function -> tool
 
     // Name/tool_call_id propagation
-    assert_eq!(out.messages[3].name.as_deref(), Some("my_tool"));
-    assert_eq!(out.messages[3].tool_call_id.as_deref(), Some("call-1"));
-    assert_eq!(out.messages[4].name.as_deref(), Some("legacy_fn"));
-    assert_eq!(out.messages[4].tool_call_id.as_deref(), Some("call-2"));
+    assert_eq!(
+        message_at(&out.messages, 3)?.name.as_deref(),
+        Some("my_tool")
+    );
+    assert_eq!(
+        message_at(&out.messages, 3)?.tool_call_id.as_deref(),
+        Some("call-1")
+    );
+    assert_eq!(
+        message_at(&out.messages, 4)?.name.as_deref(),
+        Some("legacy_fn")
+    );
+    assert_eq!(
+        message_at(&out.messages, 4)?.tool_call_id.as_deref(),
+        Some("call-2")
+    );
+    Ok(())
 }
 
 #[test]
@@ -164,7 +190,11 @@ fn stop_array_supported_and_preserved() {
 }
 
 #[test]
-fn tools_and_tool_choice_are_forwarded() {
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "test assertions intentionally fail the Result-returning test"
+)]
+fn tools_and_tool_choice_are_forwarded() -> anyhow::Result<()> {
     let req = ChatCompletionRequest {
         model: "gpt-4o-mini".into(),
         messages: vec![ChatMessage {
@@ -204,35 +234,45 @@ fn tools_and_tool_choice_are_forwarded() {
     let out = to_responses_request(&req, None);
 
     // Tools mapping
-    let tools = out.tools.expect("missing tools");
+    let tools = out
+        .tools
+        .ok_or_else(|| anyhow::anyhow!("missing converted tools"))?;
     assert_eq!(tools.len(), 1);
-    match &tools[0] {
-        routiium::models::responses::ResponsesToolDefinition::Function {
+    match tools.first() {
+        Some(routiium::models::responses::ResponsesToolDefinition::Function {
             name,
             description,
             parameters,
-        } => {
+        }) => {
             assert_eq!(name, "lookup");
             assert_eq!(description.as_deref(), Some("Lookup a value"));
             assert!(parameters.is_object());
         }
+        None => anyhow::bail!("missing converted tool"),
     }
 
     // Tool choice forwarded
-    let choice = out.tool_choice.expect("missing tool_choice");
+    let choice = out
+        .tool_choice
+        .ok_or_else(|| anyhow::anyhow!("missing converted tool_choice"))?;
     match choice {
         Value::Object(map) => {
             assert_eq!(map.get("type"), Some(&Value::String("function".into())));
             assert_eq!(map.get("name"), Some(&Value::String("lookup".into())));
         }
-        other => panic!("unexpected tool_choice shape: {:?}", other),
+        other => anyhow::bail!("unexpected tool_choice shape: {other:?}"),
     }
     // Stream forwarded
     assert_eq!(out.stream, Some(true));
+    Ok(())
 }
 
 #[test]
-fn response_format_forwarding_and_type_override_protection() {
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "test assertions intentionally fail the Result-returning test"
+)]
+fn response_format_forwarding_and_type_override_protection() -> anyhow::Result<()> {
     // extras contains a conflicting "type"; converter should keep kind as the "type" field
     let mut extras = HashMap::new();
     extras.insert("schema".to_string(), json!({"type":"object"}));
@@ -268,7 +308,9 @@ fn response_format_forwarding_and_type_override_protection() {
     };
 
     let out = to_responses_request(&req, None);
-    let rf = out.response_format.expect("missing response_format");
+    let rf = out
+        .response_format
+        .ok_or_else(|| anyhow::anyhow!("missing converted response_format"))?;
     assert_eq!(rf.get("type").and_then(|v| v.as_str()), Some("json_object"));
     assert!(rf.get("schema").is_some());
     // Ensure extras "type" did not override
@@ -276,10 +318,15 @@ fn response_format_forwarding_and_type_override_protection() {
         rf.get("type").and_then(|v| v.as_str()),
         Some("should_not_override")
     );
+    Ok(())
 }
 
 #[test]
-fn content_array_is_preserved_for_multimodal_shape() {
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "test assertions intentionally fail the Result-returning test"
+)]
+fn content_array_is_preserved_for_multimodal_shape() -> anyhow::Result<()> {
     let content = json!([
         { "type": "text", "text": "Describe this image" },
         { "type": "image_url", "image_url": { "url": "https://example.com/cat.png" } }
@@ -289,7 +336,7 @@ fn content_array_is_preserved_for_multimodal_shape() {
         model: "gpt-4o-mini".into(),
         messages: vec![ChatMessage {
             role: Role::User,
-            content: content.clone(),
+            content,
             name: None,
             tool_call_id: None,
             tool_calls: None,
@@ -313,22 +360,37 @@ fn content_array_is_preserved_for_multimodal_shape() {
 
     let out = to_responses_request(&req, Some("conv-42".into()));
     assert_eq!(out.messages.len(), 1);
-    assert_eq!(out.messages[0].role, "user");
+    assert_eq!(message_at(&out.messages, 0)?.role, "user");
 
     // Verify content was converted to Responses API format
-    let converted_content = &out.messages[0].content;
+    let converted_content = &message_at(&out.messages, 0)?.content;
     assert!(converted_content.is_array());
-    let arr = converted_content.as_array().unwrap();
+    let arr = converted_content
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("converted content is not an array"))?;
     assert_eq!(arr.len(), 2);
 
     // Check text conversion: "text" → "input_text"
-    assert_eq!(arr[0]["type"], "input_text");
-    assert_eq!(arr[0]["text"], "Describe this image");
+    assert_eq!(
+        arr.first().and_then(|value| value.get("type")),
+        Some(&json!("input_text"))
+    );
+    assert_eq!(
+        arr.first().and_then(|value| value.get("text")),
+        Some(&json!("Describe this image"))
+    );
 
     // Check image conversion: "image_url" (nested) → "input_image" (flattened)
-    assert_eq!(arr[1]["type"], "input_image");
-    assert_eq!(arr[1]["image_url"], "https://example.com/cat.png");
+    assert_eq!(
+        arr.get(1).and_then(|value| value.get("type")),
+        Some(&json!("input_image"))
+    );
+    assert_eq!(
+        arr.get(1).and_then(|value| value.get("image_url")),
+        Some(&json!("https://example.com/cat.png"))
+    );
 
     assert_eq!(out.max_output_tokens, Some(32));
     assert_eq!(out.conversation.as_deref(), Some("conv-42"));
+    Ok(())
 }

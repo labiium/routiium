@@ -9,38 +9,35 @@ if [ -f .env ]; then
     echo "✓ Loaded AWS credentials from .env"
 else
     echo "⚠ Warning: .env file not found"
-    echo "  Make sure AWS_REGION, AWS_ACCESS_KEY_ID, and AWS_SECRET_ACCESS_KEY are set"
+    echo "  Make sure AWS_REGION and either AWS credentials or AWS_BEARER_TOKEN_BEDROCK are set"
 fi
 
-# Verify AWS credentials are set
-if [ -z "$AWS_REGION" ] || [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
-    echo "✗ Error: AWS credentials not properly configured"
-    echo "  Required environment variables:"
-    echo "    - AWS_REGION"
-    echo "    - AWS_ACCESS_KEY_ID"
-    echo "    - AWS_SECRET_ACCESS_KEY"
+# Verify the region is set. Bedrock Mantle can authenticate with an API key or the AWS credential chain.
+if [ -z "$AWS_REGION" ]; then
+    echo "✗ Error: AWS_REGION is not configured"
+    echo "  Set AWS_REGION before starting Routiium"
     exit 1
 fi
 
 echo "AWS Configuration:"
 echo "  Region: $AWS_REGION"
-echo "  Access Key ID: ${AWS_ACCESS_KEY_ID:0:10}..."
+if [ -n "$AWS_BEARER_TOKEN_BEDROCK" ]; then
+    echo "  Mantle authentication: Bedrock API key"
+else
+    echo "  Mantle authentication: AWS credential chain"
+fi
 echo ""
 
-# Generate test API key
-echo "Generating test API key..."
-python3 scripts/generate_api_key.py --key sk-test123 --output tmp/test_api_keys.json
-
-# Set environment variables for Bedrock routing
-export ROUTIIUM_BACKENDS="bedrock:https://bedrock-runtime.$AWS_REGION.amazonaws.com:anthropic.*:bedrock"
-export ROUTIIUM_API_KEYS_FILE="tmp/test_api_keys.json"
+# Set environment variables for both Bedrock request families.
+export ROUTIIUM_BACKENDS="prefix=openai.gpt-5.6-,base=https://bedrock-mantle.$AWS_REGION.api.aws/openai/v1,key_env=AWS_BEARER_TOKEN_BEDROCK,mode=bedrock_mantle;prefix=anthropic.,base=https://bedrock-runtime.$AWS_REGION.amazonaws.com,mode=bedrock"
+export ROUTIIUM_MANAGED_MODE="0"
 export ROUTIIUM_PORT="8080"
 
 echo "Starting Routiium with Bedrock support..."
-echo "  Backend: https://bedrock-runtime.$AWS_REGION.amazonaws.com"
+echo "  Mantle backend: https://bedrock-mantle.$AWS_REGION.api.aws/openai/v1"
+echo "  Legacy backend: https://bedrock-runtime.$AWS_REGION.amazonaws.com"
 echo "  Port: $ROUTIIUM_PORT"
 echo ""
 
 # Build and run
 cargo run --release
-

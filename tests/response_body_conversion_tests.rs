@@ -3,8 +3,8 @@
 /// Tests validate conversion of actual API response bodies:
 /// - Responses API responses → Chat Completions responses
 /// - Chat Completions responses → Responses API responses (if needed)
-/// - Usage token mapping including reasoning_tokens
-/// - Output array item handling (reasoning, tool_calls, etc.)
+/// - Usage token mapping including `reasoning_tokens`
+/// - Output array item handling (reasoning, `tool_calls`, etc.)
 /// - Streaming chunk conversion
 /// - Error response handling
 use routiium::{
@@ -24,6 +24,13 @@ use serde_json::json;
 mod response_models {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_chat_usage_with_reasoning_tokens() {
         // Chat API usage should support reasoning_tokens as extension
@@ -41,6 +48,13 @@ mod response_models {
         assert!(usage_json["reasoning_tokens"].is_number());
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_responses_usage_structure() {
         // Responses API usage structure
@@ -59,13 +73,20 @@ mod response_models {
         assert_eq!(usage_json["total_tokens"], 150);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_chat_response_structure() {
         // Expected Chat Completions response structure
         let response_json = json!({
             "id": "chatcmpl-abc123",
             "object": "chat.completion",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "gpt-4o",
             "choices": [{
                 "index": 0,
@@ -87,13 +108,20 @@ mod response_models {
         assert!(response_json["usage"].is_object());
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_responses_response_structure() {
         // Expected Responses API response structure
         let response_json = json!({
             "id": "rsp-abc123",
             "object": "response",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "gpt-4o",
             "output_text": "Hello! How can I help you?",
             "output": [{
@@ -121,12 +149,19 @@ mod response_models {
 mod basic_response_conversion {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_simple_text_response_conversion() {
         let responses_response = json!({
             "id": "rsp-123",
             "object": "response",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "gpt-4o-mini",
             "output_text": "Hello there!",
             "output": [{
@@ -145,7 +180,7 @@ mod basic_response_conversion {
         let expected_chat = json!({
             "id": "rsp-123",
             "object": "chat.completion",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "gpt-4o-mini",
             "choices": [{
                 "index": 0,
@@ -166,6 +201,13 @@ mod basic_response_conversion {
         assert_eq!(responses_response["model"], expected_chat["model"]);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_usage_token_mapping() {
         let responses_usage = json!({
@@ -195,6 +237,13 @@ mod basic_response_conversion {
         );
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_output_text_to_message_content() {
         let responses_output_text = "This is the assistant's response.";
@@ -203,6 +252,13 @@ mod basic_response_conversion {
         assert_eq!(responses_output_text, expected_message_content);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_id_preservation() {
         let responses_id = "rsp-abc123def456";
@@ -212,6 +268,13 @@ mod basic_response_conversion {
         assert_eq!(responses_id, expected_chat_id);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_object_type_conversion() {
         let responses_object = "response";
@@ -221,9 +284,16 @@ mod basic_response_conversion {
         assert_ne!(responses_object, expected_chat_object);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_created_timestamp_preservation() {
-        let timestamp: u64 = 1234567890;
+        let timestamp: u64 = 1_234_567_890;
 
         // Timestamp should be preserved exactly
         let responses_created = timestamp;
@@ -240,12 +310,19 @@ mod basic_response_conversion {
 mod reasoning_tokens {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_reasoning_tokens_preserved_in_conversion() {
         let responses_response = json!({
             "id": "rsp-reasoning-1",
             "object": "response",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "o1-preview",
             "output_text": "After careful analysis, the answer is 42.",
             "output": [
@@ -282,12 +359,19 @@ mod reasoning_tokens {
         );
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_reasoning_tokens_none_for_non_reasoning_models() {
         let responses_response = json!({
             "id": "rsp-normal-1",
             "object": "response",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "gpt-4o",
             "output_text": "Hello!",
             "output": [{
@@ -307,12 +391,19 @@ mod reasoning_tokens {
         assert!(responses_response["usage"]["reasoning_tokens"].is_null());
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_reasoning_tokens_with_cached_tokens() {
         let responses_response = json!({
             "id": "rsp-cached-1",
             "object": "response",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "o1-mini",
             "output_text": "Result after reasoning",
             "output": [{
@@ -334,13 +425,20 @@ mod reasoning_tokens {
         assert_eq!(responses_response["usage"]["cached_tokens"], 50);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_high_reasoning_token_count() {
         // Reasoning models can use thousands of reasoning tokens
         let responses_response = json!({
             "id": "rsp-complex-1",
             "object": "response",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "o3-mini",
             "output_text": "Complex solution",
             "output": [{
@@ -374,6 +472,13 @@ mod reasoning_tokens {
 mod output_array_items {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_assistant_message_output_item() {
         let output_item = json!({
@@ -386,6 +491,13 @@ mod output_array_items {
         assert_eq!(output_item["content"], "This is the response");
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_reasoning_output_item() {
         let output_item = json!({
@@ -403,6 +515,13 @@ mod output_array_items {
         assert_eq!(output_item["summary"].as_array().unwrap().len(), 3);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_reasoning_with_encrypted_content() {
         let output_item = json!({
@@ -416,6 +535,13 @@ mod output_array_items {
         assert!(output_item["encrypted_content"].is_string());
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_tool_call_output_item() {
         let output_item = json!({
@@ -431,6 +557,13 @@ mod output_array_items {
         assert!(output_item["arguments"].is_string());
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_function_call_output_output_item() {
         let output_item = json!({
@@ -445,6 +578,13 @@ mod output_array_items {
         assert!(output_item["content"].is_string());
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_multiple_output_items() {
         let output_array = json!([
@@ -480,12 +620,19 @@ mod output_array_items {
 mod tool_calling_responses {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_tool_call_in_chat_response() {
         let chat_response = json!({
             "id": "chatcmpl-123",
             "object": "chat.completion",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "gpt-4o",
             "choices": [{
                 "index": 0,
@@ -514,12 +661,19 @@ mod tool_calling_responses {
         assert!(chat_response["choices"][0]["message"]["tool_calls"].is_array());
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_responses_tool_call_conversion() {
         let responses_response = json!({
             "id": "rsp-123",
             "object": "response",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "gpt-4o",
             "output_text": null,
             "output": [{
@@ -541,12 +695,19 @@ mod tool_calling_responses {
         assert_eq!(responses_response["output"][0]["name"], "get_weather");
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_multiple_tool_calls() {
         let chat_response = json!({
             "id": "chatcmpl-123",
             "object": "chat.completion",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "gpt-4o",
             "choices": [{
                 "index": 0,
@@ -598,6 +759,13 @@ mod tool_calling_responses {
 mod finish_reason {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_finish_reason_stop() {
         let response = json!({
@@ -609,6 +777,13 @@ mod finish_reason {
         assert_eq!(response["choices"][0]["finish_reason"], "stop");
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_finish_reason_length() {
         let response = json!({
@@ -620,6 +795,13 @@ mod finish_reason {
         assert_eq!(response["choices"][0]["finish_reason"], "length");
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_finish_reason_tool_calls() {
         let response = json!({
@@ -631,6 +813,13 @@ mod finish_reason {
         assert_eq!(response["choices"][0]["finish_reason"], "tool_calls");
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_finish_reason_content_filter() {
         let response = json!({
@@ -650,12 +839,19 @@ mod finish_reason {
 mod streaming_responses {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_chat_streaming_chunk_structure() {
         let chunk = json!({
             "id": "chatcmpl-123",
             "object": "chat.completion.chunk",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "gpt-4o",
             "choices": [{
                 "index": 0,
@@ -671,12 +867,19 @@ mod streaming_responses {
         assert!(chunk["choices"][0]["delta"].is_object());
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_streaming_content_delta() {
         let chunk = json!({
             "id": "chatcmpl-123",
             "object": "chat.completion.chunk",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "gpt-4o",
             "choices": [{
                 "index": 0,
@@ -691,12 +894,19 @@ mod streaming_responses {
         assert!(chunk["choices"][0]["delta"]["role"].is_null());
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_streaming_final_chunk() {
         let chunk = json!({
             "id": "chatcmpl-123",
             "object": "chat.completion.chunk",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "gpt-4o",
             "choices": [{
                 "index": 0,
@@ -714,12 +924,19 @@ mod streaming_responses {
         assert!(chunk["usage"].is_object());
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_streaming_tool_call_delta() {
         let chunk = json!({
             "id": "chatcmpl-123",
             "object": "chat.completion.chunk",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "gpt-4o",
             "choices": [{
                 "index": 0,
@@ -741,13 +958,20 @@ mod streaming_responses {
         assert!(chunk["choices"][0]["delta"]["tool_calls"].is_array());
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_streaming_with_reasoning_tokens() {
         // Final chunk with reasoning tokens in usage
         let chunk = json!({
             "id": "chatcmpl-reasoning",
             "object": "chat.completion.chunk",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "o1-preview",
             "choices": [{
                 "index": 0,
@@ -773,6 +997,13 @@ mod streaming_responses {
 mod error_responses {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_chat_error_response_structure() {
         let error_response = json!({
@@ -788,6 +1019,13 @@ mod error_responses {
         assert!(error_response["error"]["message"].is_string());
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_rate_limit_error() {
         let error_response = json!({
@@ -802,6 +1040,13 @@ mod error_responses {
         assert_eq!(error_response["error"]["type"], "rate_limit_error");
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_model_not_found_error() {
         let error_response = json!({
@@ -824,12 +1069,19 @@ mod error_responses {
 mod multiple_choices {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_n_parameter_multiple_completions() {
         let response = json!({
             "id": "chatcmpl-123",
             "object": "chat.completion",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "gpt-4o",
             "choices": [
                 {
@@ -878,13 +1130,20 @@ mod multiple_choices {
 mod response_round_trip {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_chat_to_responses_to_chat_response() {
         // Original Chat response
         let original_chat = json!({
             "id": "chatcmpl-original",
             "object": "chat.completion",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "gpt-4o",
             "choices": [{
                 "index": 0,
@@ -910,12 +1169,19 @@ mod response_round_trip {
         assert_eq!(original_chat["usage"]["total_tokens"], 15);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_reasoning_tokens_survive_round_trip() {
         let original = json!({
             "id": "chatcmpl-reasoning",
             "object": "chat.completion",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "o1-preview",
             "choices": [{
                 "index": 0,
@@ -945,6 +1211,13 @@ mod response_round_trip {
 mod response_spec_compliance {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_all_usage_fields_present() {
         let usage = json!({
@@ -959,6 +1232,13 @@ mod response_spec_compliance {
         assert!(usage["total_tokens"].is_number());
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_usage_total_equals_sum() {
         let prompt = 100u64;
@@ -968,6 +1248,13 @@ mod response_spec_compliance {
         assert_eq!(prompt + completion, total);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_usage_with_reasoning_total_calculation() {
         let prompt = 20u64;
@@ -979,6 +1266,13 @@ mod response_spec_compliance {
         assert_eq!(prompt + completion + reasoning, total);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_cached_tokens_not_in_total() {
         // According to spec, cached_tokens are included in prompt_tokens
@@ -1006,12 +1300,19 @@ mod response_spec_compliance {
 mod actual_conversions {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_responses_to_chat_simple_text() {
         let responses = ResponsesResponse {
             id: "rsp-123".to_string(),
             object: "response".to_string(),
-            created: 1234567890,
+            created: 1_234_567_890,
             model: "gpt-4o-mini".to_string(),
             output_text: Some("Hello there!".to_string()),
             output: vec![OutputItem::AssistantMessage {
@@ -1047,12 +1348,19 @@ mod actual_conversions {
         assert_eq!(usage.total_tokens, 8);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_responses_to_chat_with_reasoning_tokens() {
         let responses = ResponsesResponse {
             id: "rsp-reasoning".to_string(),
             object: "response".to_string(),
-            created: 1234567890,
+            created: 1_234_567_890,
             model: "o1-preview".to_string(),
             output_text: Some("After analysis, the answer is 42.".to_string()),
             output: vec![
@@ -1091,12 +1399,19 @@ mod actual_conversions {
         assert_eq!(usage.total_tokens, 158);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_responses_to_chat_with_tool_calls() {
         let responses = ResponsesResponse {
             id: "rsp-tools".to_string(),
             object: "response".to_string(),
-            created: 1234567890,
+            created: 1_234_567_890,
             model: "gpt-4o".to_string(),
             output_text: None,
             output: vec![OutputItem::ToolCall {
@@ -1131,12 +1446,19 @@ mod actual_conversions {
         assert_eq!(tool_calls[0].function.arguments, "{\"location\":\"NYC\"}");
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_chat_to_responses_simple() {
         let chat = ChatCompletionResponse {
             id: "chatcmpl-123".to_string(),
             object: "chat.completion".to_string(),
-            created: 1234567890,
+            created: 1_234_567_890,
             model: "gpt-4o".to_string(),
             choices: vec![ChatChoice {
                 index: 0,
@@ -1181,12 +1503,19 @@ mod actual_conversions {
         assert_eq!(usage.total_tokens, 15);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_chat_to_responses_with_reasoning_tokens() {
         let chat = ChatCompletionResponse {
             id: "chatcmpl-o1".to_string(),
             object: "chat.completion".to_string(),
-            created: 1234567890,
+            created: 1_234_567_890,
             model: "o1-mini".to_string(),
             choices: vec![ChatChoice {
                 index: 0,
@@ -1217,12 +1546,19 @@ mod actual_conversions {
         assert_eq!(usage.cached_tokens, Some(10));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_chat_to_responses_with_tool_calls() {
         let chat = ChatCompletionResponse {
             id: "chatcmpl-tool".to_string(),
             object: "chat.completion".to_string(),
-            created: 1234567890,
+            created: 1_234_567_890,
             model: "gpt-4o".to_string(),
             choices: vec![ChatChoice {
                 index: 0,
@@ -1272,13 +1608,20 @@ mod actual_conversions {
         }
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_round_trip_simple_response() {
         // Start with Responses format
         let original_responses = ResponsesResponse {
             id: "rsp-round".to_string(),
             object: "response".to_string(),
-            created: 1234567890,
+            created: 1_234_567_890,
             model: "gpt-4o".to_string(),
             output_text: Some("Round trip test".to_string()),
             output: vec![OutputItem::AssistantMessage {
@@ -1312,12 +1655,19 @@ mod actual_conversions {
         assert_eq!(recon_usage.total_tokens, orig_usage.total_tokens);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_round_trip_with_reasoning_tokens() {
         let original_responses = ResponsesResponse {
             id: "rsp-reasoning-round".to_string(),
             object: "response".to_string(),
-            created: 1234567890,
+            created: 1_234_567_890,
             model: "o1-preview".to_string(),
             output_text: Some("Reasoned answer".to_string()),
             output: vec![OutputItem::AssistantMessage {
@@ -1347,12 +1697,19 @@ mod actual_conversions {
         assert_eq!(recon_usage.cached_tokens, Some(20));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_serialization_chat_response_with_reasoning() {
         let chat = ChatCompletionResponse {
             id: "chatcmpl-serial".to_string(),
             object: "chat.completion".to_string(),
-            created: 1234567890,
+            created: 1_234_567_890,
             model: "o1-mini".to_string(),
             choices: vec![ChatChoice {
                 index: 0,
@@ -1387,12 +1744,19 @@ mod actual_conversions {
         assert_eq!(json["usage"]["total_tokens"], 143);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_serialization_responses_response() {
         let responses = ResponsesResponse {
             id: "rsp-serial".to_string(),
             object: "response".to_string(),
-            created: 1234567890,
+            created: 1_234_567_890,
             model: "gpt-4o".to_string(),
             output_text: Some("Text".to_string()),
             output: vec![OutputItem::AssistantMessage {
@@ -1418,12 +1782,19 @@ mod actual_conversions {
         assert_eq!(json["usage"]["output_tokens"], 3);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_deserialization_chat_response() {
         let json = json!({
             "id": "chatcmpl-deser",
             "object": "chat.completion",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "gpt-4o",
             "choices": [{
                 "index": 0,
@@ -1451,12 +1822,19 @@ mod actual_conversions {
         assert_eq!(usage.reasoning_tokens, Some(64));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_deserialization_responses_response() {
         let json = json!({
             "id": "rsp-deser",
             "object": "response",
-            "created": 1234567890,
+            "created": 1_234_567_890,
             "model": "o1-preview",
             "output_text": "Result",
             "output": [{

@@ -1,7 +1,6 @@
 use actix_web::{test, web, App};
 use axum::{extract::State, routing::post, Json, Router};
 use http::StatusCode as RouterStatusCode;
-use once_cell::sync::Lazy;
 use reqwest::Client;
 use routiium::{
     analytics::AnalyticsManager,
@@ -23,7 +22,7 @@ mod router_stub;
 
 use router_stub::{sample_plan, RouterResponseConfig, RouterStub};
 
-static ENV_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static ENV_GUARD: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
 #[derive(Clone)]
 struct MockUpstream {
@@ -32,6 +31,11 @@ struct MockUpstream {
 }
 
 impl MockUpstream {
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "test upstream setup intentionally fails fast"
+    )]
     async fn start_responses(response: serde_json::Value) -> Self {
         let calls = Arc::new(AtomicUsize::new(0));
         let state = (calls.clone(), response);
@@ -53,6 +57,11 @@ impl MockUpstream {
         }
     }
 
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "test upstream setup intentionally fails fast"
+    )]
     async fn start_chat(response: serde_json::Value) -> Self {
         let calls = Arc::new(AtomicUsize::new(0));
         let state = (calls.clone(), response);
@@ -135,6 +144,11 @@ fn clear_router_env() {
     std::env::remove_var("OPENAI_BASE_URL");
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test client setup intentionally fails fast"
+)]
 fn build_app_state(router_url: &str, cache_ttl: u64) -> AppState {
     let router_http_client = Client::builder()
         .no_proxy()
@@ -150,19 +164,19 @@ fn build_app_state(router_url: &str, cache_ttl: u64) -> AppState {
     })
     .expect("http router client");
     let cached = CachedRouterClient::new(Box::new(http_router), cache_ttl);
+    let router_client: Arc<dyn RouterClient> = Arc::new(cached);
     let base_state = AppState::default();
     AppState {
-        router_client: Some(Arc::new(cached) as Arc<dyn RouterClient>),
+        router_client: Some(router_client),
         router_url: Some(router_url.to_string()),
         router_strict: std::env::var("ROUTIIUM_ROUTER_STRICT")
             .ok()
-            .map(|value| {
+            .is_some_and(|value| {
                 matches!(
                     value.trim().to_ascii_lowercase().as_str(),
                     "1" | "true" | "yes" | "on"
                 )
-            })
-            .unwrap_or(false),
+            }),
         router_cache_ttl_ms: Some(cache_ttl),
         analytics: Some(Arc::new(AnalyticsManager::new_memory(1000))),
         // Use a short timeout so unreachable upstreams fail fast in tests rather than hanging.
@@ -176,6 +190,12 @@ fn build_app_state(router_url: &str, cache_ttl: u64) -> AppState {
     }
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn router_headers_are_forwarded() {
     let _guard = ENV_GUARD.lock().await;
@@ -233,6 +253,12 @@ async fn router_headers_are_forwarded() {
     clear_router_env();
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn router_judge_headers_are_forwarded() {
     let _guard = ENV_GUARD.lock().await;
@@ -298,6 +324,12 @@ async fn router_judge_headers_are_forwarded() {
     clear_router_env();
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn router_strict_mode_surfaces_error() {
     let _guard = ENV_GUARD.lock().await;
@@ -342,6 +374,12 @@ async fn router_strict_mode_surfaces_error() {
     clear_router_env();
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn router_policy_rejection_returns_agent_result_by_default() {
     let _guard = ENV_GUARD.lock().await;
@@ -410,6 +448,12 @@ async fn router_policy_rejection_returns_agent_result_by_default() {
     clear_router_env();
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn router_governance_mode_ready_requires_strict_zero_cache() {
     let _guard = ENV_GUARD.lock().await;
@@ -470,6 +514,12 @@ async fn router_governance_mode_ready_requires_strict_zero_cache() {
     clear_router_env();
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn ready_reports_exact_response_cache_when_enabled() {
     let _guard = ENV_GUARD.lock().await;
@@ -500,6 +550,12 @@ async fn ready_reports_exact_response_cache_when_enabled() {
     clear_router_env();
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn router_governance_mode_rejects_exact_response_cache() {
     let _guard = ENV_GUARD.lock().await;
@@ -534,6 +590,12 @@ async fn router_governance_mode_rejects_exact_response_cache() {
     clear_router_env();
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn exact_response_cache_reuses_safe_non_streaming_response_and_clears() {
     let _guard = ENV_GUARD.lock().await;
@@ -606,11 +668,9 @@ async fn exact_response_cache_reuses_safe_non_streaming_response_and_clears() {
         .expect("analytics events");
     assert_eq!(events.len(), 2);
     assert!(events.iter().all(|event| {
-        event
-            .response
-            .as_ref()
-            .map(|response| response.usage_source == routiium::analytics::UsageSource::Measured)
-            .unwrap_or(false)
+        event.response.as_ref().is_some_and(|response| {
+            response.usage_source == routiium::analytics::UsageSource::Measured
+        })
     }));
     assert!(events
         .iter()
@@ -634,6 +694,12 @@ async fn exact_response_cache_reuses_safe_non_streaming_response_and_clears() {
     clear_router_env();
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn exact_response_cache_requires_explicit_cacheable_judge_metadata() {
     let _guard = ENV_GUARD.lock().await;
@@ -700,6 +766,12 @@ async fn exact_response_cache_requires_explicit_cacheable_judge_metadata() {
     clear_router_env();
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn exact_response_cache_misses_when_policy_revision_changes() {
     let _guard = ENV_GUARD.lock().await;
@@ -776,6 +848,12 @@ async fn exact_response_cache_misses_when_policy_revision_changes() {
     clear_router_env();
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn chat_non_streaming_uses_router_fallback_after_primary_transport_failure() {
     let _guard = ENV_GUARD.lock().await;
@@ -838,6 +916,12 @@ async fn chat_non_streaming_uses_router_fallback_after_primary_transport_failure
     clear_router_env();
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn chat_non_streaming_converts_responses_fallback_to_chat_schema() {
     let _guard = ENV_GUARD.lock().await;
@@ -905,6 +989,12 @@ async fn chat_non_streaming_converts_responses_fallback_to_chat_schema() {
     clear_router_env();
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn exact_response_cache_does_not_store_fallback_terminal_response_under_primary_key() {
     let _guard = ENV_GUARD.lock().await;
@@ -986,6 +1076,12 @@ async fn exact_response_cache_does_not_store_fallback_terminal_response_under_pr
     clear_router_env();
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn responses_non_streaming_converts_chat_fallback_to_responses_schema() {
     let _guard = ENV_GUARD.lock().await;
@@ -1051,6 +1147,12 @@ async fn responses_non_streaming_converts_chat_fallback_to_responses_schema() {
     clear_router_env();
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn router_plan_is_cached_between_requests() {
     let _guard = ENV_GUARD.lock().await;
@@ -1088,6 +1190,12 @@ async fn router_plan_is_cached_between_requests() {
     clear_router_env();
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn zero_ttl_router_plan_is_not_cached_between_requests() {
     let _guard = ENV_GUARD.lock().await;
@@ -1125,6 +1233,12 @@ async fn zero_ttl_router_plan_is_not_cached_between_requests() {
     clear_router_env();
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn zero_default_cache_ttl_disables_router_plan_cache() {
     let _guard = ENV_GUARD.lock().await;

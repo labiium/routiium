@@ -143,7 +143,7 @@ trait KeyStore: Send + Sync {
 // ==============================
 
 mod sled_store_impl {
-    use super::*;
+    use super::{ApiKeyRecord, Arc, KeyStore, Result};
     use std::path::PathBuf;
 
     pub struct SledStore {
@@ -152,6 +152,9 @@ mod sled_store_impl {
     }
 
     impl SledStore {
+        ///
+        /// # Errors
+        /// Returns an error when the backing key store operation fails.
         pub fn open_default() -> Result<Self> {
             let path = std::env::var("ROUTIIUM_SLED_PATH")
                 .ok()
@@ -160,6 +163,9 @@ mod sled_store_impl {
             Self::open_path(PathBuf::from(path))
         }
 
+        ///
+        /// # Errors
+        /// Returns an error when the backing key store operation fails.
         pub fn open_path(path: PathBuf) -> Result<Self> {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).ok();
@@ -192,7 +198,7 @@ mod sled_store_impl {
 
         fn list(&self) -> Result<Vec<ApiKeyRecord>> {
             let mut out = Vec::new();
-            for item in self.tree.iter() {
+            for item in &self.tree {
                 let (_k, v) = item?;
                 let rec: ApiKeyRecord = serde_json::from_slice(&v)?;
                 out.push(rec);
@@ -202,14 +208,14 @@ mod sled_store_impl {
 
         fn purge(&self, cutoff_epoch: u64) -> Result<usize> {
             let mut removed = 0usize;
-            for item in self.tree.iter() {
+            for item in &self.tree {
                 let (k, v) = item?;
                 let rec: ApiKeyRecord = serde_json::from_slice(&v)?;
-                let expired = rec.expires_at.map(|e| e <= cutoff_epoch).unwrap_or(false);
-                let revoked = rec.revoked_at.map(|r| r <= cutoff_epoch).unwrap_or(false);
+                let expired = rec.expires_at.is_some_and(|e| e <= cutoff_epoch);
+                let revoked = rec.revoked_at.is_some_and(|r| r <= cutoff_epoch);
                 if expired || revoked {
                     self.tree.remove(k)?;
-                    removed += 1;
+                    removed = removed.saturating_add(1);
                 }
             }
             self.tree.flush()?;
@@ -217,6 +223,9 @@ mod sled_store_impl {
         }
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub fn make_store() -> Result<Arc<dyn KeyStore>> {
         Ok(Arc::new(SledStore::open_default()?))
     }
@@ -227,7 +236,7 @@ mod sled_store_impl {
 // ==============================
 
 mod redis_store_impl {
-    use super::*;
+    use super::{ApiKeyRecord, Arc, KeyStore, Result};
     // This placeholder uses blocking Redis commands; replace with async driver if desired.
     // Requires the "redis" crate with the "tokio-comp" or async features for production use.
     // Custom r2d2 manager using redis 0.24
@@ -260,12 +269,18 @@ mod redis_store_impl {
     }
 
     impl RedisStore {
+        ///
+        /// # Errors
+        /// Returns an error when the backing key store operation fails.
         pub fn connect_default() -> Result<Self> {
             let url = std::env::var("ROUTIIUM_REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
             Self::connect_url(&url)
         }
 
+        ///
+        /// # Errors
+        /// Returns an error when the backing key store operation fails.
         pub fn connect_url(url: &str) -> Result<Self> {
             let client = redis::Client::open(url)?;
             let manager = RedisConnectionManager { client };
@@ -326,13 +341,13 @@ mod redis_store_impl {
             let mut conn = self.pool.get()?;
             let mut removed = 0usize;
             for rec in recs {
-                let expired = rec.expires_at.map(|e| e <= cutoff_epoch).unwrap_or(false);
-                let revoked = rec.revoked_at.map(|r| r <= cutoff_epoch).unwrap_or(false);
+                let expired = rec.expires_at.is_some_and(|e| e <= cutoff_epoch);
+                let revoked = rec.revoked_at.is_some_and(|r| r <= cutoff_epoch);
                 if expired || revoked {
                     let key = self.key_for(&rec.id);
                     let n: i64 = redis::cmd("DEL").arg(&key).query(&mut *conn)?;
                     if n > 0 {
-                        removed += 1;
+                        removed = removed.saturating_add(1);
                     }
                 }
             }
@@ -340,9 +355,15 @@ mod redis_store_impl {
         }
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub fn make_store() -> Result<Arc<dyn KeyStore>> {
         Ok(Arc::new(RedisStore::connect_default()?))
     }
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub fn make_store_with_url(url: &str) -> Result<Arc<dyn KeyStore>> {
         Ok(Arc::new(RedisStore::connect_url(url)?))
     }
@@ -353,7 +374,7 @@ mod redis_store_impl {
 // ==============================
 
 mod memory_store_impl {
-    use super::*;
+    use super::{ApiKeyRecord, Arc, KeyStore, Result};
     use std::collections::HashMap;
     use std::sync::RwLock;
 
@@ -366,33 +387,54 @@ mod memory_store_impl {
         fn put(&self, rec: &ApiKeyRecord) -> Result<()> {
             self.inner
                 .write()
-                .expect("lock")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(rec.id.clone(), rec.clone());
             Ok(())
         }
 
         fn get(&self, id: &str) -> Result<Option<ApiKeyRecord>> {
-            Ok(self.inner.read().expect("lock").get(id).cloned())
+            Ok(self
+                .inner
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(id)
+                .cloned())
         }
 
         /* delete removed */
 
         fn list(&self) -> Result<Vec<ApiKeyRecord>> {
-            Ok(self.inner.read().expect("lock").values().cloned().collect())
+            Ok(self
+                .inner
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .values()
+                .cloned()
+                .collect())
         }
 
         fn purge(&self, cutoff_epoch: u64) -> Result<usize> {
-            let mut g = self.inner.write().expect("lock");
+            let mut g = self
+                .inner
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let before = g.len();
             g.retain(|_, rec| {
-                let expired = rec.expires_at.map(|e| e <= cutoff_epoch).unwrap_or(false);
-                let revoked = rec.revoked_at.map(|r| r <= cutoff_epoch).unwrap_or(false);
+                let expired = rec.expires_at.is_some_and(|e| e <= cutoff_epoch);
+                let revoked = rec.revoked_at.is_some_and(|r| r <= cutoff_epoch);
                 !(expired || revoked)
             });
             Ok(before.saturating_sub(g.len()))
         }
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "trait factory API preserves fallible backend interface"
+    )]
     pub fn make_store() -> Result<Arc<dyn KeyStore>> {
         Ok(Arc::new(MemoryStore::default()))
     }
@@ -419,6 +461,10 @@ pub struct AuthManager {
 }
 
 impl AuthManager {
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "constructor preserves fallible API symmetry across backends"
+    )]
     fn from_store(store: Arc<dyn KeyStore>) -> Result<Self> {
         let cache = if Self::cache_enabled() {
             match store.list() {
@@ -459,27 +505,44 @@ impl AuthManager {
         !env_truthy("ROUTIIUM_KEYS_DISABLE_CACHE", false)
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub fn new_default() -> Result<Self> {
         let store = make_default_store()?;
         Self::from_store(store)
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub fn new_with_redis_url(url: &str) -> Result<Self> {
         let store = redis_store_impl::make_store_with_url(url)?;
         Self::from_store(store)
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub fn new_with_sled_path(path: &std::path::Path) -> Result<Self> {
-        let store = sled_store_impl::SledStore::open_path(path.to_path_buf())
-            .map(|s| Arc::new(s) as Arc<dyn KeyStore>)?;
+        let store = sled_store_impl::SledStore::open_path(path.to_path_buf()).map(|s| {
+            let arc: Arc<dyn KeyStore> = Arc::new(s);
+            arc
+        })?;
         Self::from_store(store)
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub fn new_sled_default() -> Result<Self> {
         let store = sled_store_impl::make_store()?;
         Self::from_store(store)
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub fn new_redis_default() -> Result<Self> {
         let store = redis_store_impl::make_store()?;
         Self::from_store(store)
@@ -532,12 +595,12 @@ impl AuthManager {
     fn log_store_latency(operation: &str, elapsed: Duration) {
         if elapsed >= Duration::from_millis(250) {
             warn!(
-                duration_ms = elapsed.as_millis() as u64,
+                duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
                 "API key store {} latency", operation
             );
         } else if elapsed >= Duration::from_millis(50) {
             debug!(
-                duration_ms = elapsed.as_millis() as u64,
+                duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
                 "API key store {} latency", operation
             );
         }
@@ -547,6 +610,9 @@ impl AuthManager {
     // Key lifecycle (sync API)
     // --------------------------
 
+    ///
+    /// # Errors
+    /// Returns an error when key persistence fails.
     pub fn generate_key(
         &self,
         label: Option<String>,
@@ -585,7 +651,7 @@ impl AuthManager {
         let salt = random_bytes(16);
         let salt_hex = hex_encode(&salt);
 
-        let mut data = Vec::with_capacity(salt.len() + secret_hex.len() / 2);
+        let mut data = Vec::with_capacity(salt.len().saturating_add(secret_hex.len() / 2));
         data.extend_from_slice(&salt);
         let secret_bytes = hex_decode(&secret_hex)?;
         data.extend_from_slice(&secret_bytes);
@@ -619,6 +685,10 @@ impl AuthManager {
         })
     }
 
+    #[expect(
+        clippy::manual_let_else,
+        reason = "branching keeps verification status mapping explicit"
+    )]
     pub fn verify(&self, token: &str) -> Verification {
         let (id, secret_hex) = match parse_token(token) {
             Some(p) => p,
@@ -653,7 +723,7 @@ impl AuthManager {
             Err(_) => return Verification::InvalidTokenFormat,
         };
 
-        let mut data = Vec::with_capacity(salt.len() + secret_bytes.len());
+        let mut data = Vec::with_capacity(salt.len().saturating_add(secret_bytes.len()));
         data.extend_from_slice(&salt);
         data.extend_from_slice(&secret_bytes);
         let digest = sha256(&data);
@@ -669,6 +739,9 @@ impl AuthManager {
         }
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub fn revoke(&self, id: &str) -> Result<bool> {
         if let Some(mut rec) = self.store_get_with_metrics(id)? {
             if rec.revoked_at.is_none() {
@@ -685,6 +758,9 @@ impl AuthManager {
         Ok(false)
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub fn set_expiration(&self, id: &str, expires_at: Option<u64>) -> Result<bool> {
         if let Some(mut rec) = self.store_get_with_metrics(id)? {
             rec.expires_at = expires_at;
@@ -697,6 +773,9 @@ impl AuthManager {
         Ok(false)
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub fn list_keys(&self) -> Result<Vec<ApiKeyInfo>> {
         if let Some(records) = self.cache_snapshot() {
             return Ok(records.into_iter().map(ApiKeyInfo::from).collect());
@@ -715,13 +794,16 @@ impl AuthManager {
         Ok(recs.into_iter().map(ApiKeyInfo::from).collect())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub fn purge(&self, cutoff_epoch: u64) -> Result<usize> {
         let removed = self.store.purge(cutoff_epoch)?;
         if let Some(cache) = &self.cache {
             if let Ok(mut map) = cache.write() {
                 map.retain(|_, rec| {
-                    let expired = rec.expires_at.map(|e| e <= cutoff_epoch).unwrap_or(false);
-                    let revoked = rec.revoked_at.map(|r| r <= cutoff_epoch).unwrap_or(false);
+                    let expired = rec.expires_at.is_some_and(|e| e <= cutoff_epoch);
+                    let revoked = rec.revoked_at.is_some_and(|r| r <= cutoff_epoch);
                     !(expired || revoked)
                 });
             }
@@ -733,6 +815,13 @@ impl AuthManager {
     // Async wrappers
     // --------------------------
 
+    #[expect(
+        clippy::unused_async,
+        reason = "async compatibility wrapper preserves public API"
+    )]
+    ///
+    /// # Errors
+    /// Returns an error when key persistence fails.
     pub async fn generate_key_async(
         &self,
         label: Option<String>,
@@ -742,22 +831,54 @@ impl AuthManager {
         self.generate_key(label, ttl, scopes)
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "async compatibility wrapper preserves public API"
+    )]
     pub async fn verify_async(&self, token: &str) -> Verification {
         self.verify(token)
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "async compatibility wrapper preserves public API"
+    )]
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub async fn revoke_async(&self, id: &str) -> Result<bool> {
         self.revoke(id)
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "async compatibility wrapper preserves public API"
+    )]
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub async fn set_expiration_async(&self, id: &str, expires_at: Option<u64>) -> Result<bool> {
         self.set_expiration(id, expires_at)
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "async compatibility wrapper preserves public API"
+    )]
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub async fn list_keys_async(&self) -> Result<Vec<ApiKeyInfo>> {
         self.list_keys()
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "async compatibility wrapper preserves public API"
+    )]
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub async fn purge_async(&self, cutoff_epoch: u64) -> Result<usize> {
         self.purge(cutoff_epoch)
     }
@@ -773,6 +894,9 @@ pub enum KeyBackend {
 
 impl AuthManager {
     /// Build a manager from an explicit backend selection.
+    ///
+    /// # Errors
+    /// Returns an error when the backing key store operation fails.
     pub fn from_backend(backend: KeyBackend) -> Result<Self> {
         match backend {
             KeyBackend::Redis { url } => Self::new_with_redis_url(&url),
@@ -788,6 +912,7 @@ impl AuthManager {
     /// - "redis://..." → Redis at URL
     /// - "sled:<path>" → Sled database at path
     /// - "memory"      → In-memory backend
+    #[must_use]
     pub fn backend_from_arg_spec(spec: &str) -> Option<KeyBackend> {
         if spec.starts_with("redis://") {
             return Some(KeyBackend::Redis {
@@ -806,6 +931,7 @@ impl AuthManager {
     }
 
     /// Scan CLI args for a flag like "--keys-backend=<spec>" and return the parsed backend if found.
+    #[must_use]
     pub fn backend_from_args(args: &[String]) -> Option<KeyBackend> {
         for a in args {
             if let Some(spec) = a.strip_prefix("--keys-backend=") {
@@ -825,6 +951,7 @@ pub type ApiKeyManager = AuthManager;
 // - Helpers: token parsing, hashing, header verification
 // ==============================
 
+#[must_use]
 pub fn verify_bearer(manager: &AuthManager, auth_header: Option<&str>) -> Verification {
     let token = match auth_header {
         Some(raw) => {
@@ -848,13 +975,10 @@ pub fn verify_bearer(manager: &AuthManager, auth_header: Option<&str>) -> Verifi
 }
 
 fn env_truthy(name: &str, default: bool) -> bool {
-    match std::env::var(name) {
-        Ok(v) => {
-            let s = v.trim().to_ascii_lowercase();
-            s == "1" || s == "true" || s == "yes" || s == "on"
-        }
-        Err(_) => default,
-    }
+    std::env::var(name).ok().map_or(default, |v| {
+        let s = v.trim().to_ascii_lowercase();
+        s == "1" || s == "true" || s == "yes" || s == "on"
+    })
 }
 
 fn now_epoch() -> u64 {
@@ -866,14 +990,14 @@ fn now_epoch() -> u64 {
 
 fn uuid_hex() -> String {
     let u = Uuid::new_v4().as_u128();
-    format!("{:032x}", u)
+    format!("{u:032x}")
 }
 
 fn parse_token(token: &str) -> Option<(String, String)> {
     if !token.starts_with("sk_") {
         return None;
     }
-    let rest = &token[3..];
+    let rest = token.get(3..)?;
     let (id_part, secret_part) = rest.split_once('.')?;
     if id_part.len() != 32 || !is_hex(id_part) {
         return None;
@@ -899,6 +1023,12 @@ fn random_secret_hex(bytes: usize) -> String {
     hex_encode(&random_bytes(bytes))
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::as_conversions,
+    reason = "hex encoding uses bounded nibble indices and fixed arithmetic"
+)]
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -916,7 +1046,8 @@ fn hex_decode(s: &str) -> Result<Vec<u8>> {
     }
     let mut out = Vec::with_capacity(s.len() / 2);
     for pair in s.as_bytes().chunks(2) {
-        let hi = hex_val(pair[0]).ok_or_else(|| anyhow!("invalid hex"))?;
+        let hi = hex_val(*pair.first().ok_or_else(|| anyhow!("invalid hex"))?)
+            .ok_or_else(|| anyhow!("invalid hex"))?;
         let lo = hex_val(*pair.get(1).ok_or_else(|| anyhow!("invalid hex"))?)
             .ok_or_else(|| anyhow!("invalid hex"))?;
         out.push((hi << 4) | lo);
@@ -924,7 +1055,11 @@ fn hex_decode(s: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn hex_val(b: u8) -> Option<u8> {
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "ASCII range subtraction is bounded by match arms"
+)]
+const fn hex_val(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
         b'a'..=b'f' => Some(b - b'a' + 10),
@@ -934,6 +1069,10 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 /// Constant-time equality for two byte slices.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "length equality is checked before constant-time indexing"
+)]
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -947,42 +1086,98 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 
 // Minimal pure-Rust SHA-256 (streaming)
 const K256: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    0x428a_2f98,
+    0x7137_4491,
+    0xb5c0_fbcf,
+    0xe9b5_dba5,
+    0x3956_c25b,
+    0x59f1_11f1,
+    0x923f_82a4,
+    0xab1c_5ed5,
+    0xd807_aa98,
+    0x1283_5b01,
+    0x2431_85be,
+    0x550c_7dc3,
+    0x72be_5d74,
+    0x80de_b1fe,
+    0x9bdc_06a7,
+    0xc19b_f174,
+    0xe49b_69c1,
+    0xefbe_4786,
+    0x0fc1_9dc6,
+    0x240c_a1cc,
+    0x2de9_2c6f,
+    0x4a74_84aa,
+    0x5cb0_a9dc,
+    0x76f9_88da,
+    0x983e_5152,
+    0xa831_c66d,
+    0xb003_27c8,
+    0xbf59_7fc7,
+    0xc6e0_0bf3,
+    0xd5a7_9147,
+    0x06ca_6351,
+    0x1429_2967,
+    0x27b7_0a85,
+    0x2e1b_2138,
+    0x4d2c_6dfc,
+    0x5338_0d13,
+    0x650a_7354,
+    0x766a_0abb,
+    0x81c2_c92e,
+    0x9272_2c85,
+    0xa2bf_e8a1,
+    0xa81a_664b,
+    0xc24b_8b70,
+    0xc76c_51a3,
+    0xd192_e819,
+    0xd699_0624,
+    0xf40e_3585,
+    0x106a_a070,
+    0x19a4_c116,
+    0x1e37_6c08,
+    0x2748_774c,
+    0x34b0_bcb5,
+    0x391c_0cb3,
+    0x4ed8_aa4a,
+    0x5b9c_ca4f,
+    0x682e_6ff3,
+    0x748f_82ee,
+    0x78a5_636f,
+    0x84c8_7814,
+    0x8cc7_0208,
+    0x90be_fffa,
+    0xa450_6ceb,
+    0xbef9_a3f7,
+    0xc671_78f2,
 ];
 
-#[inline(always)]
-fn rotr(x: u32, n: u32) -> u32 {
+#[inline]
+const fn rotr(x: u32, n: u32) -> u32 {
     x.rotate_right(n)
 }
-#[inline(always)]
-fn ch(x: u32, y: u32, z: u32) -> u32 {
+#[inline]
+const fn ch(x: u32, y: u32, z: u32) -> u32 {
     (x & y) ^ ((!x) & z)
 }
-#[inline(always)]
-fn maj(x: u32, y: u32, z: u32) -> u32 {
+#[inline]
+const fn maj(x: u32, y: u32, z: u32) -> u32 {
     (x & y) ^ (x & z) ^ (y & z)
 }
-#[inline(always)]
-fn big_sigma0(x: u32) -> u32 {
+#[inline]
+const fn big_sigma0(x: u32) -> u32 {
     rotr(x, 2) ^ rotr(x, 13) ^ rotr(x, 22)
 }
-#[inline(always)]
-fn big_sigma1(x: u32) -> u32 {
+#[inline]
+const fn big_sigma1(x: u32) -> u32 {
     rotr(x, 6) ^ rotr(x, 11) ^ rotr(x, 25)
 }
-#[inline(always)]
-fn small_sigma0(x: u32) -> u32 {
+#[inline]
+const fn small_sigma0(x: u32) -> u32 {
     rotr(x, 7) ^ rotr(x, 18) ^ (x >> 3)
 }
-#[inline(always)]
-fn small_sigma1(x: u32) -> u32 {
+#[inline]
+const fn small_sigma1(x: u32) -> u32 {
     rotr(x, 17) ^ rotr(x, 19) ^ (x >> 10)
 }
 
@@ -993,12 +1188,25 @@ struct Sha256 {
     bit_len: u64,
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::as_conversions,
+    clippy::many_single_char_names,
+    reason = "SHA-256 implementation uses fixed-size validated blocks and wrapping arithmetic"
+)]
 impl Sha256 {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             state: [
-                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-                0x5be0cd19,
+                0x6a09_e667,
+                0xbb67_ae85,
+                0x3c6e_f372,
+                0xa54f_f53a,
+                0x510e_527f,
+                0x9b05_688c,
+                0x1f83_d9ab,
+                0x5be0_cd19,
             ],
             buffer: [0u8; 64],
             buflen: 0,
@@ -1040,12 +1248,11 @@ impl Sha256 {
         block[..n].copy_from_slice(&self.buffer[..n]);
         block[n] = 0x80;
 
-        if n + 1 + 8 <= 64 {
-            let bit_len_be = self.bit_len.to_be_bytes();
+        let bit_len_be = self.bit_len.to_be_bytes();
+        if n <= 55 {
             block[64 - 8..64].copy_from_slice(&bit_len_be);
             self.compress(&block[..64]);
         } else {
-            let bit_len_be = self.bit_len.to_be_bytes();
             block[128 - 8..128].copy_from_slice(&bit_len_be);
             self.compress(&block[..64]);
             self.compress(&block[64..128]);
@@ -1119,6 +1326,12 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 // ==============================
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "unit tests use assertions for fixture setup"
+)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1172,8 +1385,8 @@ mod tests {
             let mut guard = self.inner.write().expect("counting store purge");
             let before = guard.len();
             guard.retain(|_, rec| {
-                let expired = rec.expires_at.map(|e| e <= cutoff_epoch).unwrap_or(false);
-                let revoked = rec.revoked_at.map(|r| r <= cutoff_epoch).unwrap_or(false);
+                let expired = rec.expires_at.is_some_and(|e| e <= cutoff_epoch);
+                let revoked = rec.revoked_at.is_some_and(|r| r <= cutoff_epoch);
                 !(expired || revoked)
             });
             Ok(before.saturating_sub(guard.len()))
@@ -1193,14 +1406,14 @@ mod tests {
         // verify ok
         match mgr.verify_async(&out.token).await {
             Verification::Valid { id, .. } => assert_eq!(id, out.id),
-            x => panic!("expected valid, got {:?}", x),
+            x => panic!("expected valid, got {x:?}"),
         }
 
         // revoke then verify
         assert!(mgr.revoke_async(&out.id).await.unwrap());
         match mgr.verify_async(&out.token).await {
             Verification::Revoked { .. } => {}
-            x => panic!("expected revoked, got {:?}", x),
+            x => panic!("expected revoked, got {x:?}"),
         }
     }
 
@@ -1221,7 +1434,7 @@ mod tests {
 
         match mgr.verify(&out.token) {
             Verification::Valid { .. } => {}
-            other => panic!("expected valid token, got {:?}", other),
+            other => panic!("expected valid token, got {other:?}"),
         }
         assert_eq!(
             store.drain_gets(),
@@ -1244,7 +1457,7 @@ mod tests {
 
         match mgr.verify(&out.token) {
             Verification::Revoked { .. } => {}
-            other => panic!("expected revoked token, got {:?}", other),
+            other => panic!("expected revoked token, got {other:?}"),
         }
         assert_eq!(
             store.drain_gets(),

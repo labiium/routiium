@@ -99,7 +99,7 @@ pub struct ResponsesRequest {
     #[serde(default)]
     pub previous_response_id: Option<String>,
 
-    /// Provider-specific extra options (e.g., Gemini thinking_config)
+    /// Provider-specific extra options (e.g., Gemini `thinking_config`)
     #[serde(default)]
     pub extra_body: Option<serde_json::Value>,
 }
@@ -241,7 +241,7 @@ pub struct ResponsesUsage {
     #[serde(default)]
     pub reasoning_tokens: Option<u64>,
 
-    /// Cached tokens (subset of input_tokens)
+    /// Cached tokens (subset of `input_tokens`)
     #[serde(default)]
     pub cached_tokens: Option<u64>,
 }

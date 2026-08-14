@@ -19,6 +19,9 @@ pub struct McpServerConfig {
 
 impl McpConfig {
     /// Load MCP configuration from a JSON file
+    ///
+    /// # Errors
+    /// Returns an error when the file cannot be read or parsed as MCP JSON.
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path.as_ref()).with_context(|| {
             format!(
@@ -27,18 +30,20 @@ impl McpConfig {
             )
         })?;
 
-        let config: McpConfig =
+        let config: Self =
             serde_json::from_str(&content).with_context(|| "Failed to parse MCP config JSON")?;
 
         Ok(config)
     }
 
     /// Get all server names
+    #[must_use]
     pub fn server_names(&self) -> Vec<String> {
         self.mcp_servers.keys().cloned().collect()
     }
 
     /// Get a specific server config
+    #[must_use]
     pub fn get_server(&self, name: &str) -> Option<&McpServerConfig> {
         self.mcp_servers.get(name)
     }
@@ -46,6 +51,7 @@ impl McpConfig {
 
 impl McpServerConfig {
     /// Get the full command with arguments
+    #[must_use]
     pub fn get_command_args(&self) -> Vec<String> {
         let mut cmd_args = vec![self.command.clone()];
         if let Some(args) = &self.args {
@@ -56,6 +62,7 @@ impl McpServerConfig {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test fixtures are fixed")]
 mod tests {
     use super::*;
 

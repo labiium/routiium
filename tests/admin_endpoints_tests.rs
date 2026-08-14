@@ -148,6 +148,12 @@ fn sample_absent_usage_event(id: &str, ts: u64, endpoint: &str) -> AnalyticsEven
     event
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn keys_endpoints_enforce_admin_auth_and_support_lifecycle() {
     let _env_guard = ENV_LOCK.lock().expect("env lock");
@@ -244,6 +250,12 @@ async fn keys_endpoints_enforce_admin_auth_and_support_lifecycle() {
     assert!(set_exp_body["expires_at"].is_number());
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn keys_respect_required_expiration_policy() {
     let _env_guard = ENV_LOCK.lock().expect("env lock");
@@ -277,6 +289,12 @@ async fn keys_respect_required_expiration_policy() {
     assert_eq!(resp.status(), 400);
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn readiness_reports_upstream_and_store_checks() {
     let _env_guard = ENV_LOCK.lock().expect("env lock");
@@ -308,6 +326,12 @@ async fn readiness_reports_upstream_and_store_checks() {
     assert_eq!(body["checks"]["upstream_or_router"], true);
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn readiness_accepts_subscription_only_upstream() {
     let _env_guard = ENV_LOCK.lock().expect("env lock");
@@ -349,6 +373,12 @@ async fn readiness_accepts_subscription_only_upstream() {
     assert_eq!(body["checks"]["subscription_upstream"], true);
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn metrics_endpoint_exposes_gateway_counters() {
     let keys = Arc::new(
@@ -371,6 +401,12 @@ async fn metrics_endpoint_exposes_gateway_counters() {
     assert!(body.contains("routiium_usage_source_total{source=\"measured\"}"));
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn analytics_admin_endpoints_work_end_to_end() {
     let _env_guard = ENV_LOCK.lock().expect("env lock");
@@ -497,6 +533,12 @@ async fn analytics_admin_endpoints_work_end_to_end() {
     assert_eq!(stats_after_body["total_events"], 0);
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn analytics_governance_flags_absent_usage_as_not_ready() {
     let _env_guard = ENV_LOCK.lock().expect("env lock");
@@ -547,6 +589,12 @@ async fn analytics_governance_flags_absent_usage_as_not_ready() {
     assert_eq!(body["governance_ready"]["token_limit_reporting"], false);
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn analytics_and_chat_history_return_503_when_disabled() {
     let _env_guard = ENV_LOCK.lock().expect("env lock");
@@ -579,6 +627,12 @@ async fn analytics_and_chat_history_return_503_when_disabled() {
     assert_eq!(history_resp.status(), 503);
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn chat_history_admin_endpoints_work_end_to_end() {
     let _env_guard = ENV_LOCK.lock().expect("env lock");

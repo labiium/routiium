@@ -1,14 +1,17 @@
 use actix_web::{test, web, App};
 use axum::{routing::post, Json, Router};
-use once_cell::sync::Lazy;
 use routiium::{server::config_routes, util::AppState};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-static ENV_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static ENV_GUARD: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "test server setup intentionally fails fast"
+)]
 async fn start_guard_triggering_upstream() -> SocketAddr {
     async fn responses() -> Json<Value> {
         Json(json!({
@@ -52,6 +55,12 @@ fn clear_env() {
     }
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn response_guard_block_is_available_in_safety_events() {
     let _guard = ENV_GUARD.lock().await;

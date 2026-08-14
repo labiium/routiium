@@ -10,7 +10,7 @@
 //! - `LocalRouter` trait: Embedded policy engine for single-binary deployments
 //! - `HttpRouterClient`: Remote Router communication via HTTP
 //! - `LocalPolicyRouter`: Simple embedded routing policies
-//! - `RouterCache`: Decision caching with TTL and ETag validation
+//! - `RouterCache`: Decision caching with TTL and `ETag` validation
 //!
 //! ## Performance
 //!
@@ -26,14 +26,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 
-/// Mode for upstream API (Responses, Chat Completions, or Bedrock)
+/// Mode for upstream API (Responses, Chat Completions, legacy Bedrock, or Bedrock Mantle)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum UpstreamMode {
     #[default]
     Responses,
     Chat,
     Bedrock,
+    #[serde(alias = "bedrock-mantle", alias = "mantle")]
+    BedrockMantle,
 }
 
 /// Privacy mode for Router communication
@@ -65,9 +67,10 @@ pub enum PrivacyTier {
 }
 
 /// Model capabilities metadata
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Capabilities {
-    /// Supported modalities (e.g., ["text", "image", "audio"])
+    /// Supported modalities (e.g., `text`, `image`, `audio`)
     #[serde(default)]
     pub modalities: Vec<String>,
 
@@ -201,7 +204,7 @@ pub struct CatalogModel {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<Vec<String>>,
 
-    /// Aliases and tags (e.g., ["tier:T1", "family:gpt-4o-mini"])
+    /// Aliases and tags (e.g., `tier:T1`, `family:gpt-4o-mini`)
     #[serde(default)]
     pub aliases: Vec<String>,
 
@@ -225,11 +228,11 @@ pub struct CatalogModel {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limits: Option<ModelLimits>,
 
-    /// Policy tags (e.g., ["T1", "edu_safe", "offline_ok"])
+    /// Policy tags (e.g., `T1`, `edu_safe`, `offline_ok`)
     #[serde(default)]
     pub policy_tags: Vec<String>,
 
-    /// Current status (e.g., "healthy", "degraded", "deprecated")
+    /// Current status (e.g., `healthy`, `degraded`, `deprecated`)
     #[serde(default = "default_status")]
     pub status: String,
 
@@ -369,15 +372,15 @@ pub struct ConversationSignals {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub history_fingerprint: Option<String>,
 
-    /// Optional short summary (1-2 lines) - only with privacy_mode != FeaturesOnly
+    /// Optional short summary (1-2 lines) - only with `privacy_mode` != `FeaturesOnly`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
 
-    /// Full system prompt - only with privacy_mode = Full
+    /// Full system prompt - only with `privacy_mode` = Full
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
 
-    /// Anchored recent messages - only with privacy_mode = Full.
+    /// Anchored recent messages - only with `privacy_mode` = Full.
     /// Includes the first user message when present, then a bounded recent tail.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recent_messages: Option<Vec<serde_json::Value>>,
@@ -456,7 +459,7 @@ pub struct RouteRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_attestation: Option<ContentAttestation>,
 
-    /// Declared capabilities needed (e.g., ["text", "code", "vision", "tools"])
+    /// Declared capabilities needed (e.g., `text`, `code`, `vision`, `tools`)
     #[serde(default)]
     pub caps: Vec<String>,
 
@@ -464,7 +467,7 @@ pub struct RouteRequest {
     #[serde(default)]
     pub stream: bool,
 
-    /// Request parameters (temperature, json_mode, etc.)
+    /// Request parameters (temperature, `json_mode`, etc.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
 
@@ -500,7 +503,7 @@ pub struct RouteRequest {
     #[serde(default)]
     pub tools: Vec<ToolSignal>,
 
-    /// Request overrides (allow_premium, etc.)
+    /// Request overrides (`allow_premium`, etc.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overrides: Option<serde_json::Value>,
 
@@ -513,7 +516,7 @@ pub struct RouteRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
 
-    /// Privacy/compliance tier (deprecated: use privacy_mode)
+    /// Privacy/compliance tier (deprecated: use `privacy_mode`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub privacy: Option<PrivacyTier>,
 
@@ -525,7 +528,7 @@ pub struct RouteRequest {
 /// Upstream backend configuration from Router decision
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpstreamConfig {
-    /// Base URL (e.g., "https://api.openai.com/v1")
+    /// Base URL (e.g., "<https://api.openai.com/v1>")
     pub base_url: String,
 
     /// API mode (responses or chat)
@@ -619,7 +622,7 @@ pub struct FallbackConfig {
     /// Model ID for fallback
     pub model_id: String,
 
-    /// Reason for fallback (e.g., "openai_ratelimit")
+    /// Reason for fallback (e.g., "`openai_ratelimit`")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 
@@ -633,7 +636,7 @@ pub struct FallbackConfig {
 }
 
 /// Ordered upstream attempt derived from a route plan.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RouteAttempt {
     /// Zero-based hop. Hop 0 is the primary upstream.
     pub hop: usize,
@@ -660,7 +663,7 @@ pub struct CacheControl {
     /// TTL in milliseconds
     pub ttl_ms: u64,
 
-    /// ETag for validation
+    /// `ETag` for validation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
 
@@ -736,7 +739,7 @@ pub struct JudgeMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 
-    /// Machine-readable risk categories such as prompt_injection or exfiltration.
+    /// Machine-readable risk categories such as `prompt_injection` or exfiltration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub categories: Option<Vec<String>>,
 
@@ -832,8 +835,9 @@ impl RoutePlan {
     ///
     /// This is intentionally a pure projection so handlers can implement
     /// bounded retry/failover without reinterpreting the fallback schema.
+    #[must_use]
     pub fn ordered_attempts(&self) -> Vec<RouteAttempt> {
-        let mut attempts = Vec::with_capacity(1 + self.fallbacks.len());
+        let mut attempts = Vec::with_capacity(self.fallbacks.len().saturating_add(1));
         attempts.push(RouteAttempt {
             hop: 0,
             base_url: self.upstream.base_url.clone(),
@@ -849,7 +853,7 @@ impl RoutePlan {
                 .iter()
                 .enumerate()
                 .map(|(idx, fallback)| RouteAttempt {
-                    hop: idx + 1,
+                    hop: idx.saturating_add(1),
                     base_url: fallback.base_url.clone(),
                     mode: fallback.mode,
                     model_id: fallback.model_id.clone(),
@@ -940,15 +944,15 @@ pub struct RouteFeedback {
     pub cache_hit: Option<bool>,
 
     // Legacy fields for backward compatibility
-    /// Input tokens (deprecated: use usage.prompt_tokens)
+    /// Input tokens (deprecated: use `usage.prompt_tokens`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u32>,
 
-    /// Output tokens (deprecated: use usage.completion_tokens)
+    /// Output tokens (deprecated: use `usage.completion_tokens`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u32>,
 
-    /// Latency (deprecated: use duration_ms)
+    /// Latency (deprecated: use `duration_ms`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u64>,
 
@@ -989,13 +993,17 @@ pub enum RouteError {
     },
 }
 
-/// Main RouterClient trait - thin, fast decision interface
+/// Main `RouterClient` trait - thin, fast decision interface
 #[async_trait]
 pub trait RouterClient: Send + Sync {
     /// Get routing plan for request
     async fn plan(&self, req: &RouteRequest) -> Result<RoutePlan, RouteError>;
 
     /// Send feedback after request (optional, async)
+    ///
+    /// # Errors
+    ///
+    /// The default implementation never fails.
     fn feedback(&self, fb: &RouteFeedback) -> Result<(), RouteError> {
         let _ = fb;
         Ok(())
@@ -1015,6 +1023,10 @@ pub trait RouterClient: Send + Sync {
 /// Local (embedded) policy engine trait
 pub trait LocalRouter: Send + Sync {
     /// Local routing decision
+    ///
+    /// # Errors
+    ///
+    /// Implementations return a [`RouteError`] when no route can be selected.
     fn plan_local(&self, req: &RouteRequest) -> Result<RoutePlan, RouteError>;
 }
 
@@ -1035,9 +1047,9 @@ pub enum RouterMode {
 impl std::fmt::Debug for RouterMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RouterMode::Local(_) => f.debug_tuple("Local").field(&"<LocalRouter>").finish(),
-            RouterMode::Remote(config) => f.debug_tuple("Remote").field(config).finish(),
-            RouterMode::Hybrid { remote, .. } => f
+            Self::Local(_) => f.debug_tuple("Local").field(&"<LocalRouter>").finish(),
+            Self::Remote(config) => f.debug_tuple("Remote").field(config).finish(),
+            Self::Hybrid { remote, .. } => f
                 .debug_struct("Hybrid")
                 .field("local", &"<LocalRouter>")
                 .field("remote", remote)
@@ -1081,6 +1093,10 @@ pub struct HttpRouterClient {
 
 impl HttpRouterClient {
     /// Create new HTTP router client
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the HTTP client cannot be constructed.
     pub fn new(mut config: HttpRouterConfig) -> Result<Self> {
         let client = if let Some(c) = config.client.take() {
             c
@@ -1109,15 +1125,14 @@ impl HttpRouterClient {
         if !response.status().is_success() {
             let status = response.status();
             return Err(RouteError::RouterError(format!(
-                "Catalog request failed: {}",
-                status
+                "Catalog request failed: {status}"
             )));
         }
 
         let catalog: ModelCatalog = response
             .json()
             .await
-            .map_err(|e| RouteError::RouterError(format!("Failed to parse catalog: {}", e)))?;
+            .map_err(|e| RouteError::RouterError(format!("Failed to parse catalog: {e}")))?;
 
         Ok(catalog)
     }
@@ -1152,15 +1167,14 @@ impl HttpRouterClient {
             let message = error_obj
                 .and_then(|v| v.get("message"))
                 .and_then(|v| v.as_str())
-                .map(ToString::to_string)
-                .unwrap_or_else(|| body.clone());
+                .map_or_else(|| body.clone(), ToString::to_string);
             let policy_rev = error_obj
                 .and_then(|v| v.get("policy_rev"))
                 .and_then(|v| v.as_str())
                 .map(ToString::to_string);
             let retry_hint_ms = error_obj
                 .and_then(|v| v.get("retry_hint_ms"))
-                .and_then(|v| v.as_u64());
+                .and_then(serde_json::Value::as_u64);
             if parsed_body.is_some() {
                 return Err(RouteError::Rejected {
                     status: status.as_u16(),
@@ -1172,15 +1186,14 @@ impl HttpRouterClient {
                 });
             }
             return Err(RouteError::RouterError(format!(
-                "Router returned {}: {}",
-                status, body
+                "Router returned {status}: {body}"
             )));
         }
 
         let plan: RoutePlan = response
             .json()
             .await
-            .map_err(|e| RouteError::RouterError(format!("Failed to parse plan: {}", e)))?;
+            .map_err(|e| RouteError::RouterError(format!("Failed to parse plan: {e}")))?;
 
         Ok(plan)
     }
@@ -1222,11 +1235,16 @@ pub struct LocalPolicyRouter {
 
 impl LocalPolicyRouter {
     /// Create new local policy router with alias map
-    pub fn new(aliases: HashMap<String, UpstreamConfig>) -> Self {
+    #[must_use]
+    pub const fn new(aliases: HashMap<String, UpstreamConfig>) -> Self {
         Self { aliases }
     }
 
     /// Load from JSON file
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read or parsed.
     pub fn from_file(path: &str) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let aliases: HashMap<String, UpstreamConfig> = serde_json::from_str(&content)?;
@@ -1234,6 +1252,7 @@ impl LocalPolicyRouter {
     }
 
     /// Create empty router
+    #[must_use]
     pub fn empty() -> Self {
         Self::new(HashMap::new())
     }
@@ -1266,7 +1285,7 @@ impl LocalRouter for LocalPolicyRouter {
 
         // Generate route ID
         let uuid_str = uuid::Uuid::new_v4().simple().to_string();
-        let route_id = format!("rte_{}", &uuid_str[..16]);
+        let route_id = format!("rte_{}", uuid_str.get(..16).unwrap_or(&uuid_str));
 
         // Simple plan with no fancy logic
         Ok(RoutePlan {
@@ -1344,6 +1363,7 @@ struct EmbeddedModel {
 }
 
 impl EmbeddedDefaultRouter {
+    #[must_use]
     pub fn from_env() -> Self {
         let base_url = std::env::var("OPENAI_BASE_URL")
             .ok()
@@ -1358,11 +1378,13 @@ impl EmbeddedDefaultRouter {
         {
             "chat" | "chat_completions" | "chat-completions" => UpstreamMode::Chat,
             "bedrock" => UpstreamMode::Bedrock,
+            "bedrock_mantle" | "bedrock-mantle" | "mantle" => UpstreamMode::BedrockMantle,
             _ => UpstreamMode::Responses,
         };
         Self::new(base_url, mode)
     }
 
+    #[must_use]
     pub fn new(base_url: String, mode: UpstreamMode) -> Self {
         let judge_client = reqwest::Client::builder()
             .timeout(Duration::from_millis(1_000))
@@ -1443,8 +1465,7 @@ impl EmbeddedDefaultRouter {
             });
             return candidates
                 .first()
-                .map(|model| (*model).clone())
-                .unwrap_or_else(|| passthrough_model(&req.alias));
+                .map_or_else(|| passthrough_model(&req.alias), |model| (*model).clone());
         }
 
         passthrough_model(&req.alias)
@@ -1453,11 +1474,11 @@ impl EmbeddedDefaultRouter {
     fn materialize_plan(
         &self,
         req: &RouteRequest,
-        model: EmbeddedModel,
-        decision: crate::safety_judge::SafetyDecision,
+        model: &EmbeddedModel,
+        decision: &crate::safety_judge::SafetyDecision,
     ) -> RoutePlan {
         let uuid_str = uuid::Uuid::new_v4().simple().to_string();
-        let route_id = format!("rte_{}", &uuid_str[..16]);
+        let route_id = format!("rte_{}", uuid_str.get(..16).unwrap_or(&uuid_str));
         let cache_ttl = if decision.cacheable { 15_000 } else { 0 };
         let content_used = req
             .content_attestation
@@ -1499,13 +1520,13 @@ impl EmbeddedDefaultRouter {
             }),
             hints: RouteHints {
                 tier: Some(model.tier.clone()),
-                est_cost_micro: estimated_cost(&model, req),
+                est_cost_micro: Some(estimated_cost(model, req)),
                 currency: Some("USD".to_string()),
                 est_latency_ms: Some(model.target_latency_ms),
                 provider: Some(model.provider.clone()),
                 penalty: None,
             },
-            fallbacks: build_embedded_fallbacks(&self.models, &model, &self.base_url, self.mode),
+            fallbacks: build_embedded_fallbacks(&self.models, model, &self.base_url, self.mode),
             cache: Some(CacheControl {
                 ttl_ms: cache_ttl,
                 etag: Some(format!("\"{}@{}\"", self.policy_rev, decision.policy_rev)),
@@ -1522,7 +1543,7 @@ impl EmbeddedDefaultRouter {
                 plan_token: Some(format!(
                     "stk_{}_{}",
                     model.id.replace(|c: char| !c.is_ascii_alphanumeric(), "_"),
-                    &uuid::Uuid::new_v4().simple().to_string()[..8]
+                    uuid::Uuid::new_v4().simple().to_string().get(..8).unwrap_or_default()
                 )),
                 max_turns: Some(3),
                 expires_at: None,
@@ -1533,6 +1554,12 @@ impl EmbeddedDefaultRouter {
     }
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "routing score intentionally uses bounded floating-point heuristics"
+)]
 fn embedded_score(
     model: &EmbeddedModel,
     budget_micro: Option<u64>,
@@ -1546,26 +1573,24 @@ fn embedded_score(
     } else {
         (latency_target as f32 / model.target_latency_ms as f32).clamp(0.0, 1.0)
     };
-    let budget_score = budget_micro
-        .map(|budget| {
-            if model.input_cost_micro <= budget {
-                1.0
-            } else {
-                0.4
-            }
-        })
-        .unwrap_or(1.0);
+    let budget_score = budget_micro.map_or(1.0, |budget| {
+        if model.input_cost_micro <= budget {
+            1.0
+        } else {
+            0.4
+        }
+    });
     let safety_score = match (risk, model.tier.as_str()) {
         (crate::safety_judge::RiskLevel::High | crate::safety_judge::RiskLevel::Critical, "T3") => {
             1.2
         }
-        (crate::safety_judge::RiskLevel::Medium, "T2" | "T3") => 1.0,
-        (crate::safety_judge::RiskLevel::Low, "T1") => 1.0,
+        (crate::safety_judge::RiskLevel::Medium, "T2" | "T3")
+        | (crate::safety_judge::RiskLevel::Low, "T1") => 1.0,
         _ => 0.75,
     };
-    (cost_score * 0.35)
-        + (latency_score * 0.25)
-        + (model.health * 0.2)
+    model
+        .health
+        .mul_add(0.2, (cost_score * 0.35) + (latency_score * 0.25))
         + (budget_score * 0.1)
         + (safety_score * 0.1)
 }
@@ -1643,12 +1668,12 @@ fn passthrough_model(alias: &str) -> EmbeddedModel {
     }
 }
 
-fn estimated_cost(model: &EmbeddedModel, req: &RouteRequest) -> Option<u64> {
-    let input_tokens = req.estimates.prompt_tokens.unwrap_or(1_000) as u64;
-    let output_tokens = req.estimates.max_output_tokens.unwrap_or(512) as u64;
+fn estimated_cost(model: &EmbeddedModel, req: &RouteRequest) -> u64 {
+    let input_tokens = u64::from(req.estimates.prompt_tokens.unwrap_or(1_000));
+    let output_tokens = u64::from(req.estimates.max_output_tokens.unwrap_or(512));
     let input = input_tokens.saturating_mul(model.input_cost_micro) / 1_000_000;
     let output = output_tokens.saturating_mul(model.output_cost_micro) / 1_000_000;
-    Some(input.saturating_add(output))
+    input.saturating_add(output)
 }
 
 fn build_embedded_fallbacks(
@@ -1700,7 +1725,7 @@ impl RouterClient for EmbeddedDefaultRouter {
             });
         }
         let model = self.choose_model(req, &decision);
-        Ok(self.materialize_plan(req, model, decision))
+        Ok(self.materialize_plan(req, &model, &decision))
     }
 
     fn policy_revision(&self) -> Option<String> {
@@ -1748,7 +1773,7 @@ impl RouterClient for EmbeddedDefaultRouter {
                         recent: Some(RecentMetrics {
                             p50_ms: Some(model.target_latency_ms / 2),
                             p95_ms: Some(model.target_latency_ms),
-                            error_rate: Some((1.0 - model.health as f64).max(0.0)),
+                            error_rate: Some((1.0 - f64::from(model.health)).max(0.0)),
                             tokens_per_sec: None,
                         }),
                     },
@@ -1807,7 +1832,7 @@ struct CachedPlan {
     expires_at: Instant,
 }
 
-/// Decision cache with TTL and ETag validation
+/// Decision cache with TTL and `ETag` validation
 pub struct RouterCache {
     cache: Arc<Mutex<HashMap<String, CachedPlan>>>,
     default_ttl_ms: u64,
@@ -1815,6 +1840,7 @@ pub struct RouterCache {
 
 impl RouterCache {
     /// Create new router cache
+    #[must_use]
     pub fn new(default_ttl_ms: u64) -> Self {
         Self {
             cache: Arc::new(Mutex::new(HashMap::new())),
@@ -1839,6 +1865,7 @@ impl RouterCache {
     }
 
     /// Get cached plan if valid
+    #[must_use]
     pub fn get(&self, req: &RouteRequest, policy_rev: Option<&str>) -> Option<RoutePlan> {
         if self.default_ttl_ms == 0 {
             return None;
@@ -1860,22 +1887,24 @@ impl RouterCache {
                     }
                 }
                 return Some(cached.plan.clone());
-            } else {
-                // Expired
-                cache.remove(&key);
             }
+            // Expired
+            cache.remove(&key);
         }
 
         None
     }
 
     /// Store plan in cache
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "cache expiry uses bounded duration arithmetic"
+    )]
     pub fn put(&self, req: &RouteRequest, plan: RoutePlan) {
         let ttl_ms = plan
             .cache
             .as_ref()
-            .map(|c| c.ttl_ms)
-            .unwrap_or(self.default_ttl_ms);
+            .map_or(self.default_ttl_ms, |c| c.ttl_ms);
         let key = Self::cache_key(req);
 
         if self.default_ttl_ms == 0 || ttl_ms == 0 {
@@ -1954,9 +1983,13 @@ fn parse_rfc3339_instant(value: &str) -> Option<Instant> {
     system_time
         .duration_since(now_system)
         .ok()
-        .map(|duration| now_instant + duration)
+        .map(|duration| now_instant.checked_add(duration).unwrap_or(now_instant))
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "RFC3339 civil-date conversion uses checked accumulation and bounded calendar fields"
+)]
 fn parse_rfc3339_system_time(value: &str) -> Option<std::time::SystemTime> {
     let (date, time) = value.split_once('T')?;
     let (time, offset_seconds) = if let Some(time) = time.strip_suffix('Z') {
@@ -1965,7 +1998,7 @@ fn parse_rfc3339_system_time(value: &str) -> Option<std::time::SystemTime> {
         let offset_start = time.rfind(['+', '-'])?;
         let (time, offset) = time.split_at(offset_start);
         let sign = if offset.starts_with('+') { 1 } else { -1 };
-        let offset = &offset[1..];
+        let offset = offset.strip_prefix(['+', '-'])?;
         let (hours, minutes) = offset.split_once(':')?;
         let hours = hours.parse::<i64>().ok()?;
         let minutes = minutes.parse::<i64>().ok()?;
@@ -1982,10 +2015,7 @@ fn parse_rfc3339_system_time(value: &str) -> Option<std::time::SystemTime> {
         return None;
     }
 
-    let time = time
-        .split_once('.')
-        .map(|(prefix, _)| prefix)
-        .unwrap_or(time);
+    let time = time.split_once('.').map_or(time, |(prefix, _)| prefix);
     let mut time_parts = time.split(':');
     let hour = time_parts.next()?.parse::<u32>().ok()?;
     let minute = time_parts.next()?.parse::<u32>().ok()?;
@@ -2010,9 +2040,13 @@ fn parse_rfc3339_system_time(value: &str) -> Option<std::time::SystemTime> {
     if seconds < 0 {
         return None;
     }
-    Some(std::time::UNIX_EPOCH + Duration::from_secs(seconds as u64))
+    Some(std::time::UNIX_EPOCH + Duration::from_secs(seconds.cast_unsigned()))
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "RFC3339 civil-date conversion uses checked accumulation and bounded calendar fields"
+)]
 fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
     let max_day = match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -2024,7 +2058,7 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
     if day > max_day {
         return None;
     }
-    let year = i64::from(year) - if month <= 2 { 1 } else { 0 };
+    let year = i64::from(year) - i64::from(month <= 2);
     let era = if year >= 0 { year } else { year - 399 } / 400;
     let yoe = year - era * 400;
     let month = i64::from(month);
@@ -2034,7 +2068,7 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
     Some(era * 146_097 + doe - 719_468)
 }
 
-fn is_leap_year(year: i32) -> bool {
+const fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
@@ -2046,6 +2080,7 @@ pub struct CachedRouterClient {
 
 impl CachedRouterClient {
     /// Create new cached router client
+    #[must_use]
     pub fn new(inner: Box<dyn RouterClient>, cache_ttl_ms: u64) -> Self {
         Self {
             inner,
@@ -2087,6 +2122,7 @@ impl RouterClient for CachedRouterClient {
 }
 
 /// Extract request features for routing decision (v0.3)
+#[must_use]
 pub fn extract_route_request(
     model: &str,
     api: &str,
@@ -2128,7 +2164,7 @@ pub fn extract_route_request(
     let conversation = build_conversation_signals(payload, privacy_mode);
 
     let uuid_str = uuid::Uuid::new_v4().simple().to_string();
-    let request_id = format!("req_{}", &uuid_str[..12]);
+    let request_id = format!("req_{}", uuid_str.get(..12).unwrap_or(&uuid_str));
 
     let content_attestation = match privacy_mode {
         PrivacyMode::FeaturesOnly => "none",
@@ -2150,7 +2186,7 @@ pub fn extract_route_request(
         caps,
         stream: payload
             .get("stream")
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
         params: Some(params),
         plan_token: None,
@@ -2167,8 +2203,8 @@ pub fn extract_route_request(
             max_output_tokens: payload
                 .get("max_tokens")
                 .or_else(|| payload.get("max_completion_tokens"))
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u32),
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok()),
             tokenizer_id: Some("auto".to_string()),
         },
         conversation,
@@ -2195,7 +2231,7 @@ fn build_conversation_signals(
         .and_then(|v| v.as_array());
 
     let mut signals = ConversationSignals {
-        turns: messages.map(|m| m.len() as u32),
+        turns: messages.and_then(|m| u32::try_from(m.len()).ok()),
         ..Default::default()
     };
 
@@ -2205,8 +2241,7 @@ fn build_conversation_signals(
         if let Some(system_msg) = msgs.iter().find(|m| {
             m.get("role")
                 .and_then(|r| r.as_str())
-                .map(|r| r == "system")
-                .unwrap_or(false)
+                .is_some_and(|r| r == "system")
         }) {
             if let Some(content) = system_msg.get("content").and_then(|c| c.as_str()) {
                 signals.system_fingerprint = Some(format!("sha256:{}", sha256_hex(content)));
@@ -2229,8 +2264,7 @@ fn build_conversation_signals(
                 if let Some(last_user) = msgs.iter().rev().find(|m| {
                     m.get("role")
                         .and_then(|r| r.as_str())
-                        .map(|r| r == "user")
-                        .unwrap_or(false)
+                        .is_some_and(|r| r == "user")
                 }) {
                     if let Some(content) = last_user.get("content").and_then(|c| c.as_str()) {
                         // Create a very short summary (first 100 chars)
@@ -2252,8 +2286,7 @@ fn build_conversation_signals(
                 if let Some(system_msg) = msgs.iter().find(|m| {
                     m.get("role")
                         .and_then(|r| r.as_str())
-                        .map(|r| r == "system")
-                        .unwrap_or(false)
+                        .is_some_and(|r| r == "system")
                 }) {
                     if let Some(content) = system_msg.get("content").and_then(|c| c.as_str()) {
                         signals.system_prompt = Some(content.to_string());
@@ -2360,7 +2393,12 @@ fn select_judge_context_messages(msgs: &[serde_json::Value]) -> Vec<serde_json::
     }
 
     selected.sort_unstable();
-    trim_to_judge_token_budget(selected.into_iter().map(|idx| msgs[idx].clone()).collect())
+    trim_to_judge_token_budget(
+        selected
+            .into_iter()
+            .filter_map(|idx| msgs.get(idx).cloned())
+            .collect(),
+    )
 }
 
 fn trim_to_judge_token_budget(messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
@@ -2374,7 +2412,9 @@ fn trim_to_judge_token_budget(messages: Vec<serde_json::Value>) -> Vec<serde_jso
     let mut used = 0usize;
 
     if let Some(pos) = first_user_pos {
-        let message = messages[pos].clone();
+        let Some(message) = messages.get(pos).cloned() else {
+            return messages;
+        };
         used = used.saturating_add(estimate_message_tokens(&message));
         selected.push((pos, message));
     }
@@ -2399,8 +2439,7 @@ fn is_user_message(message: &serde_json::Value) -> bool {
     message
         .get("role")
         .and_then(|role| role.as_str())
-        .map(|role| role == "user")
-        .unwrap_or(false)
+        .is_some_and(|role| role == "user")
 }
 
 fn judge_recent_message_limit() -> usize {
@@ -2434,7 +2473,7 @@ fn sha256_hex(s: &str) -> String {
 
 /// Rough token estimation (4 chars per token, improved)
 fn estimate_tokens(payload: &serde_json::Value) -> u32 {
-    let mut total = 0;
+    let mut total: u32 = 0;
 
     // Count message content tokens
     if let Some(messages) = payload
@@ -2444,7 +2483,7 @@ fn estimate_tokens(payload: &serde_json::Value) -> u32 {
     {
         for msg in messages {
             if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
-                total += (content.len() / 4) as u32;
+                total = total.saturating_add(u32::try_from(content.len() / 4).unwrap_or(u32::MAX));
             }
         }
     }
@@ -2455,12 +2494,20 @@ fn estimate_tokens(payload: &serde_json::Value) -> u32 {
         .or_else(|| payload.get("input"))
         .and_then(|v| v.as_array())
     {
-        total += (msgs.len() as u32) * 10;
+        total = total.saturating_add(
+            u32::try_from(msgs.len())
+                .unwrap_or(u32::MAX)
+                .saturating_mul(10),
+        );
     }
 
     // Add overhead for tools
     if let Some(tools) = payload.get("tools").and_then(|t| t.as_array()) {
-        total += (tools.len() as u32) * 50; // ~50 tokens per tool definition
+        total = total.saturating_add(
+            u32::try_from(tools.len())
+                .unwrap_or(u32::MAX)
+                .saturating_mul(50),
+        ); // ~50 tokens per tool definition
     }
 
     total.max(1)
@@ -2523,6 +2570,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
     fn test_route_request_serialization() {
         let req = RouteRequest {
             schema_version: Some("1.1".to_string()),
@@ -2575,6 +2628,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
     async fn test_local_router() {
         let mut aliases = HashMap::new();
         aliases.insert(
@@ -2633,6 +2692,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
     async fn test_local_router_catalog_lists_aliases() {
         let mut aliases = HashMap::new();
         aliases.insert(
@@ -2722,6 +2787,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
     fn full_privacy_context_anchors_first_user_message() {
         let payload = serde_json::json!({
             "messages": [
@@ -2746,6 +2817,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
     fn test_tool_extraction() {
         let payload = serde_json::json!({
             "tools": [
@@ -2766,6 +2843,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
     fn test_extract_route_request_detects_caps_and_params() {
         let payload = serde_json::json!({
             "messages": [
@@ -2818,11 +2901,13 @@ mod tests {
 
         let params = req.params.expect("params must exist");
         assert_eq!(
-            params.get("temperature").and_then(|v| v.as_f64()),
+            params
+                .get("temperature")
+                .and_then(serde_json::Value::as_f64),
             Some(0.3)
         );
         assert_eq!(
-            params.get("json_mode").and_then(|v| v.as_bool()),
+            params.get("json_mode").and_then(serde_json::Value::as_bool),
             Some(false)
         );
     }
@@ -2847,11 +2932,13 @@ mod tests {
             }
         }
 
+        #[allow(clippy::unwrap_used)]
         fn set_policy_revision(&self, rev: Option<&str>) {
             let mut guard = self.inner.policy_rev.lock().unwrap();
-            *guard = rev.map(|r| r.to_string());
+            *guard = rev.map(std::string::ToString::to_string);
         }
 
+        #[allow(clippy::unwrap_used)]
         fn call_count(&self) -> u32 {
             *self.inner.calls.lock().unwrap()
         }
@@ -2859,6 +2946,11 @@ mod tests {
 
     #[async_trait]
     impl RouterClient for CountingRouter {
+        #[expect(
+            clippy::unwrap_used,
+            clippy::arithmetic_side_effects,
+            reason = "test stub mutex and monotonic call counter intentionally fail fast"
+        )]
         async fn plan(&self, _req: &RouteRequest) -> Result<RoutePlan, RouteError> {
             let call_number = {
                 let mut guard = self.inner.calls.lock().unwrap();
@@ -2907,12 +2999,19 @@ mod tests {
             })
         }
 
+        #[allow(clippy::unwrap_used)]
         fn policy_revision(&self) -> Option<String> {
             self.inner.policy_rev.lock().unwrap().clone()
         }
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
     async fn test_cached_router_client_uses_cache_until_policy_revision_changes() {
         let router = CountingRouter::new(Some("rev1".to_string()));
         let cached_client = CachedRouterClient::new(Box::new(router.clone()), 10_000);
@@ -2965,8 +3064,7 @@ mod tests {
             .stickiness
             .as_ref()
             .and_then(|s| s.plan_token.as_deref())
-            .map(|s| s.starts_with("plan_"))
-            .unwrap_or(false));
+            .is_some_and(|s| s.starts_with("plan_")));
 
         // Changing policy revision should invalidate the cache
         router.set_policy_revision(Some("rev2"));
@@ -3270,6 +3368,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
     fn test_router_cache_does_not_store_freeze_keyed_plans() {
         let cache = RouterCache::new(30_000);
         let req = RouteRequest {
@@ -3341,6 +3445,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
     fn route_plan_ordered_attempts_preserve_primary_and_fallbacks() {
         let mut headers = HashMap::new();
         headers.insert("X-Primary".to_string(), "yes".to_string());
@@ -3407,6 +3517,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
     async fn http_router_client_plan_round_trip() {
         let router = RouterStub::start(RouterResponseConfig::Plan(Box::new(sample_plan(
             "rte_http",
@@ -3434,6 +3550,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
     async fn http_router_client_propagates_router_errors() {
         let router = RouterStub::start(RouterResponseConfig::Error {
             status: StatusCode::CONFLICT,
@@ -3472,7 +3594,7 @@ mod tests {
                 assert_eq!(message, "alias not found");
                 assert!(body.is_some());
             }
-            other => panic!("unexpected error variant: {:?}", other),
+            other => panic!("unexpected error variant: {other:?}"),
         }
         assert_eq!(router.calls(), 1);
     }

@@ -4,6 +4,7 @@ use bytes::Bytes;
 #[allow(unused_imports)]
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,8 +25,8 @@ use crate::util::{env_bind_addr, managed_mode_from_env, upstream_mode_from_env, 
 use crate::util::error_response;
 use tracing::warn;
 
-static GATEWAY_METRICS: once_cell::sync::Lazy<GatewayMetrics> =
-    once_cell::sync::Lazy::new(GatewayMetrics::default);
+static GATEWAY_METRICS: std::sync::LazyLock<GatewayMetrics> =
+    std::sync::LazyLock::new(GatewayMetrics::default);
 
 #[derive(Default)]
 struct GatewayMetrics {
@@ -109,9 +110,9 @@ struct ExactResponseCacheEntry {
     route_id: Option<String>,
 }
 
-static EXACT_RESPONSE_CACHE: once_cell::sync::Lazy<
+static EXACT_RESPONSE_CACHE: std::sync::LazyLock<
     std::sync::Mutex<HashMap<String, ExactResponseCacheEntry>>,
-> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// Query parameters for conversion/proxy endpoints.
 #[derive(Debug, Deserialize)]
@@ -155,15 +156,16 @@ enum UpstreamSource {
     Default,
 }
 
-fn mode_label(mode: crate::util::UpstreamMode) -> &'static str {
+const fn mode_label(mode: crate::util::UpstreamMode) -> &'static str {
     match mode {
         crate::util::UpstreamMode::Responses => "responses",
         crate::util::UpstreamMode::Chat => "chat",
         crate::util::UpstreamMode::Bedrock => "bedrock",
+        crate::util::UpstreamMode::BedrockMantle => "bedrock_mantle",
     }
 }
 
-fn source_label(source: UpstreamSource) -> &'static str {
+const fn source_label(source: UpstreamSource) -> &'static str {
     match source {
         UpstreamSource::YamlConfig => "yaml_config",
         UpstreamSource::RouterPlan => "router",
@@ -198,7 +200,7 @@ fn apply_yaml_system_prompt(
     let prompts = system_prompt_texts(policy);
     if prompts.is_empty() {
         return false;
-    };
+    }
     if api == "chat" {
         inject_system_prompts_chat_json(body, &prompts, &policy.mode)
     } else {
@@ -211,8 +213,10 @@ fn alias_response_guard_mode(
 ) -> crate::safety_judge::SafetyMode {
     alias
         .and_then(|alias| alias.response_guard_policy.as_ref())
-        .map(|policy| crate::safety_judge::SafetyMode::from_config_value(&policy.mode))
-        .unwrap_or_else(crate::safety_judge::response_guard_mode_from_env)
+        .map_or_else(
+            crate::safety_judge::response_guard_mode_from_env,
+            |policy| crate::safety_judge::SafetyMode::from_config_value(&policy.mode),
+        )
 }
 
 fn alias_streaming_safety_mode(
@@ -220,10 +224,14 @@ fn alias_streaming_safety_mode(
 ) -> crate::safety_judge::StreamingSafetyMode {
     alias
         .and_then(|alias| alias.response_guard_policy.as_ref())
-        .map(|policy| {
-            crate::safety_judge::StreamingSafetyMode::from_config_value(&policy.streaming_safety)
-        })
-        .unwrap_or_else(crate::safety_judge::streaming_safety_mode_from_env)
+        .map_or_else(
+            crate::safety_judge::streaming_safety_mode_from_env,
+            |policy| {
+                crate::safety_judge::StreamingSafetyMode::from_config_value(
+                    &policy.streaming_safety,
+                )
+            },
+        )
 }
 
 fn guard_response_bytes_for_alias(
@@ -266,10 +274,9 @@ fn inject_system_prompts_responses_json(
             let insert_at = messages
                 .iter()
                 .rposition(|m| m.get("role").and_then(|role| role.as_str()) == Some("system"))
-                .map(|pos| pos + 1)
-                .unwrap_or(messages.len());
+                .map_or(messages.len(), |pos| pos.saturating_add(1));
             for (offset, system_msg) in system_msgs.into_iter().enumerate() {
-                messages.insert(insert_at + offset, system_msg);
+                messages.insert(insert_at.saturating_add(offset), system_msg);
             }
         }
         "replace" => {
@@ -299,8 +306,7 @@ fn inject_system_prompts_chat_json(
     let is_system = |msg: &serde_json::Value| {
         msg.get("role")
             .and_then(|v| v.as_str())
-            .map(|role| role == "system")
-            .unwrap_or(false)
+            .is_some_and(|role| role == "system")
     };
     let system_messages = prompts
         .iter()
@@ -317,10 +323,9 @@ fn inject_system_prompts_chat_json(
             let insert_at = messages
                 .iter()
                 .rposition(is_system)
-                .map(|pos| pos + 1)
-                .unwrap_or(messages.len());
+                .map_or(messages.len(), |pos| pos.saturating_add(1));
             for (offset, system_message) in system_messages.into_iter().enumerate() {
-                messages.insert(insert_at + offset, system_message);
+                messages.insert(insert_at.saturating_add(offset), system_message);
             }
         }
         "replace" => {
@@ -355,8 +360,11 @@ fn bearer_from_request(req: &HttpRequest) -> Option<String> {
         .and_then(|v| v.to_str().ok())
         .and_then(|s| {
             let s = s.trim();
-            if s.len() >= 7 && s[..6].eq_ignore_ascii_case("bearer") {
-                Some(s[6..].trim().to_string())
+            if s.len() >= 7
+                && s.get(..6)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer"))
+            {
+                Some(s.get(6..).unwrap_or_default().trim().to_string())
             } else {
                 None
             }
@@ -427,7 +435,7 @@ fn csv_escape_cell(value: impl AsRef<str>) -> String {
     let value = value.as_ref();
     let formula_prefix = matches!(
         value.as_bytes().first().copied(),
-        Some(b'=') | Some(b'+') | Some(b'-') | Some(b'@')
+        Some(b'=' | b'+' | b'-' | b'@')
     );
     let needs_quotes = formula_prefix
         || value.contains(',')
@@ -439,7 +447,7 @@ fn csv_escape_cell(value: impl AsRef<str>) -> String {
         return value.to_string();
     }
 
-    let mut escaped = String::with_capacity(value.len() + 3);
+    let mut escaped = String::with_capacity(value.len().saturating_add(3));
     escaped.push('"');
     if formula_prefix {
         escaped.push('\'');
@@ -476,14 +484,12 @@ fn non_empty_env(name: &str) -> Option<String> {
 }
 
 fn env_truthy(name: &str) -> bool {
-    non_empty_env(name)
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    non_empty_env(name).is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn governance_mode() -> &'static str {
@@ -534,12 +540,7 @@ fn route_allows_exact_response_cache(resolution: &UpstreamResolution) -> bool {
     let Some(plan) = resolution.plan.as_ref() else {
         return false;
     };
-    if plan
-        .cache
-        .as_ref()
-        .map(|cache| cache.ttl_ms == 0)
-        .unwrap_or(false)
-    {
+    if plan.cache.as_ref().is_some_and(|cache| cache.ttl_ms == 0) {
         return false;
     }
     if plan.content_used.as_deref() != Some("none") {
@@ -559,7 +560,6 @@ fn exact_response_cache_key(
         return None;
     }
     let mut hasher = sha2::Sha256::new();
-    use sha2::Digest;
     hasher.update(api.as_bytes());
     hasher.update([0]);
     hasher.update(resolution.model_id.as_bytes());
@@ -577,6 +577,7 @@ fn exact_response_cache_key(
         crate::util::UpstreamMode::Responses => b"responses".as_slice(),
         crate::util::UpstreamMode::Chat => b"chat".as_slice(),
         crate::util::UpstreamMode::Bedrock => b"bedrock".as_slice(),
+        crate::util::UpstreamMode::BedrockMantle => b"bedrock_mantle".as_slice(),
     });
     hasher.update([0]);
     hasher.update(resolution.base_url.as_bytes());
@@ -649,9 +650,8 @@ fn exact_response_cache_insert(
     }
     let ttl = exact_response_cache_ttl_ms();
     let max_entries = exact_response_cache_max_entries();
-    let mut cache = match EXACT_RESPONSE_CACHE.lock() {
-        Ok(cache) => cache,
-        Err(_) => return,
+    let Ok(mut cache) = EXACT_RESPONSE_CACHE.lock() else {
+        return;
     };
     let now = std::time::Instant::now();
     cache.retain(|_, entry| entry.expires_at > now);
@@ -669,7 +669,9 @@ fn exact_response_cache_insert(
                 .and_then(|value| crate::analytics_middleware::extract_token_usage(&value)),
             bytes,
             content_type,
-            expires_at: now + std::time::Duration::from_millis(ttl),
+            expires_at: now
+                .checked_add(std::time::Duration::from_millis(ttl))
+                .unwrap_or(now),
             policy_rev: resolution
                 .plan
                 .as_ref()
@@ -715,8 +717,7 @@ fn governance_readiness(state: &AppState) -> (bool, serde_json::Value) {
     let router_cache_disabled = state.router_cache_ttl_ms == Some(0)
         || std::env::var("ROUTIIUM_CACHE_TTL_MS")
             .ok()
-            .map(|value| value.trim() == "0")
-            .unwrap_or(false);
+            .is_some_and(|value| value.trim() == "0");
     let exact_cache_enabled = exact_response_cache_enabled();
     let exact_cache_safe = !(mode == "router" && exact_cache_enabled);
 
@@ -769,7 +770,7 @@ fn write_pretty_json_file<T: Serialize>(path: &str, value: &T) -> std::io::Resul
 fn api_key_status(info: &crate::auth::ApiKeyInfo, now_secs: u64) -> &'static str {
     if info.revoked_at.is_some() {
         "revoked"
-    } else if info.expires_at.map(|ts| ts <= now_secs).unwrap_or(false) {
+    } else if info.expires_at.is_some_and(|ts| ts <= now_secs) {
         "expired"
     } else {
         "active"
@@ -878,8 +879,7 @@ fn log_request_start(
     let route_id = resolution
         .plan
         .as_ref()
-        .map(|plan| plan.route_id.as_str())
-        .unwrap_or("-");
+        .map_or("-", |plan| plan.route_id.as_str());
     tracing::info!(
         target: "routiium::request",
         api,
@@ -902,17 +902,22 @@ fn router_privacy_mode_from_str(value: &str) -> RouterPrivacyMode {
     }
 }
 
-fn map_router_mode(mode: RouterUpstreamMode) -> crate::util::UpstreamMode {
+const fn map_router_mode(mode: RouterUpstreamMode) -> crate::util::UpstreamMode {
     match mode {
         RouterUpstreamMode::Responses => crate::util::UpstreamMode::Responses,
         RouterUpstreamMode::Chat => crate::util::UpstreamMode::Chat,
         RouterUpstreamMode::Bedrock => crate::util::UpstreamMode::Bedrock,
+        RouterUpstreamMode::BedrockMantle => crate::util::UpstreamMode::BedrockMantle,
     }
 }
 
 /// Record chat history for a conversation and messages
+#[expect(
+    clippy::too_many_lines,
+    reason = "Endpoint orchestration preserves existing request flow"
+)]
 async fn record_chat_history(
-    chat_history: &Option<std::sync::Arc<crate::chat_history_manager::ChatHistoryManager>>,
+    chat_history: Option<&std::sync::Arc<crate::chat_history_manager::ChatHistoryManager>>,
     conversation_id: Option<String>,
     requested_model: &str,
     request_body: &serde_json::Value,
@@ -1096,7 +1101,9 @@ async fn record_chat_history(
         }
 
         // Record all messages
-        if !messages_to_record.is_empty() {
+        if messages_to_record.is_empty() {
+            tracing::debug!("No messages to record");
+        } else {
             tracing::debug!("Attempting to record {} messages", messages_to_record.len());
             if let Err(e) = manager.record_messages(&messages_to_record).await {
                 tracing::warn!("Failed to record messages: {}", e);
@@ -1106,8 +1113,6 @@ async fn record_chat_history(
                     messages_to_record.len()
                 );
             }
-        } else {
-            tracing::debug!("No messages to record");
         }
     } else {
         tracing::debug!("Chat history manager not available");
@@ -1117,11 +1122,11 @@ async fn record_chat_history(
 fn request_message_count(body: &serde_json::Value) -> Option<usize> {
     body.get("messages")
         .and_then(|v| v.as_array())
-        .map(|m| m.len())
+        .map(std::vec::Vec::len)
         .or_else(|| {
             body.get("input")
                 .and_then(|v| v.as_array())
-                .map(|m| m.len())
+                .map(std::vec::Vec::len)
         })
 }
 
@@ -1136,12 +1141,20 @@ fn estimate_streaming_token_usage(
     if response_size == 0 {
         return None;
     }
-    let prompt_tokens = ((request_size_bytes(request_body) as u64).saturating_add(3) / 4).max(1);
-    let completion_tokens = ((response_size as u64).saturating_add(3) / 4).max(1);
+    let prompt_tokens = (u64::try_from(request_size_bytes(request_body))
+        .unwrap_or(u64::MAX)
+        .saturating_add(3)
+        / 4)
+    .max(1);
+    let completion_tokens = (u64::try_from(response_size)
+        .unwrap_or(u64::MAX)
+        .saturating_add(3)
+        / 4)
+    .max(1);
     Some(crate::analytics::TokenUsage {
         prompt_tokens,
         completion_tokens,
-        total_tokens: prompt_tokens + completion_tokens,
+        total_tokens: prompt_tokens.saturating_add(completion_tokens),
         cached_tokens: None,
         reasoning_tokens: None,
     })
@@ -1173,6 +1186,10 @@ fn extract_error_message(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn record_analytics_event(
     state: &AppState,
     req: &HttpRequest,
@@ -1218,6 +1235,10 @@ async fn record_analytics_event(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn record_analytics_event_with_usage_source(
     state: &AppState,
     req: &HttpRequest,
@@ -1237,7 +1258,7 @@ async fn record_analytics_event_with_usage_source(
     system_prompt_applied: bool,
     error_message: Option<String>,
 ) {
-    let duration_ms = started_at.elapsed().as_millis() as u64;
+    let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     GATEWAY_METRICS.record(status_code, duration_ms, usage_source);
 
     let Some(manager) = state.analytics.as_ref() else {
@@ -1245,6 +1266,11 @@ async fn record_analytics_event_with_usage_source(
     };
 
     let output_tokens = token_usage.as_ref().map(|u| u.completion_tokens);
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::as_conversions,
+        reason = "Analytics rates intentionally convert bounded counters to floating-point values"
+    )]
     let tokens_per_second = output_tokens.and_then(|tokens| {
         if duration_ms > 0 {
             Some((tokens as f64 / duration_ms as f64) * 1000.0)
@@ -1279,7 +1305,7 @@ async fn record_analytics_event_with_usage_source(
             },
             stream: request_body
                 .get("stream")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
             size_bytes: request_size_bytes(request_body),
             message_count: request_message_count(request_body),
@@ -1331,6 +1357,10 @@ async fn record_analytics_event_with_usage_source(
     }
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn record_response_guard_event(
     state: &AppState,
     req: &HttpRequest,
@@ -1360,6 +1390,10 @@ async fn record_response_guard_event(
         .await;
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn record_router_error_event(
     state: &AppState,
     req: &HttpRequest,
@@ -1460,16 +1494,10 @@ async fn record_router_error_event(
 }
 
 fn judge_route_requires_tool_stripping(plan: &RoutePlan) -> bool {
-    plan.judge
-        .as_ref()
-        .map(|judge| {
-            judge.action.as_deref() == Some("route")
-                && matches!(
-                    judge.verdict.as_deref(),
-                    Some("deny") | Some("needs_approval")
-                )
-        })
-        .unwrap_or(false)
+    plan.judge.as_ref().is_some_and(|judge| {
+        judge.action.as_deref() == Some("route")
+            && matches!(judge.verdict.as_deref(), Some("deny" | "needs_approval"))
+    })
 }
 
 fn strip_high_risk_tools(body: &mut serde_json::Value) {
@@ -1480,6 +1508,10 @@ fn strip_high_risk_tools(body: &mut serde_json::Value) {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Endpoint orchestration preserves existing request flow"
+)]
 async fn resolve_upstream(
     state: &AppState,
     api: &str,
@@ -1517,8 +1549,10 @@ async fn resolve_upstream(
             return Err(RouteError::Rejected {
                 status: 403,
                 code: Some("POLICY_DENY".to_string()),
-                message: body["error"]["message"]
-                    .as_str()
+                message: body
+                    .get("error")
+                    .and_then(|error| error.get("message"))
+                    .and_then(serde_json::Value::as_str)
                     .unwrap_or("request rejected by YAML judge policy")
                     .to_string(),
                 policy_rev: Some(alias.policy_rev.clone()),
@@ -1604,10 +1638,10 @@ async fn resolve_upstream(
 
     // Try routing config first (if loaded and actually has a match/default)
     let routing_guard = state.routing_config.read().await;
-    let resolved_alias = if !requested_model.is_empty() {
-        routing_guard.resolve_alias(requested_model.as_str())
-    } else {
+    let resolved_alias = if requested_model.is_empty() {
         String::new()
+    } else {
+        routing_guard.resolve_alias(requested_model.as_str())
     };
     let has_rule =
         !requested_model.is_empty() && routing_guard.find_rule(resolved_alias.as_str()).is_some();
@@ -1615,22 +1649,21 @@ async fn resolve_upstream(
     if has_rule || has_default {
         if let Ok(route) = routing_guard.resolve_route(requested_model.as_str()) {
             // Apply alias + transform chain from routing.json so runtime behavior matches config.
-            let resolved_model = if !requested_model.is_empty() {
+            let resolved_model = if requested_model.is_empty() {
+                std::env::var("MODEL").unwrap_or_else(|_| "gpt-5-nano".to_string())
+            } else {
                 match routing_guard.apply_transformations(requested_model.as_str(), body) {
                     Ok(model) => model,
                     Err(e) => {
                         if strict_mode {
                             return Err(RouteError::InvalidRequest(format!(
-                                "routing transform failed: {}",
-                                e
+                                "routing transform failed: {e}"
                             )));
                         }
                         tracing::warn!("routing transform failed, continuing: {}", e);
-                        resolved_alias.clone()
+                        resolved_alias
                     }
                 }
-            } else {
-                std::env::var("MODEL").unwrap_or_else(|_| "gpt-5-nano".to_string())
             };
             drop(routing_guard);
             // Convert routing_config::UpstreamMode to util::UpstreamMode
@@ -1640,11 +1673,14 @@ async fn resolve_upstream(
                 }
                 crate::routing_config::UpstreamMode::Chat => crate::util::UpstreamMode::Chat,
                 crate::routing_config::UpstreamMode::Bedrock => crate::util::UpstreamMode::Bedrock,
+                crate::routing_config::UpstreamMode::BedrockMantle => {
+                    crate::util::UpstreamMode::BedrockMantle
+                }
             };
             return Ok(UpstreamResolution {
                 base_url: route.base_url.clone(),
                 mode,
-                key_env: route.key_env.clone(),
+                key_env: route.key_env,
                 headers: None,
                 model_id: resolved_model,
                 pricing_model: None,
@@ -1671,14 +1707,12 @@ async fn resolve_upstream(
         }
     }
 
-    let resolved_model = if !requested_model.is_empty() {
-        if !resolved_alias.is_empty() {
-            resolved_alias
-        } else {
-            requested_model
-        }
-    } else {
+    let resolved_model = if requested_model.is_empty() {
         std::env::var("MODEL").unwrap_or_else(|_| "gpt-5-nano".to_string())
+    } else if resolved_alias.is_empty() {
+        requested_model
+    } else {
+        resolved_alias
     };
 
     let fallback_mode = mode.unwrap_or_else(|| {
@@ -1690,7 +1724,13 @@ async fn resolve_upstream(
     });
 
     Ok(UpstreamResolution {
-        base_url: base_url.unwrap_or_else(crate::util::openai_base_url),
+        base_url: base_url.unwrap_or_else(|| {
+            if matches!(fallback_mode, crate::util::UpstreamMode::BedrockMantle) {
+                crate::util::bedrock_mantle_base_url()
+            } else {
+                crate::util::openai_base_url()
+            }
+        }),
         mode: fallback_mode,
         key_env,
         headers: None,
@@ -1713,7 +1753,7 @@ fn insert_rate_limit_headers(
 
 /// Perform rate limit check and return 429 / block responses early.
 /// Returns `Ok(Some(result))` when allowed, `Ok(None)` when no RL configured,
-/// and an `Err` HttpResponse when the request should be rejected immediately.
+/// and an `Err` `HttpResponse` when the request should be rejected immediately.
 async fn check_rate_limits_for_key(
     state: &AppState,
     key_id: Option<&str>,
@@ -1733,7 +1773,9 @@ async fn check_rate_limits_for_key(
     {
         Ok(result) => {
             if !result.allowed {
-                let rejected = result.rejected_bucket.as_ref().unwrap();
+                let Some(rejected) = result.rejected_bucket.as_ref() else {
+                    return Ok(Some(result));
+                };
                 let now_s = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -1881,6 +1923,22 @@ fn effective_bearer_for_resolution(
         })
 }
 
+fn bedrock_mantle_bearer_for_resolution(
+    upstream_bearer: Option<&str>,
+    resolution: &UpstreamResolution,
+) -> Option<String> {
+    resolution
+        .key_env
+        .as_deref()
+        .and_then(|env| std::env::var(env).ok())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            upstream_bearer
+                .map(str::to_string)
+                .filter(|value| !value.trim().is_empty())
+        })
+}
+
 fn insert_response_guard_headers(
     builder: &mut HttpResponseBuilder,
     decision: &crate::safety_judge::ResponseGuardDecision,
@@ -1920,7 +1978,8 @@ fn unix_timestamp() -> u64 {
 
 fn short_uuid(prefix: &str) -> String {
     let uuid = uuid::Uuid::new_v4().simple().to_string();
-    format!("{prefix}{}", &uuid[..16])
+    let short = uuid.get(..16).unwrap_or(&uuid);
+    format!("{prefix}{short}")
 }
 
 fn insert_judge_headers_from_value(
@@ -1959,7 +2018,7 @@ fn insert_judge_headers_from_value(
             builder.insert_header(("x-judge-selector-rules", joined));
         }
     }
-    if let Some(cacheable) = judge.get("cacheable").and_then(|value| value.as_bool()) {
+    if let Some(cacheable) = judge.get("cacheable").and_then(serde_json::Value::as_bool) {
         builder.insert_header((
             "x-safety-cache",
             if cacheable { "cacheable" } else { "no-store" },
@@ -1982,7 +2041,7 @@ fn agent_rejection_body(
     api: &str,
     model: &str,
     text: &str,
-    metadata: serde_json::Value,
+    metadata: &serde_json::Value,
 ) -> serde_json::Value {
     let model = if model.trim().is_empty() {
         "routiium-safety"
@@ -2056,7 +2115,7 @@ fn response_guard_error_response(
             "safety_event_id": decision.id,
         });
         let text = rejection_text(&decision.reason, &decision.categories);
-        return builder.json(agent_rejection_body(api, resolved_model, &text, metadata));
+        return builder.json(agent_rejection_body(api, resolved_model, &text, &metadata));
     }
 
     let mut builder = HttpResponse::Forbidden();
@@ -2084,8 +2143,9 @@ fn router_error_response(
     plan: Option<&RoutePlan>,
     resolved_model: &str,
 ) -> HttpResponse {
-    let mut builder =
-        HttpResponse::build(actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap());
+    let actix_status = actix_web::http::StatusCode::from_u16(status.as_u16())
+        .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
+    let mut builder = HttpResponse::build(actix_status);
     if let Some(plan) = plan {
         insert_route_headers(&mut builder, plan, resolved_model);
     }
@@ -2158,6 +2218,10 @@ fn router_plan_error_response(err: &RouteError) -> HttpResponse {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Endpoint orchestration preserves existing request flow"
+)]
 fn router_plan_rejection_response(
     err: &RouteError,
     api: &str,
@@ -2226,25 +2290,23 @@ fn router_plan_rejection_response(
     let action = judge
         .and_then(|judge| judge.get("action"))
         .and_then(|value| value.as_str())
-        .map(|action| {
+        .map_or("reject", |action| {
             if action == "needs_approval" {
                 "reject"
             } else {
                 action
             }
-        })
-        .unwrap_or("reject");
+        });
     let verdict = judge
         .and_then(|judge| judge.get("verdict"))
         .and_then(|value| value.as_str())
-        .map(|verdict| {
+        .map_or("deny", |verdict| {
             if verdict == "needs_approval" {
                 "deny"
             } else {
                 verdict
             }
-        })
-        .unwrap_or("deny");
+        });
     let judge_id = judge
         .and_then(|judge| judge.get("id"))
         .and_then(|value| value.as_str());
@@ -2278,7 +2340,7 @@ fn router_plan_rejection_response(
     if let Some(policy_rev) = policy_rev {
         builder.insert_header(("x-safety-policy-rev", policy_rev.to_string()));
     }
-    Some(builder.json(agent_rejection_body(api, requested_model, &text, metadata)))
+    Some(builder.json(agent_rejection_body(api, requested_model, &text, &metadata)))
 }
 
 fn extract_conversation_id(value: &serde_json::Value) -> Option<String> {
@@ -2301,12 +2363,12 @@ fn extract_conversation_id(value: &serde_json::Value) -> Option<String> {
     value
         .get("conversation_id")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .or_else(|| {
             value
                 .get("previous_response_id")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
         })
 }
 
@@ -2314,7 +2376,7 @@ fn extract_previous_response_id(value: &serde_json::Value) -> Option<String> {
     value
         .get("previous_response_id")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 fn convert_chat_payload_to_responses(
@@ -2546,6 +2608,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        reason = "Fixture conversion and keyed assertions are deterministic"
+    )]
     fn convert_chat_payload_prefers_query_hints() {
         let payload = json!({
             "model": "gpt-4o-mini",
@@ -2593,6 +2660,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::expect_used, reason = "Estimator fixture is guaranteed valid")]
     fn streaming_usage_estimator_returns_nonzero_advisory_usage_for_bytes() {
         let request = json!({
             "model": "gpt-4o-mini",
@@ -2607,6 +2675,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Fallback fixture guarantees two entries"
+    )]
     fn fallback_resolutions_follow_router_plan_order() {
         let plan = RoutePlan {
             schema_version: Some("1.1".to_string()),
@@ -2671,6 +2743,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        reason = "Payload fixture guarantees tools array"
+    )]
     fn merge_mcp_tools_into_chat_payload_dedupes_existing_names() {
         let mut payload = json!({
             "model": "gpt-4o-mini",
@@ -2705,7 +2782,7 @@ mod tests {
                 t.get("function")
                     .and_then(|f| f.get("name"))
                     .and_then(|n| n.as_str())
-                    .map(|s| s.to_string())
+                    .map(std::string::ToString::to_string)
             })
             .collect();
 
@@ -2719,6 +2796,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        reason = "Payload fixture guarantees tools array"
+    )]
     fn merge_mcp_tools_into_responses_payload_dedupes_existing_names() {
         let mut payload = json!({
             "model": "gpt-4.1-nano",
@@ -2752,7 +2834,7 @@ mod tests {
             .filter_map(|t| {
                 t.get("name")
                     .and_then(|n| n.as_str())
-                    .map(|s| s.to_string())
+                    .map(std::string::ToString::to_string)
             })
             .collect();
 
@@ -2809,6 +2891,7 @@ mod tests {
         );
     }
 
+    #[expect(clippy::expect_used, reason = "Test database setup must succeed")]
     async fn test_history_manager() -> Arc<ChatHistoryManager> {
         let config = ChatHistoryConfig {
             enabled: true,
@@ -2832,6 +2915,10 @@ mod tests {
     }
 
     #[actix_web::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "Test history fixture guarantees persisted messages"
+    )]
     async fn record_chat_history_tracks_requested_and_actual_models() {
         let manager = test_history_manager().await;
         let chat_history = Some(manager.clone());
@@ -2863,7 +2950,7 @@ mod tests {
         };
 
         record_chat_history(
-            &chat_history,
+            chat_history.as_ref(),
             Some("conv-alias-model".to_string()),
             "alias-x",
             &request_body,
@@ -2901,6 +2988,10 @@ mod tests {
     }
 
     #[actix_web::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "Test history fixture guarantees persisted messages"
+    )]
     async fn record_chat_history_supports_responses_shape() {
         let manager = test_history_manager().await;
         let chat_history = Some(manager.clone());
@@ -2926,7 +3017,7 @@ mod tests {
             .expect("responses usage extraction");
 
         record_chat_history(
-            &chat_history,
+            chat_history.as_ref(),
             Some("conv-responses-shape".to_string()),
             "alias-responses",
             &request_body,
@@ -2955,6 +3046,10 @@ mod tests {
     }
 }
 
+#[expect(
+    clippy::ref_option,
+    reason = "Optional headers preserve caller-owned resolution state"
+)]
 fn apply_upstream_headers(
     builder: reqwest::RequestBuilder,
     headers: &Option<HashMap<String, String>>,
@@ -2962,14 +3057,13 @@ fn apply_upstream_headers(
     if let Some(map) = headers {
         let mut builder = builder;
         for (key, value) in map {
-            match (
+            if let (Ok(name), Ok(val)) = (
                 reqwest::header::HeaderName::from_bytes(key.as_bytes()),
                 reqwest::header::HeaderValue::from_str(value),
             ) {
-                (Ok(name), Ok(val)) => {
-                    builder = builder.header(name, val);
-                }
-                _ => warn!("Skipping invalid upstream header from router: {}", key),
+                builder = builder.header(name, val);
+            } else {
+                warn!("Skipping invalid upstream header from router: {}", key);
             }
         }
         builder
@@ -2983,9 +3077,11 @@ async fn send_responses_nonstream_attempt(
     resolution: &UpstreamResolution,
     effective_body: &serde_json::Value,
     upstream_bearer: Option<&str>,
-) -> Result<(reqwest::StatusCode, Bytes), reqwest::Error> {
+) -> Result<(reqwest::StatusCode, Bytes), anyhow::Error> {
     let endpoint = match resolution.mode {
-        crate::util::UpstreamMode::Responses => "responses",
+        crate::util::UpstreamMode::Responses | crate::util::UpstreamMode::BedrockMantle => {
+            "responses"
+        }
         crate::util::UpstreamMode::Chat => "chat/completions",
         crate::util::UpstreamMode::Bedrock => "bedrock/invoke",
     };
@@ -2996,15 +3092,24 @@ async fn send_responses_nonstream_attempt(
         effective_body.clone()
     };
 
+    let outbound_bytes = serde_json::to_vec(&outbound_body)?;
     let mut upstream_req = client
         .post(&real_url)
         .header("content-type", "application/json");
     upstream_req = apply_upstream_headers(upstream_req, &resolution.headers);
-    if let Some(bearer) = effective_bearer_for_resolution(upstream_bearer, resolution) {
+    if matches!(resolution.mode, crate::util::UpstreamMode::BedrockMantle) {
+        upstream_req = crate::bedrock_mantle::apply_auth(
+            upstream_req,
+            &real_url,
+            &outbound_bytes,
+            bedrock_mantle_bearer_for_resolution(upstream_bearer, resolution).as_deref(),
+        )
+        .await?;
+    } else if let Some(bearer) = effective_bearer_for_resolution(upstream_bearer, resolution) {
         upstream_req = upstream_req.bearer_auth(bearer);
     }
 
-    let up = upstream_req.json(&outbound_body).send().await?;
+    let up = upstream_req.body(outbound_bytes).send().await?;
     let status = up.status();
     let bytes = up.bytes().await?;
     Ok((status, bytes))
@@ -3017,10 +3122,12 @@ async fn send_chat_nonstream_attempt(
     conversation_hint: Option<String>,
     previous_response_hint: Option<String>,
     upstream_bearer: Option<&str>,
-) -> Result<(reqwest::StatusCode, Bytes), reqwest::Error> {
+) -> Result<(reqwest::StatusCode, Bytes), anyhow::Error> {
     let endpoint = match resolution.mode {
         crate::util::UpstreamMode::Responses => "responses",
-        crate::util::UpstreamMode::Chat => "chat/completions",
+        crate::util::UpstreamMode::Chat | crate::util::UpstreamMode::BedrockMantle => {
+            "chat/completions"
+        }
         crate::util::UpstreamMode::Bedrock => "bedrock/invoke",
     };
     let real_url = format!("{}/{}", resolution.base_url.trim_end_matches('/'), endpoint);
@@ -3033,20 +3140,33 @@ async fn send_chat_nonstream_attempt(
         outbound_body
     };
 
+    let outbound_bytes = serde_json::to_vec(&outbound_body)?;
     let mut upstream_req = client
         .post(&real_url)
         .header("content-type", "application/json");
     upstream_req = apply_upstream_headers(upstream_req, &resolution.headers);
-    if let Some(bearer) = effective_bearer_for_resolution(upstream_bearer, resolution) {
+    if matches!(resolution.mode, crate::util::UpstreamMode::BedrockMantle) {
+        upstream_req = crate::bedrock_mantle::apply_auth(
+            upstream_req,
+            &real_url,
+            &outbound_bytes,
+            bedrock_mantle_bearer_for_resolution(upstream_bearer, resolution).as_deref(),
+        )
+        .await?;
+    } else if let Some(bearer) = effective_bearer_for_resolution(upstream_bearer, resolution) {
         upstream_req = upstream_req.bearer_auth(bearer);
     }
 
-    let up = upstream_req.json(&outbound_body).send().await?;
+    let up = upstream_req.body(outbound_bytes).send().await?;
     let status = up.status();
     let bytes = up.bytes().await?;
     Ok((status, bytes))
 }
 
+#[expect(
+    clippy::indexing_slicing,
+    reason = "Trim bounds are computed from the same byte slice"
+)]
 fn trim_ascii(bytes: &[u8]) -> &[u8] {
     let start = bytes
         .iter()
@@ -3055,8 +3175,7 @@ fn trim_ascii(bytes: &[u8]) -> &[u8] {
     let end = bytes
         .iter()
         .rposition(|b| !b.is_ascii_whitespace())
-        .map(|idx| idx + 1)
-        .unwrap_or(start);
+        .map_or(start, |idx| idx.saturating_add(1));
     &bytes[start..end]
 }
 
@@ -3071,7 +3190,7 @@ impl<S> ResponsesSseToChatSse<S>
 where
     S: futures_util::stream::Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
 {
-    fn new(inner: S) -> Self {
+    const fn new(inner: S) -> Self {
         Self {
             inner,
             buffer: Vec::new(),
@@ -3080,9 +3199,14 @@ where
         }
     }
 
+    #[expect(
+        clippy::option_if_let_else,
+        reason = "Byte-line normalization keeps parser flow explicit"
+    )]
     fn next_event(&mut self) -> Option<Vec<u8>> {
         if let Some(pos) = self.buffer.windows(2).position(|window| window == b"\n\n") {
-            let mut event = self.buffer.drain(..pos + 2).collect::<Vec<u8>>();
+            let end = pos.saturating_add(2).min(self.buffer.len());
+            let mut event = self.buffer.drain(..end).collect::<Vec<u8>>();
             let original_event = event.clone();
             // Remove trailing delimiter from event slice for parsing
             event.truncate(event.len().saturating_sub(2));
@@ -3096,7 +3220,7 @@ where
                     line
                 };
                 if line.starts_with(b"data:") {
-                    let payload = trim_ascii(&line[5..]);
+                    let payload = trim_ascii(line.get(5..).map_or(&[], |value| value));
                     if !payload.is_empty() {
                         data_segments.push(payload.to_vec());
                     }
@@ -3164,11 +3288,10 @@ where
             if this.done {
                 if this.buffer.is_empty() {
                     return Poll::Ready(None);
-                } else {
-                    // Emit remaining buffer even if it lacks terminator
-                    let remaining = std::mem::take(&mut this.buffer);
-                    return Poll::Ready(Some(Ok(Bytes::from(remaining))));
                 }
+                // Emit remaining buffer even if it lacks terminator
+                let remaining = std::mem::take(&mut this.buffer);
+                return Poll::Ready(Some(Ok(Bytes::from(remaining))));
             }
 
             match Pin::new(&mut this.inner).poll_next(cx) {
@@ -3196,7 +3319,7 @@ impl<S> SafetySseGuard<S>
 where
     S: futures_util::stream::Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
 {
-    fn new(inner: S, response_guard_mode: crate::safety_judge::SafetyMode) -> Self {
+    const fn new(inner: S, response_guard_mode: crate::safety_judge::SafetyMode) -> Self {
         Self {
             inner,
             rolling_text: String::new(),
@@ -3259,7 +3382,7 @@ where
                             "policy_rev": decision.policy_rev
                         }
                     });
-                    let event = format!("event: error\ndata: {}\n\n", payload);
+                    let event = format!("event: error\ndata: {payload}\n\n");
                     Poll::Ready(Some(Ok(Bytes::from(event))))
                 } else {
                     Poll::Ready(Some(Ok(chunk)))
@@ -3313,11 +3436,12 @@ impl MeteredSseStream {
     fn observe_chunk(&mut self, chunk: &Bytes) {
         if self.first_byte_ms.is_none() {
             if let Some(ctx) = self.ctx.as_ref() {
-                self.first_byte_ms = Some(ctx.started_at.elapsed().as_millis() as u64);
+                self.first_byte_ms =
+                    Some(u64::try_from(ctx.started_at.elapsed().as_millis()).unwrap_or(u64::MAX));
             }
         }
 
-        self.response_size += chunk.len();
+        self.response_size = self.response_size.saturating_add(chunk.len());
         self.event_buffer.extend_from_slice(chunk);
 
         while let Some(pos) = self
@@ -3325,7 +3449,10 @@ impl MeteredSseStream {
             .windows(2)
             .position(|window| window == b"\n\n")
         {
-            let event = self.event_buffer.drain(..pos + 2).collect::<Vec<u8>>();
+            let event = self
+                .event_buffer
+                .drain(..pos.saturating_add(2))
+                .collect::<Vec<u8>>();
             if let Some(usage) =
                 crate::analytics_middleware::extract_streaming_token_usage_from_sse_event(&event)
             {
@@ -3350,7 +3477,8 @@ impl MeteredSseStream {
             .clone()
             .or_else(|| estimate_streaming_token_usage(&ctx.request_body, response_size));
         let ttfb_ms = self.first_byte_ms;
-        let upstream_duration_ms = Some(ctx.started_at.elapsed().as_millis() as u64);
+        let upstream_duration_ms =
+            Some(u64::try_from(ctx.started_at.elapsed().as_millis()).unwrap_or(u64::MAX));
         let usage_source = if self.token_usage.is_some() {
             crate::analytics::UsageSource::Measured
         } else if token_usage.is_some() {
@@ -3414,9 +3542,17 @@ impl Drop for MeteredSseStream {
     }
 }
 
-/// Passthrough for OpenAI Responses API (`/v1/responses`):
+/// Passthrough for `OpenAI` Responses API (`/v1/responses`):
 /// Accepts native Responses payload and forwards upstream without transformation.
 /// Supports SSE when `stream: true`.
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Endpoint orchestration preserves existing request flow"
+)]
 async fn responses_passthrough(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -3454,7 +3590,7 @@ async fn responses_passthrough(
                             m.get("role").and_then(|r| r.as_str()) == Some("system")
                         });
                         if let Some(pos) = last_system_pos {
-                            messages.insert(pos + 1, system_msg);
+                            messages.insert(pos.saturating_add(1), system_msg);
                         } else {
                             messages.push(system_msg);
                         }
@@ -3509,7 +3645,7 @@ async fn responses_passthrough(
         match manager.list_all_tools().await {
             Ok(mcp_tools) => {
                 let filtered = filter_mcp_tools_for_alias(mcp_tools, yaml_alias.as_deref());
-                merge_mcp_tools_into_responses_payload(&mut body, &filtered)
+                merge_mcp_tools_into_responses_payload(&mut body, &filtered);
             }
             Err(err) => warn!("Failed to fetch MCP tools for /v1/responses: {}", err),
         }
@@ -3535,11 +3671,9 @@ async fn responses_passthrough(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| {
             let s = s.trim();
-            if s.len() >= 7 && s[..6].eq_ignore_ascii_case("bearer") {
-                Some(s[6..].trim().to_string())
-            } else {
-                None
-            }
+            s.strip_prefix("Bearer")
+                .or_else(|| s.strip_prefix("bearer"))
+                .map(|rest| rest.trim().to_string())
         });
 
     // Resolve upstream bearer (managed mode validates client token but defers provider key selection to routing)
@@ -3630,7 +3764,7 @@ async fn responses_passthrough(
 
     let mut stream = body
         .get("stream")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
     let client = &state.http;
@@ -3708,7 +3842,7 @@ async fn responses_passthrough(
             Err(e) => {
                 return error_response(
                     http::StatusCode::BAD_REQUEST,
-                    &format!("Failed to convert to Bedrock format: {}", e),
+                    &format!("Failed to convert to Bedrock format: {e}"),
                 );
             }
         };
@@ -3781,7 +3915,7 @@ async fn responses_passthrough(
                         }
 
                         record_chat_history(
-                            &state.chat_history,
+                            state.chat_history.as_ref(),
                             conversation_hint.clone(),
                             &requested_model,
                             &body,
@@ -3821,7 +3955,7 @@ async fn responses_passthrough(
                     Err(e) => {
                         return error_response(
                             http::StatusCode::INTERNAL_SERVER_ERROR,
-                            &format!("Failed to convert Bedrock response: {}", e),
+                            &format!("Failed to convert Bedrock response: {e}"),
                         );
                     }
                 }
@@ -3829,16 +3963,17 @@ async fn responses_passthrough(
             Err(e) => {
                 return error_response(
                     http::StatusCode::BAD_GATEWAY,
-                    &format!("Bedrock invocation failed: {}", e),
+                    &format!("Bedrock invocation failed: {e}"),
                 );
             }
         }
     }
 
     let endpoint = match resolution.mode {
-        crate::util::UpstreamMode::Responses => "responses",
+        crate::util::UpstreamMode::Responses
+        | crate::util::UpstreamMode::Bedrock
+        | crate::util::UpstreamMode::BedrockMantle => "responses",
         crate::util::UpstreamMode::Chat => "chat/completions",
-        crate::util::UpstreamMode::Bedrock => "bedrock/invoke", // Shouldn't reach here
     };
     let base = resolution.base_url.trim_end_matches('/');
 
@@ -3902,17 +4037,44 @@ async fn responses_passthrough(
             stream_body = crate::conversion::responses_json_to_chat_value(&stream_body);
         }
 
-        let real_url = format!("{}/{}", base, endpoint);
+        let real_url = format!("{base}/{endpoint}");
+        let stream_bytes = match serde_json::to_vec(&stream_body) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to serialize upstream request: {error}"),
+                );
+            }
+        };
         let mut rb = client
             .post(&real_url)
             .header("accept", "text/event-stream")
             .header("content-type", "application/json")
-            .header("connection", "close")
-            .json(&stream_body);
+            .header("connection", "close");
         rb = apply_upstream_headers(rb, &resolution.headers);
-        if let Some(b) = eff_bearer.clone() {
+        if matches!(resolution.mode, crate::util::UpstreamMode::BedrockMantle) {
+            rb = match crate::bedrock_mantle::apply_auth(
+                rb,
+                &real_url,
+                &stream_bytes,
+                bedrock_mantle_bearer_for_resolution(upstream_bearer.as_deref(), &resolution)
+                    .as_deref(),
+            )
+            .await
+            {
+                Ok(builder) => builder,
+                Err(error) => {
+                    return error_response(
+                        http::StatusCode::BAD_GATEWAY,
+                        &format!("Bedrock Mantle authentication failed: {error}"),
+                    );
+                }
+            };
+        } else if let Some(b) = eff_bearer.clone() {
             rb = rb.bearer_auth(b);
         }
+        rb = rb.body(stream_bytes);
 
         match rb.send().await {
             Ok(up) => {
@@ -3943,7 +4105,8 @@ async fn responses_passthrough(
                     .await;
 
                     let mut builder = HttpResponse::build(
-                        actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap(),
+                        actix_web::http::StatusCode::from_u16(status.as_u16())
+                            .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR),
                     );
                     if let Some(plan) = resolution.plan.as_ref() {
                         insert_route_headers(&mut builder, plan, &resolution.model_id);
@@ -4067,36 +4230,32 @@ async fn responses_passthrough(
             .await
             {
                 Ok((status, _bytes))
-                    if idx + 1 < attempt_count && is_safe_failover_status(status) =>
+                    if idx.saturating_add(1) < attempt_count && is_safe_failover_status(status) =>
                 {
                     tracing::warn!(
                         route_id = attempt_resolution
                             .plan
                             .as_ref()
-                            .map(|plan| plan.route_id.as_str())
-                            .unwrap_or("-"),
+                            .map_or("-", |plan| plan.route_id.as_str()),
                         model = %attempt_resolution.model_id,
                         status = status.as_u16(),
                         "non-streaming responses upstream failed; trying fallback"
                     );
-                    continue;
                 }
                 Ok((status, bytes)) => {
                     terminal_attempt = Some((attempt_resolution, status, bytes, idx == 0));
                     break;
                 }
-                Err(err) if idx + 1 < attempt_count => {
+                Err(err) if idx.saturating_add(1) < attempt_count => {
                     tracing::warn!(
                         route_id = attempt_resolution
                             .plan
                             .as_ref()
-                            .map(|plan| plan.route_id.as_str())
-                            .unwrap_or("-"),
+                            .map_or("-", |plan| plan.route_id.as_str()),
                         model = %attempt_resolution.model_id,
                         error = %err,
                         "non-streaming responses upstream transport failed; trying fallback"
                     );
-                    continue;
                 }
                 Err(err) => {
                     terminal_error = Some((attempt_resolution, err.to_string()));
@@ -4105,193 +4264,205 @@ async fn responses_passthrough(
             }
         }
 
-        match terminal_attempt {
-            Some((resolution, status, bytes, terminal_is_primary)) => {
-                let terminal_exact_cache_key =
-                    exact_cache_key.as_ref().filter(|_| terminal_is_primary);
-                let response_json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
-                let token_usage = response_json
-                    .as_ref()
-                    .and_then(crate::analytics_middleware::extract_token_usage);
+        if let Some((resolution, status, bytes, terminal_is_primary)) = terminal_attempt {
+            let terminal_exact_cache_key = exact_cache_key.as_ref().filter(|_| terminal_is_primary);
+            let response_json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+            let token_usage = response_json
+                .as_ref()
+                .and_then(crate::analytics_middleware::extract_token_usage);
 
-                let response_guard = if status.is_success() {
-                    let decision = guard_response_bytes_for_alias(&bytes, yaml_alias.as_deref());
-                    if decision.should_block() {
-                        tracing::warn!(
-                            target: "routiium::safety",
-                            guard_id = %decision.id,
-                            risk = %decision.risk_level,
-                            categories = ?decision.categories,
-                            "responses output blocked by response guard"
-                        );
-                        record_analytics_event(
-                            &state,
-                            &req,
-                            &body,
-                            &requested_model,
-                            &resolution,
-                            started_at,
-                            403,
-                            0,
-                            None,
-                            authenticated,
-                            api_key_id.clone(),
-                            api_key_label.clone(),
-                            system_prompt_applied,
-                            Some(decision.reason.clone()),
-                        )
-                        .await;
-                        record_response_guard_event(
-                            &state,
-                            &req,
-                            "responses",
-                            &requested_model,
-                            &resolution,
-                            &decision,
-                        )
-                        .await;
-                        return response_guard_error_response(
-                            &decision,
-                            resolution.plan.as_ref(),
-                            &resolution.model_id,
-                            "responses",
-                        );
-                    }
-                    Some(decision)
-                } else {
-                    None
-                };
-
-                if status.is_success() {
-                    if let Some(ref response_json) = response_json {
-                        record_chat_history(
-                            &state.chat_history,
-                            conversation_hint.clone(),
-                            &requested_model,
-                            &body,
-                            response_json,
-                            &resolution,
-                            token_usage.as_ref(),
-                        )
-                        .await;
-                    }
+            let response_guard = if status.is_success() {
+                let decision = guard_response_bytes_for_alias(&bytes, yaml_alias.as_deref());
+                if decision.should_block() {
+                    tracing::warn!(
+                        target: "routiium::safety",
+                        guard_id = %decision.id,
+                        risk = %decision.risk_level,
+                        categories = ?decision.categories,
+                        "responses output blocked by response guard"
+                    );
+                    record_analytics_event(
+                        &state,
+                        &req,
+                        &body,
+                        &requested_model,
+                        &resolution,
+                        started_at,
+                        403,
+                        0,
+                        None,
+                        authenticated,
+                        api_key_id.clone(),
+                        api_key_label.clone(),
+                        system_prompt_applied,
+                        Some(decision.reason.clone()),
+                    )
+                    .await;
+                    record_response_guard_event(
+                        &state,
+                        &req,
+                        "responses",
+                        &requested_model,
+                        &resolution,
+                        &decision,
+                    )
+                    .await;
+                    return response_guard_error_response(
+                        &decision,
+                        resolution.plan.as_ref(),
+                        &resolution.model_id,
+                        "responses",
+                    );
                 }
+                Some(decision)
+            } else {
+                None
+            };
 
-                let error_message = if status.is_success() {
-                    None
-                } else {
-                    extract_error_message(response_json.as_ref(), &bytes)
-                };
-                record_analytics_event(
-                    &state,
-                    &req,
-                    &body,
-                    &requested_model,
-                    &resolution,
-                    started_at,
-                    status.as_u16(),
-                    bytes.len(),
-                    token_usage.clone(),
-                    authenticated,
-                    api_key_id.clone(),
-                    api_key_label.clone(),
-                    system_prompt_applied,
-                    error_message,
-                )
-                .await;
+            if status.is_success() {
+                if let Some(ref response_json) = response_json {
+                    record_chat_history(
+                        state.chat_history.as_ref(),
+                        conversation_hint.clone(),
+                        &requested_model,
+                        &body,
+                        response_json,
+                        &resolution,
+                        token_usage.as_ref(),
+                    )
+                    .await;
+                }
+            }
 
-                let mut builder = HttpResponse::build(
-                    actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap(),
-                );
-                if let Some(plan) = resolution.plan.as_ref() {
-                    insert_route_headers(&mut builder, plan, &resolution.model_id);
-                    if let Some(decision) = response_guard.as_ref() {
-                        insert_response_guard_headers(&mut builder, decision);
-                    }
-                    if let Some(value) = streaming_safety {
-                        builder.insert_header(("x-streaming-safety", value));
-                    }
-                    if status.is_success()
-                        && matches!(resolution.mode, crate::util::UpstreamMode::Chat)
+            let error_message = if status.is_success() {
+                None
+            } else {
+                extract_error_message(response_json.as_ref(), &bytes)
+            };
+            record_analytics_event(
+                &state,
+                &req,
+                &body,
+                &requested_model,
+                &resolution,
+                started_at,
+                status.as_u16(),
+                bytes.len(),
+                token_usage.clone(),
+                authenticated,
+                api_key_id.clone(),
+                api_key_label.clone(),
+                system_prompt_applied,
+                error_message,
+            )
+            .await;
+
+            let mut builder = HttpResponse::build(
+                actix_web::http::StatusCode::from_u16(status.as_u16())
+                    .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR),
+            );
+            if let Some(plan) = resolution.plan.as_ref() {
+                insert_route_headers(&mut builder, plan, &resolution.model_id);
+                if let Some(decision) = response_guard.as_ref() {
+                    insert_response_guard_headers(&mut builder, decision);
+                }
+                if let Some(value) = streaming_safety {
+                    builder.insert_header(("x-streaming-safety", value));
+                }
+                if status.is_success() && matches!(resolution.mode, crate::util::UpstreamMode::Chat)
+                {
+                    if let Ok(chat_resp) = serde_json::from_slice::<
+                        crate::models::chat::ChatCompletionResponse,
+                    >(&bytes)
                     {
-                        if let Ok(chat_resp) = serde_json::from_slice::<
-                            crate::models::chat::ChatCompletionResponse,
-                        >(&bytes)
-                        {
-                            let responses_resp = chat_to_responses_response(&chat_resp);
-                            if let Ok(body) = serde_json::to_vec(&responses_resp) {
-                                let body = Bytes::from(body);
-                                if let Some(key) = terminal_exact_cache_key {
-                                    exact_response_cache_insert(
-                                        key.clone(),
-                                        status.as_u16(),
-                                        body.clone(),
-                                        "application/json",
-                                        &resolution,
-                                    );
-                                }
-                                builder.insert_header(("content-type", "application/json"));
-                                if let Some(ref rl) = rl_result {
-                                    insert_rate_limit_headers(&mut builder, rl);
-                                }
-                                return builder.body(body);
+                        let responses_resp = chat_to_responses_response(&chat_resp);
+                        if let Ok(body) = serde_json::to_vec(&responses_resp) {
+                            let body = Bytes::from(body);
+                            if let Some(key) = terminal_exact_cache_key {
+                                exact_response_cache_insert(
+                                    key.clone(),
+                                    status.as_u16(),
+                                    body.clone(),
+                                    "application/json",
+                                    &resolution,
+                                );
                             }
+                            builder.insert_header(("content-type", "application/json"));
+                            if let Some(ref rl) = rl_result {
+                                insert_rate_limit_headers(&mut builder, rl);
+                            }
+                            return builder.body(body);
                         }
                     }
                 }
-                if resolution.plan.is_none() {
-                    if let Some(decision) = response_guard.as_ref() {
-                        insert_response_guard_headers(&mut builder, decision);
-                    }
-                    if let Some(value) = streaming_safety {
-                        builder.insert_header(("x-streaming-safety", value));
-                    }
-                }
-                if let Some(ref rl) = rl_result {
-                    insert_rate_limit_headers(&mut builder, rl);
-                }
-                if let Some(key) = terminal_exact_cache_key {
-                    exact_response_cache_insert(
-                        key.clone(),
-                        status.as_u16(),
-                        bytes.clone(),
-                        "application/json",
-                        &resolution,
-                    );
-                }
-                builder.body(bytes)
             }
-            None => {
-                let (resolution, error_message) = terminal_error
-                    .unwrap_or_else(|| (resolution.clone(), "upstream failed".to_string()));
-                record_analytics_event(
-                    &state,
-                    &req,
-                    &body,
-                    &requested_model,
+            if resolution.plan.is_none() {
+                if let Some(decision) = response_guard.as_ref() {
+                    insert_response_guard_headers(&mut builder, decision);
+                }
+                if let Some(value) = streaming_safety {
+                    builder.insert_header(("x-streaming-safety", value));
+                }
+            }
+            if let Some(ref rl) = rl_result {
+                insert_rate_limit_headers(&mut builder, rl);
+            }
+            if let Some(key) = terminal_exact_cache_key {
+                exact_response_cache_insert(
+                    key.clone(),
+                    status.as_u16(),
+                    bytes.clone(),
+                    "application/json",
                     &resolution,
-                    started_at,
-                    502,
-                    0,
-                    None,
-                    authenticated,
-                    api_key_id,
-                    api_key_label,
-                    system_prompt_applied,
-                    Some(error_message.clone()),
-                )
-                .await;
-                router_error_response(
-                    http::StatusCode::BAD_GATEWAY,
-                    &error_message,
-                    resolution.plan.as_ref(),
-                    &resolution.model_id,
-                )
+                );
             }
+            builder.body(bytes)
+        } else {
+            let (resolution, error_message) = terminal_error
+                .unwrap_or_else(|| (resolution.clone(), "upstream failed".to_string()));
+            record_analytics_event(
+                &state,
+                &req,
+                &body,
+                &requested_model,
+                &resolution,
+                started_at,
+                502,
+                0,
+                None,
+                authenticated,
+                api_key_id,
+                api_key_label,
+                system_prompt_applied,
+                Some(error_message.clone()),
+            )
+            .await;
+            router_error_response(
+                http::StatusCode::BAD_GATEWAY,
+                &error_message,
+                resolution.plan.as_ref(),
+                &resolution.model_id,
+            )
         }
     }
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Endpoint orchestration preserves existing request flow"
+)]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "Read lock is held while collecting a consistent panel snapshot"
+)]
+#[expect(
+    clippy::option_if_let_else,
+    reason = "Admin state fallback keeps optional manager handling explicit"
+)]
 async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
@@ -4340,7 +4511,7 @@ async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl
             let entry = principal_stats
                 .entry(api_key_id.clone())
                 .or_insert_with(|| (0, 0, HashSet::new()));
-            entry.0 += 1;
+            entry.0 = entry.0.saturating_add(1);
             entry.1 = entry.1.max(event.timestamp);
             if let Some(model) = event.request.model.as_ref() {
                 if !model.is_empty() {
@@ -4397,11 +4568,11 @@ async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl
     principal_items.sort_by(|a, b| {
         let b_requests = b
             .get("request_count_30d")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         let a_requests = a
             .get("request_count_30d")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         b_requests.cmp(&a_requests)
     });
@@ -4474,7 +4645,11 @@ async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl
     let mut routing_bedrock_backends = Vec::new();
     for rule in &routing_guard.rules {
         for backend in &rule.backends {
-            if backend.mode == crate::routing_config::UpstreamMode::Bedrock {
+            if matches!(
+                backend.mode,
+                crate::routing_config::UpstreamMode::Bedrock
+                    | crate::routing_config::UpstreamMode::BedrockMantle
+            ) {
                 routing_bedrock_backends.push(serde_json::json!({
                     "rule_id": rule.id,
                     "description": rule.description,
@@ -4487,7 +4662,11 @@ async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl
         }
     }
     if let Some(default_backend) = routing_guard.default_backend.as_ref() {
-        if default_backend.mode == crate::routing_config::UpstreamMode::Bedrock {
+        if matches!(
+            default_backend.mode,
+            crate::routing_config::UpstreamMode::Bedrock
+                | crate::routing_config::UpstreamMode::BedrockMantle
+        ) {
             routing_bedrock_backends.push(serde_json::json!({
                 "rule_id": serde_json::Value::Null,
                 "description": "default_backend",
@@ -4583,6 +4762,7 @@ async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl
         crate::util::UpstreamMode::Responses => "responses",
         crate::util::UpstreamMode::Chat => "chat",
         crate::util::UpstreamMode::Bedrock => "bedrock",
+        crate::util::UpstreamMode::BedrockMantle => "bedrock_mantle",
     };
     let aws_region = non_empty_env("AWS_REGION").or_else(|| non_empty_env("AWS_DEFAULT_REGION"));
     let aws_profile = non_empty_env("AWS_PROFILE");
@@ -4642,7 +4822,7 @@ async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl
             "config_path": state.mcp_config_path,
             "reloadable": state.mcp_config_path.is_some(),
             "config": mcp_config,
-            "configured_servers": mcp_config.as_ref().map(|cfg| cfg.server_names()).unwrap_or_default(),
+            "configured_servers": mcp_config.as_ref().map(super::mcp_config::McpConfig::server_names).unwrap_or_default(),
             "connected_servers": mcp_connected_servers,
             "tools": mcp_tools
         },
@@ -4735,7 +4915,10 @@ async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl
             }
         },
         "bedrock": {
-            "enabled": matches!(upstream_mode_from_env(), crate::util::UpstreamMode::Bedrock) || !routing_bedrock_backends.is_empty() || !bedrock_catalog_models.is_empty(),
+            "enabled": matches!(
+                upstream_mode_from_env(),
+                crate::util::UpstreamMode::Bedrock | crate::util::UpstreamMode::BedrockMantle
+            ) || !routing_bedrock_backends.is_empty() || !bedrock_catalog_models.is_empty(),
             "default_upstream_mode": upstream_mode,
             "aws_region": aws_region,
             "aws_profile": aws_profile,
@@ -4749,7 +4932,7 @@ async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl
             "items": principal_items,
             "sample_window_start": principal_window_start,
             "sample_window_end": now_secs,
-            "sample_limit": principal_events.as_ref().map(|events| events.len()).unwrap_or(0)
+            "sample_limit": principal_events.as_ref().map_or(0, std::vec::Vec::len)
         },
         "rate_limits": {
             "policies": rate_limit_policies,
@@ -4764,6 +4947,10 @@ struct SafetyEventsQuery {
     limit: Option<usize>,
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn admin_safety_events(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -4784,6 +4971,10 @@ async fn admin_safety_events(
     }))
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn admin_panel_update_system_prompts(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -4804,7 +4995,7 @@ async fn admin_panel_update_system_prompts(
     if let Err(err) = write_pretty_json_file(path, &config) {
         return error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to write system prompt config: {}", err),
+            &format!("Failed to write system prompt config: {err}"),
         );
     }
 
@@ -4819,6 +5010,10 @@ async fn admin_panel_update_system_prompts(
     }))
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn admin_panel_update_mcp(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -4852,7 +5047,7 @@ async fn admin_panel_update_mcp(
     if let Err(err) = write_pretty_json_file(path, &config) {
         return error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to write MCP config: {}", err),
+            &format!("Failed to write MCP config: {err}"),
         );
     }
 
@@ -4861,7 +5056,7 @@ async fn admin_panel_update_mcp(
         Err(err) => {
             return error_response(
                 http::StatusCode::BAD_REQUEST,
-                &format!("Updated MCP config could not be initialized: {}", err),
+                &format!("Updated MCP config could not be initialized: {err}"),
             )
         }
     };
@@ -4877,6 +5072,10 @@ async fn admin_panel_update_mcp(
     }))
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn admin_panel_update_routing(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -4897,7 +5096,7 @@ async fn admin_panel_update_routing(
     if let Err(err) = write_pretty_json_file(path, &config) {
         return error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to write routing config: {}", err),
+            &format!("Failed to write routing config: {err}"),
         );
     }
 
@@ -4906,11 +5105,11 @@ async fn admin_panel_update_routing(
         Err(err) => {
             return error_response(
                 http::StatusCode::BAD_REQUEST,
-                &format!("Updated routing config could not be loaded: {}", err),
+                &format!("Updated routing config could not be loaded: {err}"),
             )
         }
     };
-    let stats = loaded.stats();
+    let loaded_stats = loaded.stats();
 
     let mut guard = state.routing_config.write().await;
     *guard = loaded.clone();
@@ -4919,12 +5118,16 @@ async fn admin_panel_update_routing(
     HttpResponse::Ok().json(serde_json::json!({
         "success": true,
         "config_path": path,
-        "stats": stats,
+        "stats": loaded_stats,
         "config": loaded
     }))
 }
 
-/// Configure Actix-web routes with AppState.
+/// Configure Actix-web routes with `AppState`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Endpoint orchestration preserves existing request flow"
+)]
 pub fn config_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("")
@@ -5086,8 +5289,7 @@ async fn ready(state: web::Data<AppState>) -> impl Responder {
     .any(|name| {
         std::env::var(name)
             .ok()
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
+            .is_some_and(|value| !value.trim().is_empty())
     });
     let upstream_ready = state.router_client.is_some()
         || state.runtime_config.is_some()
@@ -5132,6 +5334,10 @@ async fn metrics() -> impl Responder {
         .body(GATEWAY_METRICS.render_prometheus())
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn admin_exact_response_cache_clear(req: HttpRequest) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
@@ -5144,6 +5350,10 @@ async fn admin_exact_response_cache_clear(req: HttpRequest) -> impl Responder {
 }
 
 /// Service status endpoint to expose feature flags and available routes.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Endpoint orchestration preserves existing request flow"
+)]
 async fn status(state: web::Data<AppState>) -> impl Responder {
     let proxy_enabled: bool = true;
     let routes = vec![
@@ -5217,15 +5427,14 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
     let router_policy = state
         .router_config_path
         .as_ref()
-        .map(|p| format!("file://{}", p));
+        .map(|p| format!("file://{p}"));
     let pricing_config_path = state.pricing_config_path.as_deref();
     let safety_config = crate::safety_judge::SafetyJudgeConfig::from_env();
     let response_guard_mode = crate::safety_judge::response_guard_mode_from_env();
     let streaming_safety_mode = crate::safety_judge::streaming_safety_mode_from_env();
     let judge_key_present = std::env::var(&safety_config.llm_api_key_env)
         .ok()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
+        .is_some_and(|value| !value.trim().is_empty());
     let (_, governance) = governance_readiness(&state);
 
     // Get analytics status
@@ -5345,6 +5554,10 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
 }
 
 /// List available models in OpenAI-compatible format.
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn list_models(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     // Apply same authentication logic as other endpoints
     let managed_mode = managed_mode_from_env();
@@ -5356,11 +5569,9 @@ async fn list_models(state: web::Data<AppState>, req: HttpRequest) -> impl Respo
         .and_then(|v| v.to_str().ok())
         .and_then(|s| {
             let s = s.trim();
-            if s.len() >= 7 && s[..6].eq_ignore_ascii_case("bearer") {
-                Some(s[6..].trim().to_string())
-            } else {
-                None
-            }
+            s.strip_prefix("Bearer")
+                .or_else(|| s.strip_prefix("bearer"))
+                .map(|rest| rest.trim().to_string())
         });
 
     // Authentication check (same as other endpoints)
@@ -5455,10 +5666,10 @@ fn merge_runtime_alias_models(state: &AppState, models: &mut Vec<Model>) {
         if !seen.insert(alias.clone()) {
             continue;
         }
-        let owned_by = config
-            .alias(&alias)
-            .map(|effective| effective.provider_id.clone())
-            .unwrap_or_else(|| "routiium-yaml".to_string());
+        let owned_by = config.alias(&alias).map_or_else(
+            || "routiium-yaml".to_string(),
+            |effective| effective.provider_id.clone(),
+        );
         models.push(Model {
             id: alias,
             object: "model".to_string(),
@@ -5528,6 +5739,10 @@ fn get_default_models() -> Vec<Model> {
 }
 
 /// Convert a Chat Completions request into a Responses API request payload (JSON).
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn convert(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -5568,6 +5783,14 @@ async fn convert(
 }
 
 /// Direct passthrough for native Chat Completions requests (no translation).
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Endpoint orchestration preserves existing request flow"
+)]
 async fn chat_completions_passthrough(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -5605,11 +5828,7 @@ async fn chat_completions_passthrough(
     if let Some(messages) = body.get_mut("messages").and_then(|v| v.as_array_mut()) {
         for message in messages {
             if let Some(obj) = message.as_object_mut() {
-                if obj
-                    .get("content")
-                    .map(|value| value.is_null())
-                    .unwrap_or(false)
-                {
+                if obj.get("content").is_some_and(serde_json::Value::is_null) {
                     obj.insert(
                         "content".to_string(),
                         serde_json::Value::String(String::new()),
@@ -5624,7 +5843,7 @@ async fn chat_completions_passthrough(
         match manager.list_all_tools().await {
             Ok(mcp_tools) => {
                 let filtered = filter_mcp_tools_for_alias(mcp_tools, yaml_alias.as_deref());
-                merge_mcp_tools_into_chat_payload(&mut body, &filtered)
+                merge_mcp_tools_into_chat_payload(&mut body, &filtered);
             }
             Err(err) => warn!(
                 "Failed to fetch MCP tools for /v1/chat/completions: {}",
@@ -5653,11 +5872,9 @@ async fn chat_completions_passthrough(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| {
             let s = s.trim();
-            if s.len() >= 7 && s[..6].eq_ignore_ascii_case("bearer") {
-                Some(s[6..].trim().to_string())
-            } else {
-                None
-            }
+            s.strip_prefix("Bearer")
+                .or_else(|| s.strip_prefix("bearer"))
+                .map(|rest| rest.trim().to_string())
         });
 
     // Resolve upstream bearer (managed mode validates client token but defers provider key selection to routing)
@@ -5749,7 +5966,7 @@ async fn chat_completions_passthrough(
     // Determine if streaming is requested
     let mut stream = body
         .get("stream")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
     let client = &state.http;
@@ -5820,7 +6037,7 @@ async fn chat_completions_passthrough(
             Err(e) => {
                 return error_response(
                     http::StatusCode::BAD_REQUEST,
-                    &format!("Invalid chat request: {}", e),
+                    &format!("Invalid chat request: {e}"),
                 );
             }
         };
@@ -5832,7 +6049,7 @@ async fn chat_completions_passthrough(
             Err(e) => {
                 return error_response(
                     http::StatusCode::BAD_REQUEST,
-                    &format!("Failed to convert to Bedrock format: {}", e),
+                    &format!("Failed to convert to Bedrock format: {e}"),
                 );
             }
         };
@@ -5850,7 +6067,7 @@ async fn chat_completions_passthrough(
                     Err(err) => {
                         return error_response(
                             http::StatusCode::BAD_REQUEST,
-                            &format!("Failed to resolve Bedrock provider: {}", err),
+                            &format!("Failed to resolve Bedrock provider: {err}"),
                         );
                     }
                 };
@@ -5937,7 +6154,7 @@ async fn chat_completions_passthrough(
                     .await;
                     return error_response(
                         http::StatusCode::BAD_GATEWAY,
-                        &format!("Bedrock streaming invocation failed: {}", err),
+                        &format!("Bedrock streaming invocation failed: {err}"),
                     );
                 }
             }
@@ -6000,7 +6217,7 @@ async fn chat_completions_passthrough(
                         );
                     }
                     record_chat_history(
-                        &state.chat_history,
+                        state.chat_history.as_ref(),
                         conversation_hint.clone(),
                         &requested_model,
                         &body,
@@ -6043,7 +6260,7 @@ async fn chat_completions_passthrough(
                 Err(e) => {
                     return error_response(
                         http::StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("Failed to convert Bedrock response: {}", e),
+                        &format!("Failed to convert Bedrock response: {e}"),
                     );
                 }
             },
@@ -6067,7 +6284,7 @@ async fn chat_completions_passthrough(
                 .await;
                 return error_response(
                     http::StatusCode::BAD_GATEWAY,
-                    &format!("Bedrock invocation failed: {}", e),
+                    &format!("Bedrock invocation failed: {e}"),
                 );
             }
         }
@@ -6075,16 +6292,17 @@ async fn chat_completions_passthrough(
 
     let endpoint = match resolution.mode {
         crate::util::UpstreamMode::Responses => "responses",
-        crate::util::UpstreamMode::Chat => "chat/completions",
+        crate::util::UpstreamMode::Chat | crate::util::UpstreamMode::BedrockMantle => {
+            "chat/completions"
+        }
         crate::util::UpstreamMode::Bedrock => "bedrock/invoke", // Shouldn't reach here
     };
     let base = resolution.base_url.trim_end_matches('/');
 
-    let expects_responses = resolution
-        .plan
-        .as_ref()
-        .map(|plan| matches!(plan.upstream.mode, RouterUpstreamMode::Responses))
-        .unwrap_or_else(|| matches!(resolution.mode, crate::util::UpstreamMode::Responses));
+    let expects_responses = resolution.plan.as_ref().map_or_else(
+        || matches!(resolution.mode, crate::util::UpstreamMode::Responses),
+        |plan| matches!(plan.upstream.mode, RouterUpstreamMode::Responses),
+    );
 
     if stream {
         use bytes::Bytes;
@@ -6105,17 +6323,44 @@ async fn chat_completions_passthrough(
             strip_responses_only_fields(&mut outbound_body);
         }
 
-        let real_url = format!("{}/{}", base, endpoint);
+        let real_url = format!("{base}/{endpoint}");
+        let outbound_bytes = match serde_json::to_vec(&outbound_body) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to serialize upstream request: {error}"),
+                );
+            }
+        };
         let mut rb = client
             .post(&real_url)
             .header("accept", "text/event-stream")
             .header("content-type", "application/json")
-            .header("connection", "close")
-            .json(&outbound_body);
+            .header("connection", "close");
         rb = apply_upstream_headers(rb, &resolution.headers);
-        if let Some(b) = eff_bearer.clone() {
+        if matches!(resolution.mode, crate::util::UpstreamMode::BedrockMantle) {
+            rb = match crate::bedrock_mantle::apply_auth(
+                rb,
+                &real_url,
+                &outbound_bytes,
+                bedrock_mantle_bearer_for_resolution(upstream_bearer.as_deref(), &resolution)
+                    .as_deref(),
+            )
+            .await
+            {
+                Ok(builder) => builder,
+                Err(error) => {
+                    return error_response(
+                        http::StatusCode::BAD_GATEWAY,
+                        &format!("Bedrock Mantle authentication failed: {error}"),
+                    );
+                }
+            };
+        } else if let Some(b) = eff_bearer.clone() {
             rb = rb.bearer_auth(b);
         }
+        rb = rb.body(outbound_bytes);
         match rb.send().await {
             Ok(up) => {
                 let status = up.status();
@@ -6145,7 +6390,8 @@ async fn chat_completions_passthrough(
                     .await;
 
                     let mut builder = HttpResponse::build(
-                        actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap(),
+                        actix_web::http::StatusCode::from_u16(status.as_u16())
+                            .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR),
                     );
                     if let Some(plan) = resolution.plan.as_ref() {
                         insert_route_headers(&mut builder, plan, &resolution.model_id);
@@ -6322,36 +6568,32 @@ async fn chat_completions_passthrough(
             .await
             {
                 Ok((status, _bytes))
-                    if idx + 1 < attempt_count && is_safe_failover_status(status) =>
+                    if idx.saturating_add(1) < attempt_count && is_safe_failover_status(status) =>
                 {
                     tracing::warn!(
                         route_id = attempt_resolution
                             .plan
                             .as_ref()
-                            .map(|plan| plan.route_id.as_str())
-                            .unwrap_or("-"),
+                            .map_or("-", |plan| plan.route_id.as_str()),
                         model = %attempt_resolution.model_id,
                         status = status.as_u16(),
                         "non-streaming chat upstream failed; trying fallback"
                     );
-                    continue;
                 }
                 Ok((status, bytes)) => {
                     terminal_attempt = Some((attempt_resolution, status, bytes, idx == 0));
                     break;
                 }
-                Err(err) if idx + 1 < attempt_count => {
+                Err(err) if idx.saturating_add(1) < attempt_count => {
                     tracing::warn!(
                         route_id = attempt_resolution
                             .plan
                             .as_ref()
-                            .map(|plan| plan.route_id.as_str())
-                            .unwrap_or("-"),
+                            .map_or("-", |plan| plan.route_id.as_str()),
                         model = %attempt_resolution.model_id,
                         error = %err,
                         "non-streaming chat upstream transport failed; trying fallback"
                     );
-                    continue;
                 }
                 Err(err) => {
                     terminal_error = Some((attempt_resolution, err.to_string()));
@@ -6360,182 +6602,120 @@ async fn chat_completions_passthrough(
             }
         }
 
-        match terminal_attempt {
-            Some((resolution, status, bytes, terminal_is_primary)) => {
-                let terminal_exact_cache_key =
-                    exact_cache_key.as_ref().filter(|_| terminal_is_primary);
-                let response_json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
-                let token_usage = response_json
-                    .as_ref()
-                    .and_then(crate::analytics_middleware::extract_token_usage);
+        if let Some((resolution, status, bytes, terminal_is_primary)) = terminal_attempt {
+            let terminal_exact_cache_key = exact_cache_key.as_ref().filter(|_| terminal_is_primary);
+            let response_json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+            let token_usage = response_json
+                .as_ref()
+                .and_then(crate::analytics_middleware::extract_token_usage);
 
-                let response_guard = if status.is_success() {
-                    let decision = guard_response_bytes_for_alias(&bytes, yaml_alias.as_deref());
-                    if decision.should_block() {
-                        tracing::warn!(
-                            target: "routiium::safety",
-                            guard_id = %decision.id,
-                            risk = %decision.risk_level,
-                            categories = ?decision.categories,
-                            "chat output blocked by response guard"
-                        );
-                        record_analytics_event(
-                            &state,
-                            &req,
-                            &body,
-                            &requested_model,
-                            &resolution,
-                            started_at,
-                            403,
-                            0,
-                            None,
-                            authenticated,
-                            api_key_id.clone(),
-                            api_key_label.clone(),
-                            system_prompt_applied,
-                            Some(decision.reason.clone()),
-                        )
-                        .await;
-                        record_response_guard_event(
-                            &state,
-                            &req,
-                            "chat",
-                            &requested_model,
-                            &resolution,
-                            &decision,
-                        )
-                        .await;
-                        return response_guard_error_response(
-                            &decision,
-                            resolution.plan.as_ref(),
-                            &resolution.model_id,
-                            "chat",
-                        );
-                    }
-                    Some(decision)
-                } else {
-                    None
-                };
-
-                // Record chat history for successful non-streaming responses
-                // This must happen BEFORE any early returns below
-                if status.is_success() {
-                    if let Some(ref response_json) = response_json {
-                        record_chat_history(
-                            &state.chat_history,
-                            conversation_hint.clone(),
-                            &requested_model,
-                            &body,
-                            response_json,
-                            &resolution,
-                            token_usage.as_ref(),
-                        )
-                        .await;
-                    }
+            let response_guard = if status.is_success() {
+                let decision = guard_response_bytes_for_alias(&bytes, yaml_alias.as_deref());
+                if decision.should_block() {
+                    tracing::warn!(
+                        target: "routiium::safety",
+                        guard_id = %decision.id,
+                        risk = %decision.risk_level,
+                        categories = ?decision.categories,
+                        "chat output blocked by response guard"
+                    );
+                    record_analytics_event(
+                        &state,
+                        &req,
+                        &body,
+                        &requested_model,
+                        &resolution,
+                        started_at,
+                        403,
+                        0,
+                        None,
+                        authenticated,
+                        api_key_id.clone(),
+                        api_key_label.clone(),
+                        system_prompt_applied,
+                        Some(decision.reason.clone()),
+                    )
+                    .await;
+                    record_response_guard_event(
+                        &state,
+                        &req,
+                        "chat",
+                        &requested_model,
+                        &resolution,
+                        &decision,
+                    )
+                    .await;
+                    return response_guard_error_response(
+                        &decision,
+                        resolution.plan.as_ref(),
+                        &resolution.model_id,
+                        "chat",
+                    );
                 }
+                Some(decision)
+            } else {
+                None
+            };
 
-                let error_message = if status.is_success() {
-                    None
-                } else {
-                    extract_error_message(response_json.as_ref(), &bytes)
-                };
-                record_analytics_event(
-                    &state,
-                    &req,
-                    &body,
-                    &requested_model,
-                    &resolution,
-                    started_at,
-                    status.as_u16(),
-                    bytes.len(),
-                    token_usage.clone(),
-                    authenticated,
-                    api_key_id.clone(),
-                    api_key_label.clone(),
-                    system_prompt_applied,
-                    error_message,
-                )
-                .await;
-
-                let mut builder = HttpResponse::build(
-                    actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap(),
-                );
-                if let Some(plan) = resolution.plan.as_ref() {
-                    insert_route_headers(&mut builder, plan, &resolution.model_id);
+            // Record chat history for successful non-streaming responses
+            // This must happen BEFORE any early returns below
+            if status.is_success() {
+                if let Some(ref response_json) = response_json {
+                    record_chat_history(
+                        state.chat_history.as_ref(),
+                        conversation_hint.clone(),
+                        &requested_model,
+                        &body,
+                        response_json,
+                        &resolution,
+                        token_usage.as_ref(),
+                    )
+                    .await;
                 }
-                if let Some(decision) = response_guard.as_ref() {
-                    insert_response_guard_headers(&mut builder, decision);
-                }
-                if let Some(value) = streaming_safety {
-                    builder.insert_header(("x-streaming-safety", value));
-                }
-                if status.is_success()
-                    && matches!(resolution.mode, crate::util::UpstreamMode::Responses)
-                {
-                    match serde_json::from_slice::<responses::ResponsesResponse>(&bytes) {
-                        Ok(resp_obj) => {
-                            let chat_resp = responses_to_chat_response(&resp_obj);
-                            match serde_json::to_vec(&chat_resp) {
-                                Ok(body) => {
-                                    let body = Bytes::from(body);
-                                    if let Some(key) = terminal_exact_cache_key {
-                                        exact_response_cache_insert(
-                                            key.clone(),
-                                            status.as_u16(),
-                                            body.clone(),
-                                            "application/json",
-                                            &resolution,
-                                        );
-                                    }
-                                    builder.insert_header(("content-type", "application/json"));
-                                    return builder.body(body);
-                                }
-                                Err(err) => tracing::debug!(
-                                    "Failed to serialize chat conversion payload: {}",
-                                    err
-                                ),
-                            }
-                        }
-                        Err(err) => tracing::debug!(
-                            "Failed to parse Responses payload for chat conversion: {}",
-                            err
-                        ),
-                    }
-                }
+            }
 
-                // For Gemini models, parse thought tags from the response
-                if status.is_success()
-                    && matches!(resolution.mode, crate::util::UpstreamMode::Chat)
-                    && resolution.model_id.starts_with("gemini-")
-                {
-                    if let Ok(mut chat_resp) = serde_json::from_slice::<
-                        crate::models::chat::ChatCompletionResponse,
-                    >(&bytes)
-                    {
-                        // Parse thought tags from each choice's message content
-                        for choice in &mut chat_resp.choices {
-                            if let Some(content) = choice.message.content.clone() {
-                                let (actual_content, reasoning) =
-                                    crate::conversion::parse_thought_tags(&content);
-                                choice.message.content = if actual_content.is_empty() {
-                                    None
-                                } else {
-                                    Some(actual_content)
-                                };
-                                choice.message.reasoning = reasoning;
+            let error_message = if status.is_success() {
+                None
+            } else {
+                extract_error_message(response_json.as_ref(), &bytes)
+            };
+            record_analytics_event(
+                &state,
+                &req,
+                &body,
+                &requested_model,
+                &resolution,
+                started_at,
+                status.as_u16(),
+                bytes.len(),
+                token_usage.clone(),
+                authenticated,
+                api_key_id.clone(),
+                api_key_label.clone(),
+                system_prompt_applied,
+                error_message,
+            )
+            .await;
 
-                                // Estimate reasoning tokens if we have reasoning content
-                                if let (Some(reasoning_text), Some(ref mut usage)) =
-                                    (choice.message.reasoning.as_ref(), chat_resp.usage.as_mut())
-                                {
-                                    // Rough estimate: 1 token per 4 characters
-                                    let reasoning_tokens =
-                                        (reasoning_text.len() as u64).div_ceil(4);
-                                    usage.reasoning_tokens = Some(reasoning_tokens);
-                                }
-                            }
-                        }
-
+            let mut builder = HttpResponse::build(
+                actix_web::http::StatusCode::from_u16(status.as_u16())
+                    .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR),
+            );
+            if let Some(plan) = resolution.plan.as_ref() {
+                insert_route_headers(&mut builder, plan, &resolution.model_id);
+            }
+            if let Some(decision) = response_guard.as_ref() {
+                insert_response_guard_headers(&mut builder, decision);
+            }
+            if let Some(value) = streaming_safety {
+                builder.insert_header(("x-streaming-safety", value));
+            }
+            if status.is_success()
+                && matches!(resolution.mode, crate::util::UpstreamMode::Responses)
+            {
+                match serde_json::from_slice::<responses::ResponsesResponse>(&bytes) {
+                    Ok(resp_obj) => {
+                        let chat_resp = responses_to_chat_response(&resp_obj);
                         match serde_json::to_vec(&chat_resp) {
                             Ok(body) => {
                                 let body = Bytes::from(body);
@@ -6549,60 +6729,121 @@ async fn chat_completions_passthrough(
                                     );
                                 }
                                 builder.insert_header(("content-type", "application/json"));
-                                if let Some(ref rl) = rl_result {
-                                    insert_rate_limit_headers(&mut builder, rl);
-                                }
                                 return builder.body(body);
                             }
                             Err(err) => tracing::debug!(
-                                "Failed to serialize Gemini thought-parsed payload: {}",
+                                "Failed to serialize chat conversion payload: {}",
                                 err
                             ),
                         }
                     }
+                    Err(err) => tracing::debug!(
+                        "Failed to parse Responses payload for chat conversion: {}",
+                        err
+                    ),
                 }
+            }
 
-                if let Some(ref rl) = rl_result {
-                    insert_rate_limit_headers(&mut builder, rl);
+            // For Gemini models, parse thought tags from the response
+            if status.is_success()
+                && matches!(resolution.mode, crate::util::UpstreamMode::Chat)
+                && resolution.model_id.starts_with("gemini-")
+            {
+                if let Ok(mut chat_resp) =
+                    serde_json::from_slice::<crate::models::chat::ChatCompletionResponse>(&bytes)
+                {
+                    // Parse thought tags from each choice's message content
+                    for choice in &mut chat_resp.choices {
+                        if let Some(content) = choice.message.content.clone() {
+                            let (actual_content, reasoning) =
+                                crate::conversion::parse_thought_tags(&content);
+                            choice.message.content = if actual_content.is_empty() {
+                                None
+                            } else {
+                                Some(actual_content)
+                            };
+                            choice.message.reasoning = reasoning;
+
+                            // Estimate reasoning tokens if we have reasoning content
+                            if let (Some(reasoning_text), Some(ref mut usage)) =
+                                (choice.message.reasoning.as_ref(), chat_resp.usage.as_mut())
+                            {
+                                // Rough estimate: 1 token per 4 characters
+                                #[expect(
+                                    clippy::as_conversions,
+                                    reason = "Reasoning token estimate converts bounded string length"
+                                )]
+                                let reasoning_tokens = (reasoning_text.len() as u64).div_ceil(4);
+                                usage.reasoning_tokens = Some(reasoning_tokens);
+                            }
+                        }
+                    }
+
+                    match serde_json::to_vec(&chat_resp) {
+                        Ok(body) => {
+                            let body = Bytes::from(body);
+                            if let Some(key) = terminal_exact_cache_key {
+                                exact_response_cache_insert(
+                                    key.clone(),
+                                    status.as_u16(),
+                                    body.clone(),
+                                    "application/json",
+                                    &resolution,
+                                );
+                            }
+                            builder.insert_header(("content-type", "application/json"));
+                            if let Some(ref rl) = rl_result {
+                                insert_rate_limit_headers(&mut builder, rl);
+                            }
+                            return builder.body(body);
+                        }
+                        Err(err) => tracing::debug!(
+                            "Failed to serialize Gemini thought-parsed payload: {}",
+                            err
+                        ),
+                    }
                 }
-                if let Some(key) = terminal_exact_cache_key {
-                    exact_response_cache_insert(
-                        key.clone(),
-                        status.as_u16(),
-                        bytes.clone(),
-                        "application/json",
-                        &resolution,
-                    );
-                }
-                builder.body(bytes)
             }
-            None => {
-                let (resolution, error_message) = terminal_error
-                    .unwrap_or_else(|| (resolution.clone(), "upstream failed".to_string()));
-                record_analytics_event(
-                    &state,
-                    &req,
-                    &body,
-                    &requested_model,
+
+            if let Some(ref rl) = rl_result {
+                insert_rate_limit_headers(&mut builder, rl);
+            }
+            if let Some(key) = terminal_exact_cache_key {
+                exact_response_cache_insert(
+                    key.clone(),
+                    status.as_u16(),
+                    bytes.clone(),
+                    "application/json",
                     &resolution,
-                    started_at,
-                    502,
-                    0,
-                    None,
-                    authenticated,
-                    api_key_id,
-                    api_key_label,
-                    system_prompt_applied,
-                    Some(error_message.clone()),
-                )
-                .await;
-                router_error_response(
-                    http::StatusCode::BAD_GATEWAY,
-                    &error_message,
-                    resolution.plan.as_ref(),
-                    &resolution.model_id,
-                )
+                );
             }
+            builder.body(bytes)
+        } else {
+            let (resolution, error_message) = terminal_error
+                .unwrap_or_else(|| (resolution.clone(), "upstream failed".to_string()));
+            record_analytics_event(
+                &state,
+                &req,
+                &body,
+                &requested_model,
+                &resolution,
+                started_at,
+                502,
+                0,
+                None,
+                authenticated,
+                api_key_id,
+                api_key_label,
+                system_prompt_applied,
+                Some(error_message.clone()),
+            )
+            .await;
+            router_error_response(
+                http::StatusCode::BAD_GATEWAY,
+                &error_message,
+                resolution.plan.as_ref(),
+                &resolution.model_id,
+            )
         }
     }
 }
@@ -6678,6 +6919,10 @@ fn resolve_ttl_seconds(
     Ok(ttl_seconds)
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn generate_key(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -6701,7 +6946,7 @@ async fn generate_key(
             Ok(gen) => HttpResponse::Ok().json(gen),
             Err(e) => error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("failed to generate key: {}", e),
+                &format!("failed to generate key: {e}"),
             ),
         },
         None => error_response(
@@ -6711,6 +6956,10 @@ async fn generate_key(
     }
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn generate_key_batch(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -6739,7 +6988,7 @@ async fn generate_key_batch(
         .into_iter()
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
-        .map(|l| format!("{}{}", prefix, l))
+        .map(|l| format!("{prefix}{l}"))
         .collect();
 
     if labels.is_empty() {
@@ -6762,7 +7011,7 @@ async fn generate_key_batch(
                     Err(e) => {
                         return error_response(
                             http::StatusCode::INTERNAL_SERVER_ERROR,
-                            &format!("failed to generate key: {}", e),
+                            &format!("failed to generate key: {e}"),
                         );
                     }
                 }
@@ -6776,6 +7025,10 @@ async fn generate_key_batch(
     }
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn list_keys(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -6812,8 +7065,7 @@ async fn list_keys(
                             return item
                                 .label
                                 .as_ref()
-                                .map(|val| val.starts_with(prefix))
-                                .unwrap_or(false);
+                                .is_some_and(|val| val.starts_with(prefix));
                         }
                         true
                     })
@@ -6830,7 +7082,7 @@ async fn list_keys(
             }
             Err(e) => error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("failed to list keys: {}", e),
+                &format!("failed to list keys: {e}"),
             ),
         },
         None => error_response(
@@ -6845,6 +7097,10 @@ struct RevokeKeyRequest {
     id: String,
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn revoke_key(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -6864,7 +7120,7 @@ async fn revoke_key(
                     .json(serde_json::json!({ "revoked": false, "id": payload.id })),
                 Err(e) => error_response(
                     http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("failed to revoke: {}", e),
+                    &format!("failed to revoke: {e}"),
                 ),
             }
         }
@@ -6882,6 +7138,10 @@ struct SetExpirationRequest {
     ttl_seconds: Option<u64>,
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn set_key_expiration(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -6914,7 +7174,7 @@ async fn set_key_expiration(
             }
             Err(e) => error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("failed to set expiration: {}", e),
+                &format!("failed to set expiration: {e}"),
             ),
         },
         None => error_response(
@@ -6925,6 +7185,14 @@ async fn set_key_expiration(
 }
 
 /// Reload MCP configuration from file at runtime
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "Configuration lock is intentionally held through atomic replacement"
+)]
 async fn reload_mcp(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
@@ -6962,7 +7230,7 @@ async fn reload_mcp(state: web::Data<AppState>, req: HttpRequest) -> impl Respon
             tracing::error!("Failed to load MCP config: {}", e);
             return error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to load MCP config: {}", e),
+                &format!("Failed to load MCP config: {e}"),
             );
         }
     };
@@ -6974,7 +7242,7 @@ async fn reload_mcp(state: web::Data<AppState>, req: HttpRequest) -> impl Respon
             tracing::error!("Failed to initialize MCP client manager: {}", e);
             return error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to initialize MCP manager: {}", e),
+                &format!("Failed to initialize MCP manager: {e}"),
             );
         }
     };
@@ -7006,6 +7274,10 @@ async fn reload_mcp(state: web::Data<AppState>, req: HttpRequest) -> impl Respon
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Endpoint orchestration preserves existing request flow"
+)]
 async fn reload_runtime_config_inner(state: &AppState) -> Result<serde_json::Value, HttpResponse> {
     let runtime_config = state.runtime_config.as_ref().ok_or_else(|| {
         error_response(
@@ -7039,7 +7311,7 @@ async fn reload_runtime_config_inner(state: &AppState) -> Result<serde_json::Val
         tracing::error!("Failed to load unified YAML runtime config: {}", err);
         error_response(
             http::StatusCode::BAD_REQUEST,
-            &format!("Failed to load unified YAML runtime config: {}", err),
+            &format!("Failed to load unified YAML runtime config: {err}"),
         )
     })?;
     let rate_limit_policy_count = apply_runtime_rate_limit_policies(state, &new_config).await?;
@@ -7058,10 +7330,7 @@ async fn reload_runtime_config_inner(state: &AppState) -> Result<serde_json::Val
             );
             error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!(
-                    "Failed to initialize MCP manager from runtime config: {}",
-                    err
-                ),
+                &format!("Failed to initialize MCP manager from runtime config: {err}"),
             )
         })?;
     let connected_servers = new_mcp_manager.connected_servers();
@@ -7146,12 +7415,16 @@ async fn apply_runtime_rate_limit_policies(
                 &format!("Failed to apply YAML rate limit policy {id}: {err}"),
             )
         })?;
-        count += 1;
+        count = count.saturating_add(1);
     }
     Ok(count)
 }
 
 /// Reload unified YAML runtime configuration from file at runtime.
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn reload_runtime_config(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
@@ -7163,6 +7436,14 @@ async fn reload_runtime_config(state: web::Data<AppState>, req: HttpRequest) -> 
 }
 
 /// Reload system prompt configuration from file at runtime
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "Configuration lock is intentionally held through atomic replacement"
+)]
 async fn reload_system_prompt(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
@@ -7190,7 +7471,7 @@ async fn reload_system_prompt(state: web::Data<AppState>, req: HttpRequest) -> i
             tracing::error!("Failed to load system prompt config: {}", e);
             return error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to load system prompt config: {}", e),
+                &format!("Failed to load system prompt config: {e}"),
             );
         }
     };
@@ -7213,6 +7494,14 @@ async fn reload_system_prompt(state: web::Data<AppState>, req: HttpRequest) -> i
 }
 
 /// Reload routing configuration from file at runtime
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "Configuration lock is intentionally held through atomic replacement"
+)]
 async fn reload_routing(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
@@ -7236,7 +7525,7 @@ async fn reload_routing(state: web::Data<AppState>, req: HttpRequest) -> impl Re
             tracing::error!("Failed to load routing config: {}", e);
             return error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to load routing config: {}", e),
+                &format!("Failed to load routing config: {e}"),
             );
         }
     };
@@ -7247,16 +7536,32 @@ async fn reload_routing(state: web::Data<AppState>, req: HttpRequest) -> impl Re
 
     tracing::info!("Routing configuration reloaded successfully");
 
-    let stats = config.stats();
+    let config_stats = config.stats();
 
     HttpResponse::Ok().json(serde_json::json!({
         "success": true,
         "message": "Routing configuration reloaded",
-        "stats": stats
+        "stats": config_stats
     }))
 }
 
 /// Reload both MCP and system prompt configurations
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Endpoint orchestration preserves existing request flow"
+)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "JSON response keys are initialized before updates"
+)]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "Reload handlers hold configuration locks for atomic replacement"
+)]
 async fn reload_all(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
@@ -7399,12 +7704,12 @@ async fn reload_all(state: web::Data<AppState>, req: HttpRequest) -> impl Respon
             Ok(config) => {
                 let mut config_guard = state.routing_config.write().await;
                 *config_guard = config.clone();
-                let stats = config.stats();
+                let config_stats = config.stats();
 
                 results["routing"] = serde_json::json!({
                     "success": true,
                     "message": "Routing configuration reloaded",
-                    "stats": stats
+                    "stats": config_stats
                 });
 
                 tracing::info!("Routing configuration reloaded successfully");
@@ -7425,16 +7730,20 @@ async fn reload_all(state: web::Data<AppState>, req: HttpRequest) -> impl Respon
 /// Analytics endpoints
 ///
 /// Get analytics statistics
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn analytics_stats(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
     match &state.analytics {
         Some(mgr) => match mgr.stats().await {
-            Ok(stats) => HttpResponse::Ok().json(stats),
+            Ok(analytics_stats) => HttpResponse::Ok().json(analytics_stats),
             Err(e) => error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to get analytics stats: {}", e),
+                &format!("Failed to get analytics stats: {e}"),
             ),
         },
         None => error_response(
@@ -7455,6 +7764,14 @@ struct AnalyticsEventsQuery {
 }
 
 /// Query analytics events
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(
+    clippy::or_fun_call,
+    reason = "Query defaults are infallible system-time fallbacks"
+)]
 async fn analytics_events(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -7482,7 +7799,7 @@ async fn analytics_events(
                 })),
                 Err(e) => error_response(
                     http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Failed to query events: {}", e),
+                    &format!("Failed to query events: {e}"),
                 ),
             }
         }
@@ -7502,6 +7819,14 @@ struct AnalyticsAggregateQuery {
 }
 
 /// Get aggregated analytics
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(
+    clippy::or_fun_call,
+    reason = "Query defaults are infallible system-time fallbacks"
+)]
 async fn analytics_aggregate(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -7524,7 +7849,7 @@ async fn analytics_aggregate(
                 Ok(agg) => HttpResponse::Ok().json(agg),
                 Err(e) => error_response(
                     http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Failed to aggregate analytics: {}", e),
+                    &format!("Failed to aggregate analytics: {e}"),
                 ),
             }
         }
@@ -7536,6 +7861,18 @@ async fn analytics_aggregate(
 }
 
 /// Governance report for measured usage/cost decisions.
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(
+    clippy::or_fun_call,
+    reason = "Governance report preserves existing defaults"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Governance report preserves existing response schema"
+)]
 async fn analytics_governance(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -7581,27 +7918,32 @@ async fn analytics_governance(
 
                 match usage_source {
                     crate::analytics::UsageSource::Measured => {
-                        measured_events += 1;
+                        measured_events = measured_events.saturating_add(1);
                         if let Some(usage) = event.token_usage.as_ref() {
-                            measured_input_tokens += usage.prompt_tokens;
-                            measured_output_tokens += usage.completion_tokens;
-                            measured_cached_tokens += usage.cached_tokens.unwrap_or(0);
-                            measured_reasoning_tokens += usage.reasoning_tokens.unwrap_or(0);
+                            measured_input_tokens =
+                                measured_input_tokens.saturating_add(usage.prompt_tokens);
+                            measured_output_tokens =
+                                measured_output_tokens.saturating_add(usage.completion_tokens);
+                            measured_cached_tokens = measured_cached_tokens
+                                .saturating_add(usage.cached_tokens.unwrap_or(0));
+                            measured_reasoning_tokens = measured_reasoning_tokens
+                                .saturating_add(usage.reasoning_tokens.unwrap_or(0));
                         }
                         if let Some(cost) = event.cost.as_ref() {
                             measured_cost += cost.total_cost;
                         } else {
-                            unpriced_measured_events += 1;
+                            unpriced_measured_events = measured_events.saturating_add(1);
                         }
                         if let Some(model) = event.request.model.as_ref() {
-                            *models.entry(model.clone()).or_insert(0) += 1;
+                            let count = models.entry(model.clone()).or_insert(0);
+                            *count = count.saturating_add(1);
                         }
                     }
                     crate::analytics::UsageSource::Estimated => {
-                        estimated_events += 1;
+                        estimated_events = estimated_events.saturating_add(1);
                     }
                     crate::analytics::UsageSource::Absent => {
-                        absent_events += 1;
+                        absent_events = absent_events.saturating_add(1);
                     }
                 }
             }
@@ -7620,7 +7962,7 @@ async fn analytics_governance(
                     "output_tokens": measured_output_tokens,
                     "cached_tokens": measured_cached_tokens,
                     "reasoning_tokens": measured_reasoning_tokens,
-                    "total_tokens": measured_input_tokens + measured_output_tokens,
+                    "total_tokens": measured_input_tokens.saturating_add(measured_output_tokens),
                     "total_cost": measured_cost,
                     "unpriced_events": unpriced_measured_events,
                     "models": models
@@ -7638,7 +7980,7 @@ async fn analytics_governance(
         }
         Err(e) => error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to build governance report: {}", e),
+            &format!("Failed to build governance report: {e}"),
         ),
     }
 }
@@ -7654,6 +7996,15 @@ struct AnalyticsExportQuery {
 }
 
 /// Export analytics data
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(clippy::or_fun_call, reason = "Export defaults preserve API behavior")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "CSV export preserves existing response schema"
+)]
 async fn analytics_export(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -7699,10 +8050,8 @@ async fn analytics_export(
 
                         for event in events {
                             let model = event.request.model.as_deref().unwrap_or("");
-                            let status =
-                                event.response.as_ref().map(|r| r.status_code).unwrap_or(0);
-                            let success =
-                                event.response.as_ref().map(|r| r.success).unwrap_or(false);
+                            let status = event.response.as_ref().map_or(0, |r| r.status_code);
+                            let success = event.response.as_ref().is_some_and(|r| r.success);
 
                             let (prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens) =
                                 if let Some(ref usage) = event.token_usage {
@@ -7725,14 +8074,12 @@ async fn analytics_export(
                             let tps = event
                                 .performance
                                 .tokens_per_second
-                                .map(|t| format!("{:.2}", t))
-                                .unwrap_or_else(|| "".to_string());
+                                .map_or_else(String::new, |t| format!("{t:.2}"));
 
                             let cost = event
                                 .cost
                                 .as_ref()
-                                .map(|c| format!("{:.6}", c.total_cost))
-                                .unwrap_or_else(|| "".to_string());
+                                .map_or_else(String::new, |c| format!("{:.6}", c.total_cost));
 
                             csv_output.push_str(&csv_row([
                                 event.id,
@@ -7759,10 +8106,7 @@ async fn analytics_export(
                             .insert_header(("content-type", "text/csv"))
                             .insert_header((
                                 "content-disposition",
-                                format!(
-                                    "attachment; filename=\"analytics_{}_to_{}.csv\"",
-                                    start, end
-                                ),
+                                format!("attachment; filename=\"analytics_{start}_to_{end}.csv\""),
                             ))
                             .body(csv_output)
                     }
@@ -7772,10 +8116,7 @@ async fn analytics_export(
                             .insert_header(("content-type", "application/json"))
                             .insert_header((
                                 "content-disposition",
-                                format!(
-                                    "attachment; filename=\"analytics_{}_to_{}.json\"",
-                                    start, end
-                                ),
+                                format!("attachment; filename=\"analytics_{start}_to_{end}.json\""),
                             ))
                             .json(serde_json::json!({
                                 "events": events,
@@ -7789,7 +8130,7 @@ async fn analytics_export(
                 },
                 Err(e) => error_response(
                     http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Failed to export analytics: {}", e),
+                    &format!("Failed to export analytics: {e}"),
                 ),
             }
         }
@@ -7801,19 +8142,23 @@ async fn analytics_export(
 }
 
 /// Clear all analytics data
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn analytics_clear(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
     match &state.analytics {
         Some(mgr) => match mgr.clear().await {
-            Ok(_) => HttpResponse::Ok().json(serde_json::json!({
+            Ok(()) => HttpResponse::Ok().json(serde_json::json!({
                 "success": true,
                 "message": "Analytics data cleared"
             })),
             Err(e) => error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to clear analytics: {}", e),
+                &format!("Failed to clear analytics: {e}"),
             ),
         },
         None => error_response(
@@ -7843,21 +8188,25 @@ struct ChatHistoryMessagesQuery {
 }
 
 /// Get chat history stats
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn chat_history_stats(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
     match &state.chat_history {
         Some(mgr) => match mgr.stats().await {
-            Ok(stats) => HttpResponse::Ok().json(serde_json::json!({
-                "total_conversations": stats.total_conversations,
-                "total_messages": stats.total_messages,
-                "backend_type": stats.backend_type,
-                "storage_path": stats.storage_path,
+            Ok(history_stats) => HttpResponse::Ok().json(serde_json::json!({
+                "total_conversations": history_stats.total_conversations,
+                "total_messages": history_stats.total_messages,
+                "backend_type": history_stats.backend_type,
+                "storage_path": history_stats.storage_path,
             })),
             Err(e) => error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to get chat history stats: {}", e),
+                &format!("Failed to get chat history stats: {e}"),
             ),
         },
         None => error_response(
@@ -7868,6 +8217,14 @@ async fn chat_history_stats(state: web::Data<AppState>, req: HttpRequest) -> imp
 }
 
 /// Query chat conversations
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(
+    clippy::items_after_statements,
+    reason = "Local filter import follows authorization guard"
+)]
 async fn chat_history_conversations(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -7893,7 +8250,7 @@ async fn chat_history_conversations(
                 })),
                 Err(e) => error_response(
                     http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Failed to query conversations: {}", e),
+                    &format!("Failed to query conversations: {e}"),
                 ),
             }
         }
@@ -7905,6 +8262,10 @@ async fn chat_history_conversations(
 }
 
 /// Get a specific conversation
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn chat_history_conversation(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -7920,7 +8281,7 @@ async fn chat_history_conversation(
             Ok(conversation) => HttpResponse::Ok().json(conversation),
             Err(e) => error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to get conversation: {}", e),
+                &format!("Failed to get conversation: {e}"),
             ),
         },
         None => error_response(
@@ -7931,6 +8292,14 @@ async fn chat_history_conversation(
 }
 
 /// Query chat messages
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(
+    clippy::items_after_statements,
+    reason = "Local filter import follows authorization guard"
+)]
 async fn chat_history_messages(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -7961,7 +8330,7 @@ async fn chat_history_messages(
                     }
                     Err(e) => error_response(
                         http::StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("Failed to query messages: {}", e),
+                        &format!("Failed to query messages: {e}"),
                     ),
                 }
             }
@@ -7978,6 +8347,10 @@ async fn chat_history_messages(
 }
 
 /// Delete a conversation
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn chat_history_delete_conversation(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -7990,14 +8363,14 @@ async fn chat_history_delete_conversation(
 
     match &state.chat_history {
         Some(mgr) => match mgr.delete_conversation(&conversation_id).await {
-            Ok(_) => HttpResponse::Ok().json(serde_json::json!({
+            Ok(()) => HttpResponse::Ok().json(serde_json::json!({
                 "success": true,
                 "message": "Conversation deleted",
                 "conversation_id": conversation_id
             })),
             Err(e) => error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to delete conversation: {}", e),
+                &format!("Failed to delete conversation: {e}"),
             ),
         },
         None => error_response(
@@ -8008,19 +8381,23 @@ async fn chat_history_delete_conversation(
 }
 
 /// Clear all chat history
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn chat_history_clear(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
     }
     match &state.chat_history {
         Some(mgr) => match mgr.clear().await {
-            Ok(_) => HttpResponse::Ok().json(serde_json::json!({
+            Ok(()) => HttpResponse::Ok().json(serde_json::json!({
                 "success": true,
                 "message": "Chat history cleared"
             })),
             Err(e) => error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to clear chat history: {}", e),
+                &format!("Failed to clear chat history: {e}"),
             ),
         },
         None => error_response(
@@ -8050,6 +8427,10 @@ macro_rules! require_rl {
 }
 
 /// List all rate limit policies.
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn rl_list_policies(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
@@ -8065,12 +8446,16 @@ async fn rl_list_policies(state: web::Data<AppState>, req: HttpRequest) -> impl 
         }
         Err(e) => error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to list policies: {}", e),
+            &format!("Failed to list policies: {e}"),
         ),
     }
 }
 
 /// Create a new rate limit policy.
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn rl_create_policy(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -8089,12 +8474,16 @@ async fn rl_create_policy(
         })),
         Err(e) => error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to create policy: {}", e),
+            &format!("Failed to create policy: {e}"),
         ),
     }
 }
 
 /// Get a specific rate limit policy.
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn rl_get_policy(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -8109,16 +8498,24 @@ async fn rl_get_policy(
         Ok(Some(policy)) => HttpResponse::Ok().json(policy),
         Ok(None) => error_response(
             http::StatusCode::NOT_FOUND,
-            &format!("Policy '{}' not found", id),
+            &format!("Policy '{id}' not found"),
         ),
         Err(e) => error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to get policy: {}", e),
+            &format!("Failed to get policy: {e}"),
         ),
     }
 }
 
 /// Update an existing rate limit policy.
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(
+    clippy::assigning_clones,
+    reason = "Policy id clone preserves request/body ownership"
+)]
 async fn rl_update_policy(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -8139,16 +8536,20 @@ async fn rl_update_policy(
         })),
         Ok(false) => error_response(
             http::StatusCode::NOT_FOUND,
-            &format!("Policy '{}' not found", id),
+            &format!("Policy '{id}' not found"),
         ),
         Err(e) => error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to update policy: {}", e),
+            &format!("Failed to update policy: {e}"),
         ),
     }
 }
 
 /// Delete a rate limit policy.
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn rl_delete_policy(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -8166,16 +8567,24 @@ async fn rl_delete_policy(
         })),
         Ok(false) => error_response(
             http::StatusCode::NOT_FOUND,
-            &format!("Policy '{}' not found", id),
+            &format!("Policy '{id}' not found"),
         ),
         Err(e) => error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to delete policy: {}", e),
+            &format!("Failed to delete policy: {e}"),
         ),
     }
 }
 
 /// Get rate limit status for a specific key.
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(
+    clippy::option_if_let_else,
+    reason = "Status fallback keeps error branch explicit"
+)]
 async fn rl_key_status(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -8193,7 +8602,7 @@ async fn rl_key_status(
         Err(e) => {
             return error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to resolve policy: {}", e),
+                &format!("Failed to resolve policy: {e}"),
             )
         }
     };
@@ -8236,6 +8645,10 @@ struct AssignPolicyBody {
     policy_id: String,
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn rl_assign_key_policy(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -8255,12 +8668,16 @@ async fn rl_assign_key_policy(
         })),
         Err(e) => error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to assign policy: {}", e),
+            &format!("Failed to assign policy: {e}"),
         ),
     }
 }
 
 /// Remove a key's policy assignment (falls back to default).
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn rl_remove_key_policy(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -8284,12 +8701,16 @@ async fn rl_remove_key_policy(
         })),
         Err(e) => error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to remove policy assignment: {}", e),
+            &format!("Failed to remove policy assignment: {e}"),
         ),
     }
 }
 
 /// Get the default policy.
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn rl_get_default_policy(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
@@ -8300,7 +8721,7 @@ async fn rl_get_default_policy(state: web::Data<AppState>, req: HttpRequest) -> 
         Err(e) => {
             return error_response(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to get default policy: {}", e),
+                &format!("Failed to get default policy: {e}"),
             )
         }
     };
@@ -8310,7 +8731,7 @@ async fn rl_get_default_policy(state: web::Data<AppState>, req: HttpRequest) -> 
             Err(e) => {
                 return error_response(
                     http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Failed to resolve default policy: {}", e),
+                    &format!("Failed to resolve default policy: {e}"),
                 )
             }
         },
@@ -8328,6 +8749,10 @@ struct SetDefaultPolicyBody {
     policy_id: String,
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn rl_set_default_policy(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -8344,7 +8769,7 @@ async fn rl_set_default_policy(
         })),
         Err(e) => error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to set default policy: {}", e),
+            &format!("Failed to set default policy: {e}"),
         ),
     }
 }
@@ -8357,6 +8782,14 @@ struct EmergencyBlockBody {
     reason: Option<String>,
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "Unix expiry uses bounded duration input"
+)]
 async fn rl_emergency_block(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -8389,12 +8822,16 @@ async fn rl_emergency_block(
         }
         Err(e) => error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to set emergency block: {}", e),
+            &format!("Failed to set emergency block: {e}"),
         ),
     }
 }
 
 /// Remove an emergency block.
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn rl_remove_emergency_block(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -8413,12 +8850,16 @@ async fn rl_remove_emergency_block(
         })),
         Err(e) => error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to remove emergency block: {}", e),
+            &format!("Failed to remove emergency block: {e}"),
         ),
     }
 }
 
 /// List all emergency blocks.
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn rl_list_emergency_blocks(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
@@ -8434,12 +8875,16 @@ async fn rl_list_emergency_blocks(state: web::Data<AppState>, req: HttpRequest) 
         }
         Err(e) => error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to list emergency blocks: {}", e),
+            &format!("Failed to list emergency blocks: {e}"),
         ),
     }
 }
 
 /// Get concurrency status for a key.
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn rl_concurrency_status(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -8463,6 +8908,10 @@ async fn rl_concurrency_status(
 }
 
 /// Reload rate limit file config.
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
 async fn rl_reload_config(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     if let Err(resp) = require_admin(&req) {
         return resp;
@@ -8475,7 +8924,7 @@ async fn rl_reload_config(state: web::Data<AppState>, req: HttpRequest) -> impl 
         })),
         Err(e) => error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to reload config: {}", e),
+            &format!("Failed to reload config: {e}"),
         ),
     }
 }
@@ -8489,6 +8938,15 @@ struct RlAnalyticsQuery {
     limit: Option<usize>,
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix endpoint captures HttpRequest across await by framework contract"
+)]
+#[expect(
+    clippy::or_fun_call,
+    clippy::option_if_let_else,
+    reason = "Metrics serialization and defaults are infallible"
+)]
 async fn rl_analytics(
     state: web::Data<AppState>,
     req: HttpRequest,
@@ -8512,8 +8970,9 @@ async fn rl_analytics(
     let metrics = if let Some(ref kid) = query.key_id {
         mgr.metrics
             .get_metrics(kid)
-            .map(|m| serde_json::to_value(&m).unwrap_or_default())
-            .unwrap_or(serde_json::Value::Null)
+            .map_or(serde_json::Value::Null, |m| {
+                serde_json::to_value(&m).unwrap_or_default()
+            })
     } else {
         serde_json::to_value(mgr.metrics.get_all_metrics()).unwrap_or_default()
     };

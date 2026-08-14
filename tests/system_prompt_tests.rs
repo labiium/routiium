@@ -91,9 +91,18 @@ fn test_inject_system_prompt_prepend() {
     inject_system_prompt(&mut messages, "You are helpful", "prepend");
 
     assert_eq!(messages.len(), 3);
-    assert_eq!(messages[0].role, "system");
-    assert_eq!(messages[0].content, json!("You are helpful"));
-    assert_eq!(messages[1].role, "user");
+    assert_eq!(
+        messages.first().map(|message| message.role.as_str()),
+        Some("system")
+    );
+    assert_eq!(
+        messages.first().map(|message| &message.content),
+        Some(&json!("You are helpful"))
+    );
+    assert_eq!(
+        messages.get(1).map(|message| message.role.as_str()),
+        Some("user")
+    );
 }
 
 #[test]
@@ -118,11 +127,26 @@ fn test_inject_system_prompt_append() {
     inject_system_prompt(&mut messages, "Additional instructions", "append");
 
     assert_eq!(messages.len(), 3);
-    assert_eq!(messages[0].role, "system");
-    assert_eq!(messages[0].content, json!("Original system message"));
-    assert_eq!(messages[1].role, "system");
-    assert_eq!(messages[1].content, json!("Additional instructions"));
-    assert_eq!(messages[2].role, "user");
+    assert_eq!(
+        messages.first().map(|message| message.role.as_str()),
+        Some("system")
+    );
+    assert_eq!(
+        messages.first().map(|message| &message.content),
+        Some(&json!("Original system message"))
+    );
+    assert_eq!(
+        messages.get(1).map(|message| message.role.as_str()),
+        Some("system")
+    );
+    assert_eq!(
+        messages.get(1).map(|message| &message.content),
+        Some(&json!("Additional instructions"))
+    );
+    assert_eq!(
+        messages.get(2).map(|message| message.role.as_str()),
+        Some("user")
+    );
 }
 
 #[test]
@@ -154,9 +178,18 @@ fn test_inject_system_prompt_replace() {
     inject_system_prompt(&mut messages, "New system message", "replace");
 
     assert_eq!(messages.len(), 2);
-    assert_eq!(messages[0].role, "system");
-    assert_eq!(messages[0].content, json!("New system message"));
-    assert_eq!(messages[1].role, "user");
+    assert_eq!(
+        messages.first().map(|message| message.role.as_str()),
+        Some("system")
+    );
+    assert_eq!(
+        messages.first().map(|message| &message.content),
+        Some(&json!("New system message"))
+    );
+    assert_eq!(
+        messages.get(1).map(|message| message.role.as_str()),
+        Some("user")
+    );
 }
 
 #[test]
@@ -190,9 +223,18 @@ fn test_inject_system_prompt_chat_prepend() {
     inject_system_prompt_chat(&mut req, "You are helpful", "prepend");
 
     assert_eq!(req.messages.len(), 2);
-    assert!(matches!(req.messages[0].role, Role::System));
-    assert_eq!(req.messages[0].content, json!("You are helpful"));
-    assert!(matches!(req.messages[1].role, Role::User));
+    assert!(matches!(
+        req.messages.first().map(|message| &message.role),
+        Some(Role::System)
+    ));
+    assert_eq!(
+        req.messages.first().map(|message| &message.content),
+        Some(&json!("You are helpful"))
+    );
+    assert!(matches!(
+        req.messages.get(1).map(|message| &message.role),
+        Some(Role::User)
+    ));
 }
 
 #[test]
@@ -242,9 +284,18 @@ fn test_inject_system_prompt_chat_replace() {
     inject_system_prompt_chat(&mut req, "New system message", "replace");
 
     assert_eq!(req.messages.len(), 2);
-    assert!(matches!(req.messages[0].role, Role::System));
-    assert_eq!(req.messages[0].content, json!("New system message"));
-    assert!(matches!(req.messages[1].role, Role::User));
+    assert!(matches!(
+        req.messages.first().map(|message| &message.role),
+        Some(Role::System)
+    ));
+    assert_eq!(
+        req.messages.first().map(|message| &message.content),
+        Some(&json!("New system message"))
+    );
+    assert!(matches!(
+        req.messages.get(1).map(|message| &message.role),
+        Some(Role::User)
+    ));
 }
 
 #[test]
@@ -287,9 +338,24 @@ fn test_inject_system_prompt_chat_append() {
     inject_system_prompt_chat(&mut req, "Additional system", "append");
 
     assert_eq!(req.messages.len(), 3);
-    assert!(matches!(req.messages[0].role, Role::System));
-    assert_eq!(req.messages[0].content, json!("Original system"));
-    assert!(matches!(req.messages[1].role, Role::System));
-    assert_eq!(req.messages[1].content, json!("Additional system"));
-    assert!(matches!(req.messages[2].role, Role::User));
+    assert!(matches!(
+        req.messages.first().map(|message| &message.role),
+        Some(Role::System)
+    ));
+    assert_eq!(
+        req.messages.first().map(|message| &message.content),
+        Some(&json!("Original system"))
+    );
+    assert!(matches!(
+        req.messages.get(1).map(|message| &message.role),
+        Some(Role::System)
+    ));
+    assert_eq!(
+        req.messages.get(1).map(|message| &message.content),
+        Some(&json!("Additional system"))
+    );
+    assert!(matches!(
+        req.messages.get(2).map(|message| &message.role),
+        Some(Role::User)
+    ));
 }

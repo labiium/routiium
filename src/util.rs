@@ -28,6 +28,7 @@ pub fn default_user_config_path() -> Option<std::path::PathBuf> {
 /// loaded first, and higher-precedence files may replace values that came from
 /// lower-precedence files, but never replace variables that existed in the
 /// process environment before this function ran.
+#[must_use]
 pub fn load_env_with_config(cli_config: Option<&std::path::Path>) -> String {
     let original_env: std::collections::HashSet<String> =
         std::env::vars().map(|(k, _)| k).collect();
@@ -88,6 +89,7 @@ pub fn load_env_with_config(cli_config: Option<&std::path::Path>) -> String {
 }
 
 /// Load environment variables from the default Routiium env sources.
+#[must_use]
 pub fn load_env() -> String {
     load_env_with_config(None)
 }
@@ -99,12 +101,11 @@ fn load_env_file_layered(
     if let Ok(iter) = dotenvy::from_path_iter(path) {
         let mut ok = true;
         for item in iter {
-            match item {
-                Ok((key, value)) => set_layered_env(key.trim(), value, original_env),
-                Err(_) => {
-                    ok = false;
-                    break;
-                }
+            if let Ok((key, value)) = item {
+                set_layered_env(key.trim(), value, original_env);
+            } else {
+                ok = false;
+                break;
             }
         }
         if ok {
@@ -134,7 +135,11 @@ fn load_env_file_layered(
         if (value.starts_with('"') && value.ends_with('"'))
             || (value.starts_with('\'') && value.ends_with('\''))
         {
-            value = value[1..value.len().saturating_sub(1)].to_string();
+            value = value
+                .chars()
+                .skip(1)
+                .take(value.chars().count().saturating_sub(2))
+                .collect();
         }
         set_layered_env(key, value, original_env);
         loaded = true;
@@ -152,7 +157,7 @@ where
     }
 }
 
-/// Initialize structured tracing based on RUST_LOG and record the env source.
+/// Initialize structured tracing based on `RUST_LOG` and record the env source.
 pub fn init_tracing_with_env_source(env_source: &str) {
     // Initialize tracing (respects RUST_LOG potentially provided by the env file)
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info,tower_http=info".into());
@@ -163,13 +168,14 @@ pub fn init_tracing_with_env_source(env_source: &str) {
     tracing::info!("Environment loaded from: {}", env_source);
 }
 
-/// Initialize dotenv and structured tracing based on RUST_LOG.
+/// Initialize dotenv and structured tracing based on `RUST_LOG`.
 pub fn init_tracing() {
     let env_source = load_env();
     init_tracing_with_env_source(&env_source);
 }
 
 /// Get the bind address for the HTTP server from env or default to 0.0.0.0:8088.
+#[must_use]
 pub fn env_bind_addr() -> String {
     std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8088".into())
 }
@@ -177,14 +183,18 @@ pub fn env_bind_addr() -> String {
 /// Upstream selection for the proxy:
 /// - Responses: talk to /v1/responses with Responses-shaped payload
 /// - Chat: talk to /v1/chat/completions with Chat-shaped payload (vLLM, Ollama, etc.)
+/// - Bedrock: use the legacy AWS Bedrock `InvokeModel` adapter
+/// - `BedrockMantle`: use the OpenAI-compatible Amazon Bedrock Mantle endpoint
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpstreamMode {
     Responses,
     Chat,
     Bedrock,
+    BedrockMantle,
 }
 
-/// Read ROUTIIUM_UPSTREAM_MODE from env ("responses" | "chat" | "bedrock"), default "responses".
+/// Read `ROUTIIUM_UPSTREAM_MODE` from env, defaulting to "responses".
+#[must_use]
 pub fn upstream_mode_from_env() -> UpstreamMode {
     match std::env::var("ROUTIIUM_UPSTREAM_MODE")
         .unwrap_or_default()
@@ -194,18 +204,30 @@ pub fn upstream_mode_from_env() -> UpstreamMode {
     {
         "chat" => UpstreamMode::Chat,
         "bedrock" => UpstreamMode::Bedrock,
+        "bedrock_mantle" | "bedrock-mantle" | "mantle" => UpstreamMode::BedrockMantle,
         _ => UpstreamMode::Responses,
     }
 }
 
+/// Build the OpenAI-compatible Bedrock Mantle base URL for the configured AWS region.
+#[must_use]
+pub fn bedrock_mantle_base_url() -> String {
+    let region = std::env::var("AWS_REGION")
+        .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+        .unwrap_or_else(|_| "us-east-1".to_string());
+    format!("https://bedrock-mantle.{region}.api.aws/openai/v1")
+}
+
 /// If mode == Chat and the given URL ends with "/responses", rewrite to "/chat/completions".
+#[must_use]
 pub fn rewrite_responses_url_for_mode(url: &str, mode: UpstreamMode) -> String {
-    if matches!(mode, UpstreamMode::Chat) && url.ends_with("/responses") {
-        let base = &url[..url.len() - "/responses".len()];
-        format!("{base}/chat/completions")
-    } else {
-        url.to_string()
+    if !matches!(mode, UpstreamMode::Chat) {
+        return url.to_string();
     }
+    let Some(base) = url.strip_suffix("/responses") else {
+        return url.to_string();
+    };
+    format!("{base}/chat/completions")
 }
 
 /// Shared application state used by the HTTP server and handlers.
@@ -213,7 +235,7 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub mcp_manager:
         Option<std::sync::Arc<tokio::sync::RwLock<crate::mcp_client::McpClientManager>>>,
-    /// Optional API key manager for inbound auth (generation/expiration/revocation handled in crate::auth)
+    /// Optional API key manager for inbound auth (generation/expiration/revocation handled in `crate::auth`)
     pub api_keys: Option<std::sync::Arc<crate::auth::ApiKeyManager>>,
     /// System prompt configuration with runtime reload support
     pub system_prompt_config:
@@ -238,7 +260,7 @@ pub struct AppState {
     pub router_client: Option<std::sync::Arc<dyn crate::router_client::RouterClient>>,
     /// Path to local router alias map configured via --router-config
     pub router_config_path: Option<String>,
-    /// Remote router URL configured via ROUTIIUM_ROUTER_URL
+    /// Remote router URL configured via `ROUTIIUM_ROUTER_URL`
     pub router_url: Option<String>,
     /// Whether strict router mode is enabled for status/reporting.
     pub router_strict: bool,
@@ -258,11 +280,12 @@ pub struct AppState {
 /// Build an HTTP client honoring proxy and timeout environment variables.
 ///
 /// Environment:
-/// - ROUTIIUM_NO_PROXY = 1|true|yes|on  -> disable all proxies
-/// - ROUTIIUM_PROXY_URL = <url>         -> proxy for all schemes
-/// - HTTP_PROXY / http_proxy                 -> HTTP proxy
-/// - HTTPS_PROXY / https_proxy               -> HTTPS proxy
-/// - ROUTIIUM_HTTP_TIMEOUT_SECONDS      -> overall request timeout (u64)
+/// - `ROUTIIUM_NO_PROXY` = 1|true|yes|on  -> disable all proxies
+/// - `ROUTIIUM_PROXY_URL` = <url>         -> proxy for all schemes
+/// - `HTTP_PROXY` / `http_proxy`                 -> HTTP proxy
+/// - `HTTPS_PROXY` / `https_proxy`               -> HTTPS proxy
+/// - `ROUTIIUM_HTTP_TIMEOUT_SECONDS`      -> overall request timeout (u64)
+#[must_use]
 pub fn build_http_client_from_env() -> reqwest::Client {
     let mut builder = reqwest::Client::builder();
 
@@ -364,7 +387,7 @@ impl Default for AppState {
 }
 
 impl AppState {
-    /// Create AppState with MCP manager
+    /// Create `AppState` with MCP manager
     pub fn with_mcp_manager(mcp_manager: crate::mcp_client::McpClientManager) -> Self {
         Self {
             http: build_http_client_from_env(),
@@ -409,8 +432,8 @@ impl AppState {
         }
     }
 
-    /// Create AppState with MCP manager wrapped in Arc
-    /// Create AppState with MCP manager Arc
+    /// Create `AppState` with MCP manager wrapped in Arc
+    /// Create `AppState` with MCP manager Arc
     pub fn with_mcp_manager_arc(
         mcp_manager: std::sync::Arc<tokio::sync::RwLock<crate::mcp_client::McpClientManager>>,
     ) -> Self {
@@ -456,7 +479,8 @@ impl AppState {
             runtime_config: None,
         }
     }
-    /// Read the OpenAI API key from environment if present. Optional for /proxy.
+    /// Read the `OpenAI` API key from environment if present. Optional for /proxy.
+    #[must_use]
     pub fn api_key(&self) -> String {
         std::env::var("OPENAI_API_KEY").unwrap_or_default()
     }
@@ -476,13 +500,19 @@ impl AppState {
     }
 }
 
-/// Build a JSON error response with the given HTTP status and message.
-pub fn error_response(status: StatusCode, msg: &str) -> HttpResponse {
-    let body = serde_json::json!({ "error": { "message": msg } });
-    HttpResponse::build(actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap()).json(body)
+fn actix_status(status: http::StatusCode) -> actix_web::http::StatusCode {
+    actix_web::http::StatusCode::from_u16(status.as_u16())
+        .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// Resolve the OpenAI base URL from environment or use the default public endpoint.
+/// Build a JSON error response with the given HTTP status and message.
+#[must_use]
+pub fn error_response(status: StatusCode, msg: &str) -> HttpResponse {
+    let body = serde_json::json!({ "error": { "message": msg } });
+    HttpResponse::build(actix_status(status)).json(body)
+}
+
+/// Resolve the `OpenAI` base URL from environment or use the default public endpoint.
 pub fn openai_base_url() -> String {
     match std::env::var("OPENAI_BASE_URL") {
         Ok(val) if !val.trim().is_empty() => val,
@@ -499,10 +529,11 @@ pub fn openai_base_url() -> String {
 /// Determine whether managed auth mode is enabled.
 ///
 /// Priority:
-/// 1) ROUTIIUM_MANAGED_MODE overrides when set.
+/// 1) `ROUTIIUM_MANAGED_MODE` overrides when set.
 ///    - truthy: 1, true, yes, on, managed, force
 ///    - falsy: 0, false, no, off, passthrough, disabled
-/// 2) Otherwise, enable managed mode if OPENAI_API_KEY is present.
+/// 2) Otherwise, enable managed mode if `OPENAI_API_KEY` is present.
+#[must_use]
 pub fn managed_mode_from_env() -> bool {
     if let Ok(raw) = std::env::var("ROUTIIUM_MANAGED_MODE") {
         let v = raw.trim().to_ascii_lowercase();
@@ -535,10 +566,13 @@ pub fn managed_mode_from_env() -> bool {
 ///
 /// Behavior:
 /// - Default: POST to `{base_url}/responses` with Responses-shaped payload.
-/// - If ROUTIIUM_UPSTREAM_MODE=chat: rewrite to `/chat/completions` and translate payload to Chat.
+/// - If `ROUTIIUM_UPSTREAM_MODE=chat`: rewrite to `/chat/completions` and translate payload to Chat.
 ///   This enables vLLM/Ollama upstreams while keeping a Responses surface.
 ///
 /// Note: For very long streams, consider a true streaming passthrough.
+///
+/// # Errors
+/// Returns an error when serializing the payload, applying authentication, or sending the request fails.
 pub async fn sse_proxy_stream(
     client: &reqwest::Client,
     url: &str,
@@ -548,12 +582,17 @@ pub async fn sse_proxy_stream(
     use futures_util::TryStreamExt;
     use http::header;
 
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|s| !s.is_empty());
-
     // Compute upstream URL and payload according to mode
     let mode = upstream_mode_from_env();
+    let api_key = if matches!(mode, UpstreamMode::BedrockMantle) {
+        std::env::var("AWS_BEARER_TOKEN_BEDROCK")
+            .ok()
+            .filter(|s| !s.is_empty())
+    } else {
+        std::env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+    };
     let real_url = rewrite_responses_url_for_mode(url, mode);
     let mut body = payload.clone();
     if matches!(mode, UpstreamMode::Chat) {
@@ -561,26 +600,27 @@ pub async fn sse_proxy_stream(
         body = crate::conversion::responses_json_to_chat_value(&body);
     }
 
+    let body_bytes = serde_json::to_vec(&body)?;
     let mut rb = client
         .post(&real_url)
         .header(header::ACCEPT, "text/event-stream")
         .header(header::CONTENT_TYPE, "application/json")
-        .header(header::CONNECTION, "close")
-        .json(&body);
-    if let Some(k) = api_key {
+        .header(header::CONNECTION, "close");
+    if matches!(mode, UpstreamMode::BedrockMantle) {
+        rb = crate::bedrock_mantle::apply_auth(rb, &real_url, &body_bytes, api_key.as_deref())
+            .await?;
+    } else if let Some(k) = api_key {
         if !k.is_empty() {
             rb = rb.bearer_auth(k);
         }
     }
+    rb = rb.body(body_bytes);
     let resp = rb.send().await?;
 
     let status = resp.status();
     if !status.is_success() {
         let bytes = resp.bytes().await.unwrap_or_default();
-        return Ok(HttpResponse::build(
-            actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap(),
-        )
-        .body(bytes));
+        return Ok(HttpResponse::build(actix_status(status)).body(bytes));
     }
 
     // Stream SSE passthrough without buffering the entire response.
@@ -607,15 +647,15 @@ pub async fn sse_proxy_stream(
         .streaming(stream))
 }
 
-/// Multi-backend routing based on model prefixes declared in ROUTIIUM_BACKENDS.
+/// Multi-backend routing based on model prefixes declared in `ROUTIIUM_BACKENDS`.
 /// Format (semicolon-separated rules; commas within a rule):
 ///   ROUTIIUM_BACKENDS="prefix=gpt-;base=https://api.openai.com/v1;key_env=OPENAI_API_KEY;mode=responses; prefix=claude-;base=https://api.anthropic.com/v1;key_env=ANTHROPIC_API_KEY;mode=responses; prefix=llama;base=http://localhost:11434/v1;mode=chat"
 ///
 /// Notes:
-/// - prefix: string matched with starts_with against the request's model
+/// - prefix: string matched with `starts_with` against the request's model
 /// - base: provider base URL (include /v1 if required by provider)
-/// - key_env (optional): env var name that holds the upstream API key for this provider
-/// - mode (optional): "responses" or "chat" (defaults to ROUTIIUM_UPSTREAM_MODE or "responses")
+/// - `key_env` (optional): env var name that holds the upstream API key for this provider
+/// - mode (optional): "responses" or "chat" (defaults to `ROUTIIUM_UPSTREAM_MODE` or "responses")
 #[derive(Debug, Clone)]
 struct BackendRule {
     prefix: String,
@@ -637,15 +677,15 @@ fn parse_mode(s: &str) -> Option<UpstreamMode> {
         "chat" => Some(UpstreamMode::Chat),
         "responses" => Some(UpstreamMode::Responses),
         "bedrock" => Some(UpstreamMode::Bedrock),
+        "bedrock_mantle" | "bedrock-mantle" | "mantle" => Some(UpstreamMode::BedrockMantle),
         _ => None,
     }
 }
 
 fn backends_from_env() -> Vec<BackendRule> {
     let mut out = Vec::new();
-    let raw = match std::env::var("ROUTIIUM_BACKENDS") {
-        Ok(s) => s,
-        Err(_) => return out,
+    let Ok(raw) = std::env::var("ROUTIIUM_BACKENDS") else {
+        return out;
     };
     let mut prefix: Option<String> = None;
     let mut base: Option<String> = None;
@@ -678,7 +718,7 @@ fn backends_from_env() -> Vec<BackendRule> {
     // 2) "prefix=a;base=...;mode=...; prefix=b;base=...;mode=..."
     for token in raw
         .split([',', ';'])
-        .map(|p| p.trim())
+        .map(str::trim)
         .filter(|p| !p.is_empty())
     {
         let mut it = token.splitn(2, '=');
@@ -728,8 +768,17 @@ fn resolve_backend_for_model(model: Option<&str>) -> Option<ResolvedBackend> {
 }
 
 /// Streaming helper that auto-resolves backend based on model from payload.
-/// Honors explicit bearer argument; if absent, uses provider-specific key_env or OPENAI_API_KEY.
-/// Endpoint path is selected by provider rule.mode (or ROUTIIUM_UPSTREAM_MODE).
+///
+/// Honors explicit bearer argument; if absent, uses provider-specific `key_env` or the configured
+/// default provider key.
+/// Endpoint path is selected by provider rule.mode (or `ROUTIIUM_UPSTREAM_MODE`).
+///
+/// # Errors
+/// Returns an error when serializing the payload, applying authentication, or sending the request fails.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Streaming proxy flow is kept together to preserve request/response sequencing."
+)]
 pub async fn sse_proxy_stream_with_bearer_routed(
     client: &reqwest::Client,
     payload: &serde_json::Value,
@@ -751,16 +800,25 @@ pub async fn sse_proxy_stream_with_bearer_routed(
     let (base_url, mode, key_env) = if let Some(r) = resolved {
         (r.base_url, r.mode, r.key_env)
     } else {
+        let mode = upstream_mode_from_env();
         (
-            openai_base_url(),
-            upstream_mode_from_env(),
-            Some("OPENAI_API_KEY".to_string()),
+            if matches!(mode, UpstreamMode::BedrockMantle) {
+                bedrock_mantle_base_url()
+            } else {
+                openai_base_url()
+            },
+            mode,
+            Some(if matches!(mode, UpstreamMode::BedrockMantle) {
+                "AWS_BEARER_TOKEN_BEDROCK".to_string()
+            } else {
+                "OPENAI_API_KEY".to_string()
+            }),
         )
     };
 
     // Build endpoint according to mode
     let endpoint = match mode {
-        UpstreamMode::Responses => "/responses",
+        UpstreamMode::Responses | UpstreamMode::BedrockMantle => "/responses",
         UpstreamMode::Chat => "/chat/completions",
         UpstreamMode::Bedrock => "/bedrock/invoke", // Not actually used for Bedrock (uses AWS SDK)
     };
@@ -793,30 +851,40 @@ pub async fn sse_proxy_stream_with_bearer_routed(
                 .filter(|s| !s.is_empty())
         })
         .or_else(|| {
-            std::env::var("OPENAI_API_KEY")
-                .ok()
-                .filter(|s| !s.is_empty())
+            if matches!(mode, UpstreamMode::BedrockMantle) {
+                None
+            } else {
+                std::env::var("OPENAI_API_KEY")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            }
         });
 
     // Build upstream request
+    let body_bytes = serde_json::to_vec(&body)?;
     let mut rb = client
         .post(&real_url)
         .header(header::ACCEPT, "text/event-stream")
         .header(header::CONTENT_TYPE, "application/json")
-        .header(header::CONNECTION, "close")
-        .json(&body);
-    if let Some(k) = &effective_bearer {
+        .header(header::CONNECTION, "close");
+    if matches!(mode, UpstreamMode::BedrockMantle) {
+        rb = crate::bedrock_mantle::apply_auth(
+            rb,
+            &real_url,
+            &body_bytes,
+            effective_bearer.as_deref(),
+        )
+        .await?;
+    } else if let Some(k) = &effective_bearer {
         rb = rb.bearer_auth(k);
     }
+    rb = rb.body(body_bytes);
     let resp = rb.send().await?;
 
     let status = resp.status();
     if !status.is_success() {
         let bytes = resp.bytes().await.unwrap_or_default();
-        return Ok(HttpResponse::build(
-            actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap(),
-        )
-        .body(bytes));
+        return Ok(HttpResponse::build(actix_status(status)).body(bytes));
     }
 
     // Stream SSE passthrough without buffering the entire response.
@@ -897,6 +965,9 @@ fn derive_input_string(payload: &serde_json::Value) -> String {
 /// - If 400 and the response body hints that 'input' is required, derive an 'input' string
 ///   from messages and retry once with that field added.
 /// - Returns the upstream response (first or retried).
+///
+/// # Errors
+/// Returns an error when cloning or sending either upstream request fails.
 pub async fn post_responses_with_input_retry(
     client: &reqwest::Client,
     url: &str,
@@ -916,14 +987,16 @@ pub async fn post_responses_with_input_retry(
     if let Some(key) = effective_bearer.clone() {
         req = req.bearer_auth(key);
     }
-    let first = req.try_clone().unwrap().json(payload).send().await?;
+    let first = req
+        .try_clone()
+        .ok_or_else(|| anyhow::anyhow!("failed to clone upstream request"))?
+        .json(payload)
+        .send()
+        .await?;
     let status = first.status();
     if status != http::StatusCode::BAD_REQUEST {
         let bytes = first.bytes().await.unwrap_or_default();
-        return Ok(HttpResponse::build(
-            actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap(),
-        )
-        .body(bytes));
+        return Ok(HttpResponse::build(actix_status(status)).body(bytes));
     }
     let body_bytes = first.bytes().await.unwrap_or_default();
     let body_text = String::from_utf8_lossy(&body_bytes);
@@ -932,10 +1005,7 @@ pub async fn post_responses_with_input_retry(
         || body_text.contains("\"input\"")
         || body_text.contains("Field required") && body_text.contains("input");
     if !needs_input {
-        return Ok(HttpResponse::build(
-            actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap(),
-        )
-        .body(body_bytes));
+        return Ok(HttpResponse::build(actix_status(status)).body(body_bytes));
     }
 
     // Retry with derived input injected (do not overwrite if already present).
@@ -957,13 +1027,13 @@ pub async fn post_responses_with_input_retry(
 
     let status2 = second.status();
     let bytes2 = second.bytes().await.unwrap_or_default();
-    Ok(
-        HttpResponse::build(actix_web::http::StatusCode::from_u16(status2.as_u16()).unwrap())
-            .body(bytes2),
-    )
+    Ok(HttpResponse::build(actix_status(status2)).body(bytes2))
 }
 
 /// Simple HTTP GET helper supporting optional Bearer auth and proxy (via provided client).
+///
+/// # Errors
+/// Returns an error when sending the upstream request fails.
 pub async fn http_get_with_bearer(
     client: &reqwest::Client,
     url: &str,
@@ -978,12 +1048,16 @@ pub async fn http_get_with_bearer(
     let resp = rb.send().await?;
     let status = resp.status();
     let bytes = resp.bytes().await.unwrap_or_default();
-    Ok(
-        HttpResponse::build(actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap())
-            .body(bytes),
-    )
+    Ok(HttpResponse::build(actix_status(status)).body(bytes))
 }
 
+///
+/// # Errors
+/// Returns an error when serializing the payload, applying authentication, or sending the request fails.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Streaming proxy flow is kept together to preserve request/response sequencing."
+)]
 pub async fn sse_proxy_stream_with_bearer(
     client: &reqwest::Client,
     url: &str,
@@ -1017,9 +1091,15 @@ pub async fn sse_proxy_stream_with_bearer(
             }
         })
         .or_else(|| {
-            std::env::var("OPENAI_API_KEY")
-                .ok()
-                .filter(|s| !s.is_empty())
+            if matches!(mode, UpstreamMode::BedrockMantle) {
+                std::env::var("AWS_BEARER_TOKEN_BEDROCK")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            } else {
+                std::env::var("OPENAI_API_KEY")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            }
         });
 
     let has_bearer = effective_bearer.is_some();
@@ -1028,19 +1108,7 @@ pub async fn sse_proxy_stream_with_bearer(
         "sse_proxy_stream_with_bearer: preparing upstream request"
     );
 
-    // Build upstream request (closure so we can retry easily)
-    let build_req = || {
-        let mut b = client
-            .post(&real_url)
-            .header(header::ACCEPT, "text/event-stream")
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(header::CONNECTION, "close")
-            .json(&body);
-        if let Some(k) = &effective_bearer {
-            b = b.bearer_auth(k);
-        }
-        b
-    };
+    let body_bytes = serde_json::to_vec(&body)?;
 
     let mut resp_opt: Option<reqwest::Response> = None;
     let mut last_err: Option<anyhow::Error> = None;
@@ -1048,7 +1116,23 @@ pub async fn sse_proxy_stream_with_bearer(
         if delay_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         }
-        match build_req().send().await {
+        let mut builder = client
+            .post(&real_url)
+            .header(header::ACCEPT, "text/event-stream")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONNECTION, "close");
+        if matches!(mode, UpstreamMode::BedrockMantle) {
+            builder = crate::bedrock_mantle::apply_auth(
+                builder,
+                &real_url,
+                &body_bytes,
+                effective_bearer.as_deref(),
+            )
+            .await?;
+        } else if let Some(k) = &effective_bearer {
+            builder = builder.bearer_auth(k);
+        }
+        match builder.body(body_bytes.clone()).send().await {
             Ok(r) => {
                 resp_opt = Some(r);
                 break;
@@ -1056,25 +1140,18 @@ pub async fn sse_proxy_stream_with_bearer(
             Err(e) => {
                 tracing::warn!(error=%e, attempt_delay_ms=%delay_ms, "sse upstream send attempt failed");
                 last_err = Some(anyhow::Error::new(e));
-                continue;
             }
         }
     }
-    let resp = match resp_opt {
-        Some(r) => r,
-        None => {
-            return Err(
-                last_err.unwrap_or_else(|| anyhow::anyhow!("upstream streaming request failed"))
-            );
-        }
+    let Some(resp) = resp_opt else {
+        return Err(
+            last_err.unwrap_or_else(|| anyhow::anyhow!("upstream streaming request failed"))
+        );
     };
     let status = resp.status();
     if !status.is_success() {
         let bytes = resp.bytes().await.unwrap_or_default();
-        return Ok(HttpResponse::build(
-            actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap(),
-        )
-        .body(bytes));
+        return Ok(HttpResponse::build(actix_status(status)).body(bytes));
     }
 
     // Stream SSE passthrough without buffering the entire response.
@@ -1104,11 +1181,11 @@ pub async fn sse_proxy_stream_with_bearer(
 /// Build a CORS configuration from environment variables for Actix-web.
 ///
 /// Environment variables:
-/// - CORS_ALLOWED_ORIGINS: "*" or comma-separated origins (e.g., "https://a.com, https://b.com")
-/// - CORS_ALLOWED_METHODS: "*" or comma-separated methods (e.g., "GET,POST,OPTIONS")
-/// - CORS_ALLOWED_HEADERS: "*" or comma-separated request header names
-/// - CORS_ALLOW_CREDENTIALS: enable with 1,true,yes,on
-/// - CORS_MAX_AGE: max age in seconds (usize)
+/// - `CORS_ALLOWED_ORIGINS`: "*" or comma-separated origins (e.g., "<https://a.com>, <https://b.com>")
+/// - `CORS_ALLOWED_METHODS`: "*" or comma-separated methods (e.g., "GET,POST,OPTIONS")
+/// - `CORS_ALLOWED_HEADERS`: "*" or comma-separated request header names
+/// - `CORS_ALLOW_CREDENTIALS`: enable with 1,true,yes,on
+/// - `CORS_MAX_AGE`: max age in seconds (usize)
 ///
 /// Defaults are same-origin only: when no CORS env vars are set, Routiium does not
 /// emit cross-origin allow headers. Set explicit origins for browser clients, or
@@ -1117,15 +1194,12 @@ pub fn cors_config_from_env() -> actix_cors::Cors {
     let mut cors = actix_cors::Cors::default();
 
     // Allowed origins
-    let allow_all = std::env::var("CORS_ALLOW_ALL")
-        .ok()
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false);
+    let allow_all = std::env::var("CORS_ALLOW_ALL").ok().is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    });
 
     if allow_all {
         cors = cors.allow_any_origin();
@@ -1240,12 +1314,16 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "Tests intentionally fail fast on invalid fixture setup."
+    )]
     async fn spawn_axum(app: Router) -> String {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test listener");
         let addr = listener.local_addr().expect("listener addr");
-        let base = format!("http://{}", addr);
+        let base = format!("http://{addr}");
         tokio::spawn(async move {
             let _ = axum::serve(listener, app.into_make_service()).await;
         });
@@ -1253,6 +1331,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "Tests intentionally fail fast on invalid fixture setup."
+    )]
     fn managed_mode_from_env_honors_override_and_fallback() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let _env = EnvGuard::new(&["ROUTIIUM_MANAGED_MODE", "OPENAI_API_KEY"]);
@@ -1275,6 +1357,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "Tests intentionally fail fast on invalid fixture setup."
+    )]
     fn upstream_mode_and_url_rewrite_behave_as_expected() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let _env = EnvGuard::new(&["ROUTIIUM_UPSTREAM_MODE"]);
@@ -1288,6 +1374,9 @@ mod tests {
         std::env::set_var("ROUTIIUM_UPSTREAM_MODE", "bedrock");
         assert_eq!(upstream_mode_from_env(), UpstreamMode::Bedrock);
 
+        std::env::set_var("ROUTIIUM_UPSTREAM_MODE", "bedrock_mantle");
+        assert_eq!(upstream_mode_from_env(), UpstreamMode::BedrockMantle);
+
         assert_eq!(
             rewrite_responses_url_for_mode("https://x/v1/responses", UpstreamMode::Chat),
             "https://x/v1/chat/completions"
@@ -1299,6 +1388,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "Tests intentionally fail fast on invalid fixture setup."
+    )]
     fn backends_parser_and_resolution_handle_multiple_rules() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let _env = EnvGuard::new(&["ROUTIIUM_BACKENDS", "ROUTIIUM_UPSTREAM_MODE"]);
@@ -1313,9 +1406,10 @@ mod tests {
 
         let rules = backends_from_env();
         assert_eq!(rules.len(), 3);
-        assert_eq!(rules[1].prefix, "vllm-");
-        assert_eq!(rules[1].key_env.as_deref(), Some("VLLM_API_KEY"));
-        assert_eq!(rules[1].mode, Some(UpstreamMode::Chat));
+        let vllm = rules.get(1).expect("second backend rule");
+        assert_eq!(vllm.prefix, "vllm-");
+        assert_eq!(vllm.key_env.as_deref(), Some("VLLM_API_KEY"));
+        assert_eq!(vllm.mode, Some(UpstreamMode::Chat));
 
         let resolved =
             resolve_backend_for_model_name("vllm-nemotron").expect("vllm backend should match");
@@ -1325,6 +1419,34 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "Tests intentionally fail fast on invalid fixture setup."
+    )]
+    fn bedrock_mantle_backend_resolves_openai_models() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _env = EnvGuard::new(&["ROUTIIUM_BACKENDS"]);
+
+        std::env::set_var(
+            "ROUTIIUM_BACKENDS",
+            "prefix=openai.gpt-5.6-,base=https://bedrock-mantle.us-east-1.api.aws/openai/v1,key_env=AWS_BEARER_TOKEN_BEDROCK,mode=bedrock_mantle",
+        );
+
+        let resolved = resolve_backend_for_model_name("openai.gpt-5.6-luna")
+            .expect("GPT-5.6 Luna should match the Bedrock Mantle route");
+        assert_eq!(
+            resolved.0,
+            "https://bedrock-mantle.us-east-1.api.aws/openai/v1"
+        );
+        assert_eq!(resolved.1.as_deref(), Some("AWS_BEARER_TOKEN_BEDROCK"));
+        assert_eq!(resolved.2, UpstreamMode::BedrockMantle);
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "Tests intentionally fail fast on invalid fixture setup."
+    )]
     fn backends_parser_drops_partial_fragments() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let _env = EnvGuard::new(&["ROUTIIUM_BACKENDS"]);
@@ -1335,8 +1457,8 @@ mod tests {
         );
         let rules = backends_from_env();
         assert_eq!(rules.len(), 2);
-        assert_eq!(rules[0].prefix, "good");
-        assert_eq!(rules[1].prefix, "ok");
+        assert_eq!(rules.first().map(|r| r.prefix.as_str()), Some("good"));
+        assert_eq!(rules.get(1).map(|r| r.prefix.as_str()), Some("ok"));
     }
 
     #[test]
@@ -1354,6 +1476,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "Tests intentionally fail fast on invalid fixture setup."
+    )]
     async fn post_responses_with_input_retry_retries_once_when_needed() {
         #[derive(Clone)]
         struct RetryState {
@@ -1392,7 +1518,7 @@ mod tests {
         let client = reqwest::Client::new();
         let resp = post_responses_with_input_retry(
             &client,
-            &format!("{}/responses", base),
+            &format!("{base}/responses"),
             &payload,
             Some("sk-test".to_string()),
         )
@@ -1403,10 +1529,14 @@ mod tests {
 
         let body = to_bytes(resp.into_body()).await.expect("body bytes");
         let body_json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
-        assert_eq!(body_json["input"], "hello retry");
+        assert_eq!(body_json.get("input"), Some(&json!("hello retry")));
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "Tests intentionally fail fast on invalid fixture setup."
+    )]
     async fn post_responses_with_input_retry_does_not_retry_for_other_400_errors() {
         #[derive(Clone)]
         struct RetryState {
@@ -1439,7 +1569,7 @@ mod tests {
         let client = reqwest::Client::new();
         let resp = post_responses_with_input_retry(
             &client,
-            &format!("{}/responses", base),
+            &format!("{base}/responses"),
             &payload,
             Some("sk-test".to_string()),
         )
@@ -1450,6 +1580,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "Tests intentionally fail fast on invalid fixture setup."
+    )]
     async fn http_get_with_bearer_forwards_authorization_header() {
         async fn handler(headers: HeaderMap) -> String {
             headers
@@ -1464,13 +1598,13 @@ mod tests {
 
         let resp = http_get_with_bearer(
             &reqwest::Client::new(),
-            &format!("{}/inspect", base),
+            &format!("{base}/inspect"),
             Some("token-123"),
         )
         .await
         .expect("get succeeds");
 
         let body = to_bytes(resp.into_body()).await.expect("body bytes");
-        assert_eq!(&body[..], b"Bearer token-123");
+        assert_eq!(body.as_ref(), b"Bearer token-123");
     }
 }

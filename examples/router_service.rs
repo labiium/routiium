@@ -147,6 +147,10 @@ struct RouterState {
 }
 
 impl RouterState {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Catalog fixture intentionally lists the complete example model catalog"
+    )]
     fn new() -> Self {
         // Build a simple model catalog
         let models = vec![
@@ -157,7 +161,7 @@ impl RouterState {
                 aliases: vec!["tier:T1".to_string(), "family:gpt-4o-mini".to_string()],
                 capabilities: Capabilities {
                     modalities: vec!["text".to_string(), "image".to_string()],
-                    context_tokens: Some(128000),
+                    context_tokens: Some(128_000),
                     tools: true,
                     json_mode: true,
                     prompt_cache: true,
@@ -206,7 +210,7 @@ impl RouterState {
                 aliases: vec!["tier:T2".to_string(), "family:gpt-4o".to_string()],
                 capabilities: Capabilities {
                     modalities: vec!["text".to_string(), "image".to_string()],
-                    context_tokens: Some(128000),
+                    context_tokens: Some(128_000),
                     tools: true,
                     json_mode: true,
                     prompt_cache: true,
@@ -317,19 +321,32 @@ impl RouterState {
     }
 
     fn next_route_id(&self) -> String {
-        let mut counter = self.route_counter.lock().unwrap();
+        let mut counter = self
+            .route_counter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let id = *counter;
-        *counter += 1;
-        format!("rte_{:016x}", id)
+        *counter = counter.saturating_add(1);
+        drop(counter);
+        format!("rte_{id:016x}")
     }
 
     fn policy_revision(&self) -> String {
-        let rev = self.catalog_revision.lock().unwrap();
-        format!("pol_v{}", *rev)
+        let rev = self
+            .catalog_revision
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let value = *rev;
+        drop(rev);
+        format!("pol_v{value}")
     }
 }
 
 /// GET /catalog/models - Return model catalog
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix HttpRequest is framework-owned and non-Send by design"
+)]
 async fn get_catalog(state: web::Data<RouterState>, req: HttpRequest) -> impl Responder {
     let start = std::time::Instant::now();
 
@@ -519,6 +536,10 @@ fn resolve_judge_target(catalog: &ModelCatalog, target: &str) -> Option<(String,
 }
 
 /// POST /route/plan - Make routing decision
+#[expect(
+    clippy::too_many_lines,
+    reason = "Example endpoint intentionally keeps the complete routing contract in one handler"
+)]
 async fn route_plan(state: web::Data<RouterState>, req: web::Json<RouteRequest>) -> impl Responder {
     let start = std::time::Instant::now();
     let route_req = req.into_inner();
@@ -624,10 +645,6 @@ async fn route_plan(state: web::Data<RouterState>, req: web::Json<RouteRequest>)
 
     // Build upstream config
     let (base_url, auth_env) = match provider.as_str() {
-        "openai" => (
-            "https://api.openai.com/v1".to_string(),
-            Some("OPENAI_API_KEY".to_string()),
-        ),
         "local-vllm" => ("http://localhost:8000/v1".to_string(), None),
         _ => (
             "https://api.openai.com/v1".to_string(),
@@ -642,38 +659,43 @@ async fn route_plan(state: web::Data<RouterState>, req: web::Json<RouteRequest>)
         } else {
             UpstreamMode::Responses
         },
-        model_id: model_id.clone(),
+        model_id,
         auth_env,
         headers: None,
     };
 
     // Calculate hints from catalog
-    let hints = if let Some(model) = &catalog_model {
-        let est_cost_micro = model
-            .cost
-            .input_per_million_micro
-            .zip(model.cost.output_per_million_micro)
-            .map(|(input_cost, output_cost)| {
-                let prompt_tokens = route_req.estimates.prompt_tokens.unwrap_or(1000) as u64;
-                let output_tokens = route_req.estimates.max_output_tokens.unwrap_or(500) as u64;
-                (prompt_tokens * input_cost + output_tokens * output_cost) / 1_000_000
-            });
+    let hints = catalog_model
+        .as_ref()
+        .map_or_else(RouteHints::default, |model| {
+            let est_cost_micro = model
+                .cost
+                .input_per_million_micro
+                .zip(model.cost.output_per_million_micro)
+                .map(|(input_cost, output_cost)| {
+                    let prompt_tokens =
+                        u64::from(route_req.estimates.prompt_tokens.unwrap_or(1000));
+                    let output_tokens =
+                        u64::from(route_req.estimates.max_output_tokens.unwrap_or(500));
+                    (prompt_tokens
+                        .saturating_mul(input_cost)
+                        .saturating_add(output_tokens.saturating_mul(output_cost)))
+                        / 1_000_000
+                });
 
-        RouteHints {
-            tier: model
-                .policy_tags
-                .iter()
-                .find(|t| t.starts_with('T'))
-                .cloned(),
-            est_cost_micro,
-            currency: Some(model.cost.currency.clone()),
-            est_latency_ms: model.slos.recent.as_ref().and_then(|r| r.p50_ms),
-            provider: Some(provider.clone()),
-            penalty: None,
-        }
-    } else {
-        RouteHints::default()
-    };
+            RouteHints {
+                tier: model
+                    .policy_tags
+                    .iter()
+                    .find(|t| t.starts_with('T'))
+                    .cloned(),
+                est_cost_micro,
+                currency: Some(model.cost.currency.clone()),
+                est_latency_ms: model.slos.recent.as_ref().and_then(|r| r.p50_ms),
+                provider: Some(provider),
+                penalty: None,
+            }
+        });
 
     // Add prompt overlay for educational contexts
     let prompt_overlays = if route_req.org.role.as_deref() == Some("student")
@@ -685,7 +707,7 @@ async fn route_plan(state: web::Data<RouterState>, req: web::Json<RouteRequest>)
         Some(PromptOverlays {
             system_overlay: Some(overlay_text.clone()),
             overlay_fingerprint: Some("sha256:edu_overlay_v1".to_string()),
-            overlay_size_bytes: Some(overlay_text.len() as u64),
+            overlay_size_bytes: Some(u64::try_from(overlay_text.len()).unwrap_or(u64::MAX)),
             max_overlay_bytes: Some(16 * 1024),
         })
     } else {
@@ -745,7 +767,7 @@ async fn route_plan(state: web::Data<RouterState>, req: web::Json<RouteRequest>)
             .content_attestation
             .as_ref()
             .and_then(|c| c.included.clone())
-            .or(Some("none".to_string())),
+            .or_else(|| Some("none".to_string())),
         judge,
     };
 
@@ -788,7 +810,7 @@ async fn route_plan(state: web::Data<RouterState>, req: web::Json<RouteRequest>)
                 JudgeMode::Enforce => "enforce",
             },
         ))
-        .insert_header(("X-Judge-Verdict", judge_decision.verdict.clone()))
+        .insert_header(("X-Judge-Verdict", judge_decision.verdict))
         .insert_header((
             "Router-Latency",
             format!("{}ms", start.elapsed().as_millis()),
@@ -809,14 +831,18 @@ async fn route_feedback(
     );
 
     // Store feedback
-    let mut log = state.feedback_log.lock().unwrap();
+    let mut log = state
+        .feedback_log
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     log.push(fb);
 
     // Keep only last 1000 entries
     let log_len = log.len();
     if log_len > 1000 {
-        log.drain(0..log_len - 1000);
+        log.drain(0..log_len.saturating_sub(1000));
     }
+    drop(log);
 
     HttpResponse::Ok().json(serde_json::json!({"status": "ok"}))
 }
@@ -832,24 +858,29 @@ async fn health() -> impl Responder {
 
 /// GET /stats - Router statistics
 async fn stats(state: web::Data<RouterState>) -> impl Responder {
-    let feedback_log = state.feedback_log.lock().unwrap();
+    let feedback_log = state
+        .feedback_log
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let total_requests = feedback_log.len();
     let successful = feedback_log.iter().filter(|f| f.success).count();
 
-    let avg_duration = if !feedback_log.is_empty() {
-        feedback_log
+    let avg_duration = if feedback_log.is_empty() {
+        0.0
+    } else {
+        let total = feedback_log
             .iter()
             .filter_map(|f| f.duration_ms)
-            .sum::<u64>() as f64
-            / feedback_log.len() as f64
-    } else {
-        0.0
+            .sum::<u64>();
+        let total = f64::from(u32::try_from(total).unwrap_or(u32::MAX));
+        total / f64::from(u32::try_from(feedback_log.len()).unwrap_or(u32::MAX))
     };
 
+    drop(feedback_log);
     HttpResponse::Ok().json(serde_json::json!({
         "total_requests": total_requests,
         "successful_requests": successful,
-        "failed_requests": total_requests - successful,
+        "failed_requests": total_requests.saturating_sub(successful),
         "avg_duration_ms": avg_duration,
         "catalog_revision": state.catalog.revision,
         "policy_revision": state.policy_revision(),

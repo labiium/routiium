@@ -52,6 +52,10 @@ where
     None
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix runtime future is intentionally non-Send on the single-threaded system runner"
+)]
 async fn dispatch(cli: Cli, env_source: Option<String>) -> anyhow::Result<()> {
     match cli
         .command
@@ -161,9 +165,7 @@ fn env_falsey_value(value: &str) -> bool {
 }
 
 fn embedded_router_enabled() -> bool {
-    env_string("ROUTIIUM_ROUTER_MODE")
-        .map(|value| !env_falsey_value(&value))
-        .unwrap_or(true)
+    env_string("ROUTIIUM_ROUTER_MODE").is_none_or(|value| !env_falsey_value(&value))
 }
 
 fn apply_yaml_server_env(config: &routiium::app_config::CompiledRuntimeConfig) {
@@ -204,6 +206,11 @@ fn apply_yaml_server_env(config: &routiium::app_config::CompiledRuntimeConfig) {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    clippy::future_not_send,
+    reason = "Actix server bootstrap coordinates the full runtime and must satisfy framework future bounds"
+)]
 async fn serve(args: ServeArgs) -> std::io::Result<()> {
     let runtime_config = RuntimeConfig::from_serve_args(args);
 
@@ -235,8 +242,15 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
         .keys_backend
         .as_deref()
         .and_then(ApiKeyManager::backend_from_arg_spec);
-    let api_keys = match backend_opt {
-        Some(backend) => match ApiKeyManager::from_backend(backend) {
+    let api_keys = backend_opt.map_or_else(
+        || match ApiKeyManager::new_default() {
+            Ok(mgr) => Some(Arc::new(mgr)),
+            Err(e) => {
+                tracing::warn!("Falling back to no API key manager: {}", e);
+                None
+            }
+        },
+        |backend| match ApiKeyManager::from_backend(backend) {
             Ok(mgr) => {
                 tracing::info!("API key backend initialized from CLI");
                 Some(Arc::new(mgr))
@@ -246,17 +260,7 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
                 None
             }
         },
-        None => {
-            // Env-based fallback (Redis URL -> Redis, else sled if available, else memory)
-            match ApiKeyManager::new_default() {
-                Ok(mgr) => Some(Arc::new(mgr)),
-                Err(e) => {
-                    tracing::warn!("Falling back to no API key manager: {}", e);
-                    None
-                }
-            }
-        }
-    };
+    );
     if routiium::util::managed_mode_from_env() && api_keys.is_none() {
         return Err(std::io::Error::other(
             "managed auth is enabled but the API key manager could not be initialized",
@@ -337,48 +341,60 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
 
     // Load system prompt configuration if provided
     let (system_prompt_config, system_prompt_config_path) =
-        if let Some(prompt_config_path) = system_prompt_config_arg.clone() {
-            tracing::info!(
-                "Loading system prompt configuration from: {}",
-                prompt_config_path
-            );
-            match routiium::system_prompt_config::SystemPromptConfig::load_from_file(
-                &prompt_config_path,
-            ) {
-                Ok(config) => {
-                    tracing::info!(
-                        "System prompt configuration loaded (enabled: {})",
-                        config.enabled
-                    );
-                    (
-                        Arc::new(tokio::sync::RwLock::new(config)),
-                        Some(prompt_config_path),
-                    )
+        system_prompt_config_arg.clone().map_or_else(
+            || {
+                tracing::info!("No system prompt config provided");
+                (
+                    Arc::new(tokio::sync::RwLock::new(
+                        routiium::system_prompt_config::SystemPromptConfig::empty(),
+                    )),
+                    None,
+                )
+            },
+            |prompt_config_path| {
+                tracing::info!(
+                    "Loading system prompt configuration from: {}",
+                    prompt_config_path
+                );
+                match routiium::system_prompt_config::SystemPromptConfig::load_from_file(
+                    &prompt_config_path,
+                ) {
+                    Ok(config) => {
+                        tracing::info!(
+                            "System prompt configuration loaded (enabled: {})",
+                            config.enabled
+                        );
+                        (
+                            Arc::new(tokio::sync::RwLock::new(config)),
+                            Some(prompt_config_path),
+                        )
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to load system prompt config: {}", e);
+                        tracing::warn!("Continuing with default (empty) system prompt config");
+                        (
+                            Arc::new(tokio::sync::RwLock::new(
+                                routiium::system_prompt_config::SystemPromptConfig::empty(),
+                            )),
+                            None,
+                        )
+                    }
                 }
-                Err(e) => {
-                    tracing::error!("Failed to load system prompt config: {}", e);
-                    tracing::warn!("Continuing with default (empty) system prompt config");
-                    (
-                        Arc::new(tokio::sync::RwLock::new(
-                            routiium::system_prompt_config::SystemPromptConfig::empty(),
-                        )),
-                        None,
-                    )
-                }
-            }
-        } else {
-            tracing::info!("No system prompt config provided");
+            },
+        );
+
+    // Load routing configuration if provided
+    let (routing_config, routing_config_path) = routing_config_arg.clone().map_or_else(
+        || {
+            tracing::info!("No routing config provided, using legacy ROUTIIUM_BACKENDS");
             (
                 Arc::new(tokio::sync::RwLock::new(
-                    routiium::system_prompt_config::SystemPromptConfig::empty(),
+                    routiium::routing_config::RoutingConfig::empty(),
                 )),
                 None,
             )
-        };
-
-    // Load routing configuration if provided
-    let (routing_config, routing_config_path) =
-        if let Some(routing_path) = routing_config_arg.clone() {
+        },
+        |routing_path| {
             tracing::info!("Loading routing configuration from: {}", routing_path);
             match routiium::routing_config::RoutingConfig::load_from_file(&routing_path) {
                 Ok(config) => {
@@ -403,15 +419,8 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
                     )
                 }
             }
-        } else {
-            tracing::info!("No routing config provided, using legacy ROUTIIUM_BACKENDS");
-            (
-                Arc::new(tokio::sync::RwLock::new(
-                    routiium::routing_config::RoutingConfig::empty(),
-                )),
-                None,
-            )
-        };
+        },
+    );
 
     // Load router configuration. Explicit local/remote routers retain precedence;
     // otherwise Routiium installs the embedded secure router by default so users
@@ -609,29 +618,32 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
 
     // Load pricing configuration
     let mut pricing_config_path_state = None;
-    let pricing = if let Ok(pricing_path) = env::var("ROUTIIUM_PRICING_CONFIG") {
-        let path = pricing_path.trim();
-        if !path.is_empty() {
-            tracing::info!("Loading pricing configuration from: {}", path);
-            match routiium::pricing::PricingConfig::load_from_file(path) {
-                Ok(config) => {
-                    tracing::info!("Pricing configuration loaded");
-                    pricing_config_path_state = Some(path.to_string());
-                    Arc::new(config)
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load pricing config: {}, using defaults", e);
-                    Arc::new(routiium::pricing::PricingConfig::default())
-                }
-            }
-        } else {
+    let pricing = env::var("ROUTIIUM_PRICING_CONFIG").ok().map_or_else(
+        || {
             tracing::info!("Using default OpenAI pricing");
             Arc::new(routiium::pricing::PricingConfig::default())
-        }
-    } else {
-        tracing::info!("Using default OpenAI pricing");
-        Arc::new(routiium::pricing::PricingConfig::default())
-    };
+        },
+        |pricing_path| {
+            let path = pricing_path.trim();
+            if path.is_empty() {
+                tracing::info!("Using default OpenAI pricing");
+                Arc::new(routiium::pricing::PricingConfig::default())
+            } else {
+                tracing::info!("Loading pricing configuration from: {}", path);
+                match routiium::pricing::PricingConfig::load_from_file(path) {
+                    Ok(config) => {
+                        tracing::info!("Pricing configuration loaded");
+                        pricing_config_path_state = Some(path.to_string());
+                        Arc::new(config)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to load pricing config: {}, using defaults", e);
+                        Arc::new(routiium::pricing::PricingConfig::default())
+                    }
+                }
+            }
+        },
+    );
 
     let app_state = AppState {
         http: build_http_client_from_env(),

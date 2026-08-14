@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-#![doc = r#"
+#![doc = r"
 Routiium
 
 Run an OpenAI-compatible LLM gateway for routing, safety policy, analytics, and provider proxying.
@@ -18,13 +18,14 @@ Modules
 - `util`: Shared helpers for tracing, environment parsing, and SSE utilities.
 
 Note: Keep gateway contracts and provider mappings aligned with upstream API changes.
-"#]
+"]
 
 pub mod analytics;
 pub mod analytics_middleware;
 pub mod app_config;
 pub mod auth;
 pub mod bedrock;
+pub mod bedrock_mantle;
 pub mod chat_history;
 pub mod chat_history_jsonl;
 pub mod chat_history_manager;

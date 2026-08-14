@@ -3,8 +3,10 @@ use crate::models::responses as resp;
 use serde_json::{Map, Value};
 
 /// Parse <thought> tags from content and extract reasoning text.
-/// Returns (actual_content, reasoning_text) where reasoning_text is the content
-/// inside <thought>...</thought> tags, and actual_content is everything else.
+///
+/// Returns (`actual_content`, `reasoning_text`) where `reasoning_text` is the content
+/// inside <thought>...</thought> tags, and `actual_content` is everything else.
+#[must_use]
 pub fn parse_thought_tags(content: &str) -> (String, Option<String>) {
     let mut actual_content = String::new();
     let mut reasoning_parts: Vec<String> = Vec::new();
@@ -12,21 +14,25 @@ pub fn parse_thought_tags(content: &str) -> (String, Option<String>) {
 
     while let Some(start_idx) = remaining.find("<thought>") {
         // Add content before <thought> to actual_content
-        actual_content.push_str(&remaining[..start_idx]);
+        actual_content.push_str(remaining.get(..start_idx).unwrap_or_default());
 
         // Find the closing tag
-        let after_start = &remaining[start_idx + 9..]; // 9 = len("<thought>")
+        let after_start = remaining
+            .get(start_idx.saturating_add(9)..)
+            .unwrap_or_default(); // 9 = len("<thought>")
         if let Some(end_idx) = after_start.find("</thought>") {
             // Extract reasoning content
-            let reasoning_content = &after_start[..end_idx];
+            let reasoning_content = after_start.get(..end_idx).unwrap_or_default();
             if !reasoning_content.is_empty() {
                 reasoning_parts.push(reasoning_content.to_string());
             }
             // Continue with content after </thought>
-            remaining = &after_start[end_idx + 10..]; // 10 = len("</thought>")
+            remaining = after_start
+                .get(end_idx.saturating_add(10)..)
+                .unwrap_or_default(); // 10 = len("</thought>")
         } else {
             // No closing tag found, treat rest as actual content
-            actual_content.push_str(&remaining[start_idx..]);
+            actual_content.push_str(remaining.get(start_idx..).unwrap_or_default());
             break;
         }
     }
@@ -50,11 +56,12 @@ pub fn parse_thought_tags(content: &str) -> (String, Option<String>) {
 /// Convert a Responses API response to a Chat Completions response.
 ///
 /// This conversion maps:
-/// - output_text → choices[0].message.content
-/// - usage.input_tokens → usage.prompt_tokens
-/// - usage.output_tokens → usage.completion_tokens
-/// - usage.reasoning_tokens → usage.reasoning_tokens (preserved)
+/// - `output_text` → choices[0].message.content
+/// - `usage.input_tokens` → `usage.prompt_tokens`
+/// - `usage.output_tokens` → `usage.completion_tokens`
+/// - `usage.reasoning_tokens` → `usage.reasoning_tokens` (preserved)
 /// - output array items → appropriate Chat format
+#[must_use]
 pub fn responses_to_chat_response(
     responses_response: &resp::ResponsesResponse,
 ) -> chat::ChatCompletionResponse {
@@ -117,8 +124,7 @@ pub fn responses_to_chat_response(
     // Parse <thought> tags to extract reasoning content
     let (actual_content, reasoning) = content
         .as_ref()
-        .map(|c| parse_thought_tags(c))
-        .unwrap_or_else(|| (String::new(), None));
+        .map_or_else(|| (String::new(), None), |c| parse_thought_tags(c));
 
     // Build the assistant message
     let message = chat::ChatResponseMessage {
@@ -169,6 +175,7 @@ pub fn responses_to_chat_response(
 /// Convert a Chat Completions response to a Responses API response.
 ///
 /// This is useful for testing round-trip conversions.
+#[must_use]
 pub fn chat_to_responses_response(
     chat_response: &chat::ChatCompletionResponse,
 ) -> resp::ResponsesResponse {
@@ -190,7 +197,7 @@ pub fn chat_to_responses_response(
         if let Some(ref tool_calls) = choice.message.tool_calls {
             for (idx, tool_call) in tool_calls.iter().enumerate() {
                 output_items.push(resp::OutputItem::ToolCall {
-                    id: format!("call-{}", idx),
+                    id: format!("call-{idx}"),
                     name: tool_call.function.name.clone(),
                     arguments: tool_call.function.arguments.clone(),
                     call_id: tool_call.id.clone(),
@@ -221,6 +228,7 @@ pub fn chat_to_responses_response(
 }
 
 /// Convert a Responses API streaming chunk to a Chat Completions chunk.
+#[must_use]
 pub fn responses_chunk_to_chat_chunk(
     responses_chunk: &resp::ResponsesChunk,
     is_first: bool,
@@ -238,7 +246,7 @@ pub fn responses_chunk_to_chat_chunk(
                     ..
                 } => {
                     tool_call_deltas.push(chat::ToolCallDelta {
-                        index: idx as u32,
+                        index: u32::try_from(idx).unwrap_or(u32::MAX),
                         id: Some(call_id.clone()),
                         call_type: Some("function".to_string()),
                         function: Some(chat::FunctionCallDelta {
@@ -302,6 +310,11 @@ pub fn responses_chunk_to_chat_chunk(
 // Existing Request Conversion Functions
 // ============================================================================
 
+#[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "request conversion keeps field mapping together"
+)]
 pub fn responses_json_to_chat_request(v: &serde_json::Value) -> chat::ChatCompletionRequest {
     let model = v
         .get("model")
@@ -327,7 +340,6 @@ pub fn responses_json_to_chat_request(v: &serde_json::Value) -> chat::ChatComple
             let role_str = m.get("role").and_then(|r| r.as_str()).unwrap_or("user");
             let role = match role_str {
                 "system" => chat::Role::System,
-                "user" => chat::Role::User,
                 "assistant" => chat::Role::Assistant,
                 "tool" => chat::Role::Tool,
                 "function" => chat::Role::Function,
@@ -337,11 +349,11 @@ pub fn responses_json_to_chat_request(v: &serde_json::Value) -> chat::ChatComple
             let name = m
                 .get("name")
                 .and_then(|n| n.as_str())
-                .map(|s| s.to_string());
+                .map(std::string::ToString::to_string);
             let tool_call_id = m
                 .get("tool_call_id")
                 .and_then(|n| n.as_str())
-                .map(|s| s.to_string());
+                .map(std::string::ToString::to_string);
             let tool_calls = m.get("tool_calls").and_then(|tc| {
                 tc.as_array().map(|arr| {
                     arr.iter()
@@ -362,15 +374,19 @@ pub fn responses_json_to_chat_request(v: &serde_json::Value) -> chat::ChatComple
     }
 
     // Decoding/sampling
-    let temperature = v.get("temperature").and_then(|x| x.as_f64());
-    let top_p = v.get("top_p").and_then(|x| x.as_f64());
+    let temperature = v.get("temperature").and_then(serde_json::Value::as_f64);
+    let top_p = v.get("top_p").and_then(serde_json::Value::as_f64);
     let max_tokens = v
         .get("max_output_tokens")
-        .and_then(|x| x.as_u64())
-        .map(|n| n as u32);
+        .and_then(serde_json::Value::as_u64)
+        .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
     let stop = v.get("stop").cloned();
-    let presence_penalty = v.get("presence_penalty").and_then(|x| x.as_f64());
-    let frequency_penalty = v.get("frequency_penalty").and_then(|x| x.as_f64());
+    let presence_penalty = v
+        .get("presence_penalty")
+        .and_then(serde_json::Value::as_f64);
+    let frequency_penalty = v
+        .get("frequency_penalty")
+        .and_then(serde_json::Value::as_f64);
     let logit_bias = v
         .get("logit_bias")
         .and_then(|lb| lb.as_object())
@@ -386,8 +402,11 @@ pub fn responses_json_to_chat_request(v: &serde_json::Value) -> chat::ChatComple
     let user = v
         .get("user")
         .and_then(|x| x.as_str())
-        .map(|s| s.to_string());
-    let n = v.get("n").and_then(|x| x.as_u64()).map(|u| u as u32);
+        .map(std::string::ToString::to_string);
+    let n = v
+        .get("n")
+        .and_then(serde_json::Value::as_u64)
+        .map(|u| u32::try_from(u).unwrap_or(u32::MAX));
 
     let extra_body = v.get("extra_body").cloned();
 
@@ -401,15 +420,15 @@ pub fn responses_json_to_chat_request(v: &serde_json::Value) -> chat::ChatComple
                         let name = fun
                             .get("name")
                             .and_then(|s| s.as_str())
-                            .map(|s| s.to_string())?;
+                            .map(std::string::ToString::to_string)?;
                         let description = fun
                             .get("description")
                             .and_then(|s| s.as_str())
-                            .map(|s| s.to_string());
+                            .map(std::string::ToString::to_string);
                         let parameters = fun
                             .get("parameters")
                             .cloned()
-                            .unwrap_or(serde_json::json!({}));
+                            .unwrap_or_else(|| serde_json::json!({}));
                         Some(chat::ToolDefinition::Function {
                             function: chat::FunctionDef {
                                 name,
@@ -449,7 +468,7 @@ pub fn responses_json_to_chat_request(v: &serde_json::Value) -> chat::ChatComple
         });
 
     // Streaming flag
-    let stream = v.get("stream").and_then(|x| x.as_bool());
+    let stream = v.get("stream").and_then(serde_json::Value::as_bool);
 
     chat::ChatCompletionRequest {
         model,
@@ -473,13 +492,6 @@ pub fn responses_json_to_chat_request(v: &serde_json::Value) -> chat::ChatComple
 }
 
 fn merge_response_extras_into_chat(src: &Value, dest: &mut Value) {
-    let Some(src_obj) = src.as_object() else {
-        return;
-    };
-    let Some(dest_obj) = dest.as_object_mut() else {
-        return;
-    };
-
     const EXCLUDED_KEYS: [&str; 19] = [
         "model",
         "messages",
@@ -501,6 +513,12 @@ fn merge_response_extras_into_chat(src: &Value, dest: &mut Value) {
         "conversation_id",
         "previous_response_id",
     ];
+    let Some(src_obj) = src.as_object() else {
+        return;
+    };
+    let Some(dest_obj) = dest.as_object_mut() else {
+        return;
+    };
 
     for (key, value) in src_obj {
         if dest_obj.contains_key(key) {
@@ -515,6 +533,7 @@ fn merge_response_extras_into_chat(src: &Value, dest: &mut Value) {
 
 /// Convert a Responses-shaped JSON payload into a Chat Completions JSON payload,
 /// preserving non-standard top-level fields for passthrough backends (e.g., vLLM).
+#[must_use]
 pub fn responses_json_to_chat_value(v: &Value) -> Value {
     let chat_req = responses_json_to_chat_request(v);
     let mut chat_val = serde_json::to_value(chat_req).unwrap_or_else(|_| Value::Object(Map::new()));
@@ -528,6 +547,10 @@ mod tests_responses_to_chat {
     use serde_json::json;
 
     #[test]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
     fn converts_responses_to_chat_basic() {
         let v = json!({
             "model": "gpt-4o-mini",
@@ -560,6 +583,10 @@ mod tests_responses_to_chat {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
     fn falls_back_to_input_messages() {
         let v = json!({
             "model": "gpt-4o-mini",
@@ -575,6 +602,14 @@ mod tests_responses_to_chat {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
     fn converts_multimodal_content() {
         use super::map_message_content;
 
@@ -611,6 +646,14 @@ mod tests_responses_to_chat {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
     fn converts_base64_image() {
         use super::map_message_content;
 
@@ -636,6 +679,14 @@ mod tests_responses_to_chat {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
     fn converts_multiple_images() {
         use super::map_message_content;
 
@@ -659,6 +710,14 @@ mod tests_responses_to_chat {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
     fn converts_image_without_detail() {
         use super::map_message_content;
 
@@ -682,6 +741,14 @@ mod tests_responses_to_chat {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
     fn preserves_unknown_content_types() {
         use super::map_message_content;
 
@@ -698,6 +765,10 @@ mod tests_responses_to_chat {
     }
 
     #[test]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
     fn handles_empty_content_array() {
         use super::map_message_content;
 
@@ -708,6 +779,14 @@ mod tests_responses_to_chat {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
     fn converts_vision_with_tools_request() {
         // Test full request conversion with both vision and tools
         let req = chat::ChatCompletionRequest {
@@ -765,6 +844,14 @@ mod tests_responses_to_chat {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
     fn converts_reasoning_model_multimodal() {
         // Test multimodal with reasoning models (o1, o3, gpt-5)
         let req = chat::ChatCompletionRequest {
@@ -808,14 +895,14 @@ mod tests_responses_to_chat {
     }
 }
 
-/// Convert an OpenAI Chat Completions request into a Responses API request (wrapping chat messages under `input.messages`).
+/// Convert an `OpenAI` Chat Completions request into a Responses API request (wrapping chat messages under `input.messages`).
 ///
 /// Mapping highlights:
 /// - messages: forwarded 1:1 under `input.messages` (Responses chat-form).
 ///   Role mapping: system|user|assistant|tool; legacy "function" is mapped to "tool".
-/// - max_tokens -> max_output_tokens (Responses naming).
-/// - tools (function) and tool_choice: forwarded preserving JSON schema.
-/// - response_format: forwarded as an object; `{ "type": <kind>, ...extras }`.
+/// - `max_tokens` -> `max_output_tokens` (Responses naming).
+/// - tools (function) and `tool_choice`: forwarded preserving JSON schema.
+/// - `response_format`: forwarded as an object; `{ "type": <kind>, ...extras }`.
 /// - stream: forwarded verbatim (used by the proxy to request SSE).
 /// - conversation: optional Responses-side conversation identifier for stateful calls.
 pub fn to_responses_request(
@@ -868,7 +955,7 @@ pub fn to_responses_request(
     }
 }
 
-/// Convert an OpenAI Chat Completions request into a Responses API request with MCP tools merged in.
+/// Convert an `OpenAI` Chat Completions request into a Responses API request with MCP tools merged in.
 pub async fn to_responses_request_with_mcp(
     src: &chat::ChatCompletionRequest,
     conversation: Option<String>,
@@ -905,7 +992,7 @@ pub async fn to_responses_request_with_mcp(
     request
 }
 
-/// Convert an OpenAI Chat Completions request with MCP tools and system prompt injection
+/// Convert an `OpenAI` Chat Completions request with MCP tools and system prompt injection
 pub async fn to_responses_request_with_mcp_and_prompt(
     src: &chat::ChatCompletionRequest,
     conversation: Option<String>,
@@ -969,7 +1056,7 @@ pub fn inject_system_prompt_chat(req: &mut chat::ChatCompletionRequest, prompt: 
                 .rposition(|m| matches!(m.role, chat::Role::System));
 
             if let Some(pos) = last_system_pos {
-                req.messages.insert(pos + 1, system_message);
+                req.messages.insert(pos.saturating_add(1), system_message);
             } else {
                 req.messages.push(system_message);
             }
@@ -1003,7 +1090,7 @@ pub fn inject_system_prompt(messages: &mut Vec<resp::ResponsesMessage>, prompt: 
             let last_system_pos = messages.iter().rposition(|m| m.role == "system");
 
             if let Some(pos) = last_system_pos {
-                messages.insert(pos + 1, system_message);
+                messages.insert(pos.saturating_add(1), system_message);
             } else {
                 messages.push(system_message);
             }
@@ -1069,9 +1156,6 @@ fn map_message_content(content: &serde_json::Value) -> serde_json::Value {
     use serde_json::{Map, Value};
 
     match content {
-        // Simple string content - pass through unchanged
-        Value::String(_) => content.clone(),
-
         // Array content - may need transformation for multimodal
         Value::Array(parts) => {
             let transformed_parts: Vec<Value> = parts
@@ -1134,19 +1218,19 @@ fn map_message_content(content: &serde_json::Value) -> serde_json::Value {
         }
 
         // Other types (null, object, numbers) - pass through unchanged
-        Value::Null => Value::Null,
-        _ => content.clone(),
+        Value::String(_) | Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => {
+            content.clone()
+        }
     }
 }
 
-fn role_to_string(role: &chat::Role) -> &'static str {
+const fn role_to_string(role: &chat::Role) -> &'static str {
     match role {
         chat::Role::System => "system",
         chat::Role::User => "user",
         chat::Role::Assistant => "assistant",
-        chat::Role::Tool => "tool",
         // Legacy Chat role; Responses expects "tool" for tool outputs.
-        chat::Role::Function => "tool",
+        chat::Role::Tool | chat::Role::Function => "tool",
     }
 }
 
@@ -1163,35 +1247,31 @@ fn map_tool(t: &chat::ToolDefinition) -> resp::ResponsesToolDefinition {
 fn map_tool_choice_for_responses(value: &serde_json::Value) -> serde_json::Value {
     use serde_json::{Map, Value};
 
-    match value {
-        Value::String(_) => value.clone(),
-        Value::Object(obj) => {
-            if let Some(Value::String(kind)) = obj.get("type") {
-                if kind == "function" {
-                    if let Some(function) = obj.get("function").and_then(|f| f.as_object()) {
-                        if let Some(Value::String(name)) = function.get("name") {
-                            let mut out = Map::new();
-                            out.insert("type".to_string(), Value::String("function".to_string()));
-                            out.insert("name".to_string(), Value::String(name.clone()));
-                            if let Some(arguments) = function.get("arguments") {
-                                out.insert("arguments".to_string(), arguments.clone());
-                            }
-                            return Value::Object(out);
+    if let Value::Object(obj) = value {
+        if let Some(Value::String(kind)) = obj.get("type") {
+            if kind == "function" {
+                if let Some(function) = obj.get("function").and_then(|f| f.as_object()) {
+                    if let Some(Value::String(name)) = function.get("name") {
+                        let mut out = Map::new();
+                        out.insert("type".to_string(), Value::String("function".to_string()));
+                        out.insert("name".to_string(), Value::String(name.clone()));
+                        if let Some(arguments) = function.get("arguments") {
+                            out.insert("arguments".to_string(), arguments.clone());
                         }
+                        return Value::Object(out);
                     }
                 }
             }
-            value.clone()
         }
-        _ => value.clone(),
     }
+    value.clone()
 }
 
 fn map_response_format(rf: &chat::ResponseFormat) -> Value {
     // Build an object: { "type": rf.kind, ...rf.extra } with "type" from kind
     let mut obj = Map::<String, Value>::new();
     obj.insert("type".to_string(), Value::String(rf.kind.clone()));
-    for (k, v) in rf.extra.iter() {
+    for (k, v) in &rf.extra {
         // Guard against accidental override of "type" inside extras.
         if k != "type" {
             obj.insert(k.clone(), v.clone());
@@ -1210,6 +1290,10 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
     fn maps_basic_fields() {
         let req = ChatCompletionRequest {
             model: "gpt-4o-mini".into(),
@@ -1259,6 +1343,22 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "fixture assertion uses panic for impossible enum branch"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "fixture asserts required response format"
+    )]
     fn maps_tools_and_response_format() {
         let mut extra = HashMap::new();
         extra.insert(
@@ -1327,6 +1427,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "fixture assertions establish required conversion output shape"
+    )]
     fn maps_function_role_to_tool() {
         let req = ChatCompletionRequest {
             model: "gpt-4o-mini".into(),

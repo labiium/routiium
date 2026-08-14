@@ -1,4 +1,4 @@
-/// Comprehensive conversion tests based on OpenAI Chat Completions and Responses API specification.
+/// Comprehensive conversion tests based on `OpenAI` Chat Completions and Responses API specification.
 ///
 /// This test suite validates 100% correctness of conversion including:
 /// - Request conversion (Chat → Responses)
@@ -23,6 +23,13 @@ use std::collections::HashMap;
 mod request_conversion {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_model_mapping() {
         let req = ChatCompletionRequest {
@@ -55,6 +62,13 @@ mod request_conversion {
         assert_eq!(out.model, "gpt-4o", "Model name must be preserved exactly");
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_messages_array_mapping() {
         let req = ChatCompletionRequest {
@@ -112,6 +126,13 @@ mod request_conversion {
         assert_eq!(out.messages[2].content, json!("Hello! How can I help?"));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_max_tokens_to_max_output_tokens() {
         let req = ChatCompletionRequest {
@@ -148,6 +169,13 @@ mod request_conversion {
         );
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_streaming_flag_preserved() {
         let test_cases = vec![
@@ -191,6 +219,13 @@ mod request_conversion {
         }
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_temperature_and_top_p_preserved() {
         let req = ChatCompletionRequest {
@@ -224,6 +259,13 @@ mod request_conversion {
         assert_eq!(out.top_p, Some(0.9));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_stop_sequences_string_and_array() {
         // Test single string stop
@@ -287,6 +329,13 @@ mod request_conversion {
         assert_eq!(out2.stop, Some(json!(["END", "STOP", "---"])));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_user_field_preserved() {
         let req = ChatCompletionRequest {
@@ -319,6 +368,13 @@ mod request_conversion {
         assert_eq!(out.user, Some("user-12345".into()));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_n_parameter_preserved() {
         let req = ChatCompletionRequest {
@@ -351,6 +407,13 @@ mod request_conversion {
         assert_eq!(out.n, Some(3));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_penalties_preserved() {
         let req = ChatCompletionRequest {
@@ -384,6 +447,13 @@ mod request_conversion {
         assert_eq!(out.frequency_penalty, Some(0.3));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_logit_bias_preserved() {
         let mut bias = HashMap::new();
@@ -428,6 +498,13 @@ mod request_conversion {
 mod role_mapping {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_all_role_mappings() {
         let roles = vec![
@@ -468,12 +545,18 @@ mod role_mapping {
             let out = to_responses_request(&req, None);
             assert_eq!(
                 out.messages[0].role, expected_responses_role,
-                "Role {:?} must map to {}",
-                chat_role, expected_responses_role
+                "Role {chat_role:?} must map to {expected_responses_role}"
             );
         }
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_function_role_converts_to_tool_with_metadata() {
         let req = ChatCompletionRequest {
@@ -508,6 +591,13 @@ mod role_mapping {
         assert_eq!(out.messages[0].tool_call_id, Some("call-abc123".into()));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_tool_message_metadata_preserved() {
         let req = ChatCompletionRequest {
@@ -549,6 +639,13 @@ mod role_mapping {
 mod tool_conversion {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_single_function_tool_conversion() {
         let req = ChatCompletionRequest {
@@ -615,6 +712,13 @@ mod tool_conversion {
         }
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_multiple_tools_conversion() {
         let req = ChatCompletionRequest {
@@ -680,6 +784,13 @@ mod tool_conversion {
         assert_eq!(names, vec!["search", "calculate", "weather"]);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_tool_choice_preserved() {
         let tool_choice_cases = vec![
@@ -732,8 +843,7 @@ mod tool_conversion {
                     let is_function = orig
                         .get("type")
                         .and_then(Value::as_str)
-                        .map(|s| s == "function")
-                        .unwrap_or(false);
+                        .is_some_and(|s| s == "function");
 
                     if is_function {
                         let function = orig
@@ -775,14 +885,20 @@ mod tool_conversion {
                         );
                     }
                 }
-                (expected, actual) => panic!(
-                    "Unexpected tool_choice mapping: {:?} -> {:?}",
-                    expected, actual
-                ),
+                (expected, actual) => {
+                    panic!("Unexpected tool_choice mapping: {expected:?} -> {actual:?}")
+                }
             }
         }
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_empty_tools_array_handling() {
         let req = ChatCompletionRequest {
@@ -818,6 +934,13 @@ mod tool_conversion {
         assert_eq!(out.tools.unwrap().len(), 0);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_complex_tool_parameters_schema() {
         let complex_schema = json!({
@@ -894,6 +1017,13 @@ mod tool_conversion {
 mod response_format {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_json_object_response_format() {
         let mut extra = HashMap::new();
@@ -947,6 +1077,13 @@ mod response_format {
         assert_eq!(rf["schema"]["type"], "object");
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_response_format_type_field_not_overridden() {
         let mut extra = HashMap::new();
@@ -991,6 +1128,13 @@ mod response_format {
         );
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_response_format_with_no_extras() {
         let req = ChatCompletionRequest {
@@ -1038,6 +1182,13 @@ mod response_format {
 mod multimodal_content {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_text_only_content() {
         let req = ChatCompletionRequest {
@@ -1070,6 +1221,13 @@ mod multimodal_content {
         assert_eq!(out.messages[0].content, json!("Simple text message"));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_multimodal_content_array() {
         let content = json!([
@@ -1090,7 +1248,7 @@ mod multimodal_content {
             model: "gpt-4o".into(),
             messages: vec![ChatMessage {
                 role: Role::User,
-                content: content.clone(),
+                content,
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
@@ -1131,6 +1289,13 @@ mod multimodal_content {
         assert_eq!(arr[1]["detail"], "high");
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_vision_url_format_conversion() {
         // Test that nested image_url.url is flattened to image_url in Responses API
@@ -1180,6 +1345,13 @@ mod multimodal_content {
         assert!(arr[0].get("image_url").unwrap().get("url").is_none());
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_base64_vision_content() {
         let content = json!([
@@ -1232,6 +1404,13 @@ mod multimodal_content {
             .starts_with("data:image/png;base64,"));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_mixed_content_messages() {
         let req = ChatCompletionRequest {
@@ -1286,6 +1465,13 @@ mod multimodal_content {
 mod edge_cases {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_empty_messages_array() {
         let req = ChatCompletionRequest {
@@ -1312,6 +1498,13 @@ mod edge_cases {
         assert_eq!(out.messages.len(), 0);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_null_content() {
         let req = ChatCompletionRequest {
@@ -1344,6 +1537,13 @@ mod edge_cases {
         assert_eq!(out.messages[0].content, json!(null));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_conversation_id_parameter() {
         let req = ChatCompletionRequest {
@@ -1379,6 +1579,13 @@ mod edge_cases {
         assert_eq!(out2.conversation, Some("conv-12345".into()));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_all_optional_fields_none() {
         let req = ChatCompletionRequest {
@@ -1424,6 +1631,13 @@ mod edge_cases {
         );
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_extreme_parameter_values() {
         let req = ChatCompletionRequest {
@@ -1461,6 +1675,13 @@ mod edge_cases {
         assert_eq!(out.n, Some(10));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_very_long_message_history() {
         let mut messages = Vec::new();
@@ -1503,7 +1724,7 @@ mod edge_cases {
 
         // Verify order is preserved
         for i in 0..100 {
-            assert_eq!(out.messages[i].content, json!(format!("Message {}", i)));
+            assert_eq!(out.messages[i].content, json!(format!("Message {i}")));
         }
     }
 }
@@ -1515,6 +1736,13 @@ mod edge_cases {
 mod serialization {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_responses_request_serializes_to_valid_json() {
         let req = ChatCompletionRequest {
@@ -1567,6 +1795,13 @@ mod serialization {
         assert_eq!(json["stream"], false);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_serialization_omits_none_fields() {
         let req = ChatCompletionRequest {
@@ -1614,6 +1849,13 @@ mod serialization {
         assert!(!obj.contains_key("stream"));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_top_level_messages_structure() {
         let req = ChatCompletionRequest {
@@ -1659,6 +1901,13 @@ mod response_conversion {
     use super::*;
     use routiium::conversion::responses_json_to_chat_request;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_basic_responses_to_chat_conversion() {
         let responses_json = json!({
@@ -1679,6 +1928,13 @@ mod response_conversion {
         assert_eq!(chat_req.temperature, Some(0.7));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_max_output_tokens_to_max_tokens() {
         let responses_json = json!({
@@ -1695,6 +1951,13 @@ mod response_conversion {
         );
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_all_role_mappings_responses_to_chat() {
         let responses_json = json!({
@@ -1718,6 +1981,13 @@ mod response_conversion {
         assert_eq!(chat_req.messages[3].tool_call_id, Some("call1".into()));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_tools_conversion_responses_to_chat() {
         let responses_json = json!({
@@ -1759,6 +2029,13 @@ mod response_conversion {
         );
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_response_format_conversion_responses_to_chat() {
         let responses_json = json!({
@@ -1778,6 +2055,13 @@ mod response_conversion {
         assert!(rf.extra.contains_key("schema"));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_fallback_to_input_messages() {
         let responses_json = json!({
@@ -1794,6 +2078,13 @@ mod response_conversion {
         assert_eq!(chat_req.messages[0].content, json!("From input.messages"));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_prefers_top_level_messages_over_input() {
         let responses_json = json!({
@@ -1817,6 +2108,13 @@ mod response_conversion {
         );
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_all_sampling_parameters_responses_to_chat() {
         let responses_json = json!({
@@ -1855,6 +2153,13 @@ mod round_trip {
     use super::*;
     use routiium::conversion::responses_json_to_chat_request;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_basic_round_trip() {
         let original = ChatCompletionRequest {
@@ -1913,6 +2218,13 @@ mod round_trip {
         assert_eq!(reconstructed.stream, original.stream);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_round_trip_with_tools() {
         let original = ChatCompletionRequest {
@@ -1966,6 +2278,13 @@ mod round_trip {
         assert_eq!(reconstructed.messages.len(), 1);
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_round_trip_multimodal_content() {
         let content = json!([
@@ -1977,7 +2296,7 @@ mod round_trip {
             model: "gpt-4o".into(),
             messages: vec![ChatMessage {
                 role: Role::User,
-                content: content.clone(),
+                content,
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
@@ -2027,6 +2346,13 @@ mod round_trip {
 mod reasoning_models {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_reasoning_model_identification() {
         let reasoning_models = vec!["o1-preview", "o1-mini", "o3-mini", "gpt-5", "gpt-5-turbo"];
@@ -2069,6 +2395,13 @@ mod reasoning_models {
         }
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_reasoning_model_supports_all_parameters() {
         let req = ChatCompletionRequest {
@@ -2124,6 +2457,13 @@ mod specification_compliance {
     use super::*;
 
     /// Test that messages array is preserved in order
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_message_order_preservation() {
         let messages = [
@@ -2140,7 +2480,6 @@ mod specification_compliance {
             .map(|(role_str, content)| {
                 let role = match *role_str {
                     "system" => Role::System,
-                    "user" => Role::User,
                     "assistant" => Role::Assistant,
                     _ => Role::User,
                 };
@@ -2184,6 +2523,13 @@ mod specification_compliance {
     }
 
     /// Test that no fields are dropped during conversion
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_no_field_loss() {
         let mut logit_bias = HashMap::new();
@@ -2234,6 +2580,13 @@ mod specification_compliance {
     }
 
     /// Test JSON Schema validation for structured outputs
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_json_schema_structured_output() {
         let schema = json!({
@@ -2294,6 +2647,13 @@ mod specification_compliance {
     }
 
     /// Test that conversation parameter enables stateful mode
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_conversation_stateful_mode() {
         let req = ChatCompletionRequest {
@@ -2335,6 +2695,13 @@ mod specification_compliance {
 mod vision_comprehensive {
     use super::*;
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_vision_with_multiple_tools() {
         // Matches Python test: test_responses_endpoint_vision_with_tools
@@ -2403,6 +2770,13 @@ mod vision_comprehensive {
         assert_eq!(out.tool_choice, Some(json!("auto")));
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_vision_streaming_request() {
         // Matches Python test: test_responses_endpoint_vision_streaming
@@ -2446,6 +2820,13 @@ mod vision_comprehensive {
         assert_eq!(arr[1]["type"], "input_image");
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_vision_with_reasoning_model() {
         // Test vision with reasoning models (gpt-5-nano, o1, etc.)
@@ -2489,6 +2870,13 @@ mod vision_comprehensive {
         assert_eq!(arr[1]["type"], "input_image");
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_multiple_images_in_single_message() {
         let req = ChatCompletionRequest {
@@ -2534,6 +2922,13 @@ mod vision_comprehensive {
         assert_eq!(arr[3]["type"], "input_text");
     }
 
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_vision_base64_with_tools() {
         let req = ChatCompletionRequest {
@@ -2599,6 +2994,13 @@ mod real_world_scenarios {
     use super::*;
 
     /// Test a complete function calling flow
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_complete_function_calling_flow() {
         let req = ChatCompletionRequest {
@@ -2673,6 +3075,13 @@ mod real_world_scenarios {
     }
 
     /// Test multimodal input with function calling
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_multimodal_with_tools() {
         let req = ChatCompletionRequest {
@@ -2717,6 +3126,13 @@ mod real_world_scenarios {
     }
 
     /// Test structured output with tools
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_structured_output_with_tools() {
         let mut extra = HashMap::new();
@@ -2777,6 +3193,13 @@ mod real_world_scenarios {
     }
 
     /// Test long conversation with alternating roles
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     #[test]
     fn test_long_conversation() {
         let mut messages = vec![ChatMessage {

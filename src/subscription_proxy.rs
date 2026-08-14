@@ -22,8 +22,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use crate::analytics::TokenUsage;
 use crate::util::AppState;
 
-static LOG_WRITE_LOCK: once_cell::sync::Lazy<Mutex<()>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(()));
+static LOG_WRITE_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,21 +32,21 @@ enum SubscriptionProvider {
 }
 
 impl SubscriptionProvider {
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::ClaudeCode => "claude_code",
             Self::Codex => "codex",
         }
     }
 
-    fn upstream_env(self) -> &'static str {
+    const fn upstream_env(self) -> &'static str {
         match self {
             Self::ClaudeCode => "ROUTIIUM_CLAUDE_SUBSCRIPTION_BASE_URL",
             Self::Codex => "ROUTIIUM_CODEX_SUBSCRIPTION_BASE_URL",
         }
     }
 
-    fn default_upstream(self) -> Option<&'static str> {
+    const fn default_upstream(self) -> Option<&'static str> {
         match self {
             Self::ClaudeCode => Some("https://api.anthropic.com"),
             // ChatGPT/Codex subscription endpoints are not a public Platform API
@@ -56,7 +55,7 @@ impl SubscriptionProvider {
         }
     }
 
-    fn suffix(self) -> &'static str {
+    const fn suffix(self) -> &'static str {
         match self {
             Self::ClaudeCode => "/v1/messages",
             Self::Codex => "/responses",
@@ -151,7 +150,7 @@ impl LogContext {
                 response_truncated,
             ),
             response_bytes: response_original_bytes,
-            duration_ms: self.started_at.elapsed().as_millis() as u64,
+            duration_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
             token_usage: extract_usage(response_body, self.stream),
             transport_error,
         };
@@ -191,12 +190,12 @@ impl Stream for LoggedResponseStream {
         match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(bytes))) => {
                 self.response_bytes = self.response_bytes.saturating_add(bytes.len());
-                let remaining = self
-                    .capture_limit
-                    .map(|limit| limit.saturating_sub(self.captured.len()))
-                    .unwrap_or(bytes.len());
+                let remaining = self.capture_limit.map_or(bytes.len(), |limit| {
+                    limit.saturating_sub(self.captured.len())
+                });
                 let take = remaining.min(bytes.len());
-                self.captured.extend_from_slice(&bytes[..take]);
+                self.captured
+                    .extend_from_slice(bytes.get(..take).unwrap_or_default());
                 self.truncated |= take < bytes.len();
                 Poll::Ready(Some(Ok(bytes)))
             }
@@ -222,6 +221,10 @@ impl Drop for LoggedResponseStream {
     }
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix handlers use the framework's request payload and response types"
+)]
 pub async fn claude_messages(
     state: web::Data<AppState>,
     request: HttpRequest,
@@ -234,6 +237,10 @@ pub async fn claude_messages(
     proxy_subscription(state, request, body, SubscriptionProvider::ClaudeCode).await
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix handlers use the framework's request payload and response types"
+)]
 pub async fn codex_responses(
     state: web::Data<AppState>,
     request: HttpRequest,
@@ -246,6 +253,10 @@ pub async fn codex_responses(
     proxy_subscription(state, request, body, SubscriptionProvider::Codex).await
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "Actix payload streams are framework-owned and not Send"
+)]
 async fn read_request_body(mut payload: web::Payload) -> Result<Bytes, HttpResponse> {
     let limit = std::env::var("ROUTIIUM_SUBSCRIPTION_MAX_REQUEST_BYTES")
         .ok()
@@ -272,6 +283,11 @@ async fn read_request_body(mut payload: web::Payload) -> Result<Bytes, HttpRespo
     Ok(body.freeze())
 }
 
+#[expect(
+    clippy::future_not_send,
+    clippy::too_many_lines,
+    reason = "Actix proxy handler preserves streaming request/response lifecycle"
+)]
 async fn proxy_subscription(
     state: web::Data<AppState>,
     request: HttpRequest,
@@ -365,8 +381,7 @@ async fn proxy_subscription(
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.to_ascii_lowercase().contains("text/event-stream"))
-        .unwrap_or(false);
+        .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"));
     let response_headers = safe_response_headers(upstream.headers());
     let mut builder = HttpResponse::build(
         actix_web::http::StatusCode::from_u16(status.as_u16())
@@ -537,7 +552,7 @@ fn safe_response_headers(headers: &reqwest::header::HeaderMap) -> BTreeMap<Strin
 fn capture_body(body: &[u8]) -> CapturedBody {
     let original_bytes = body.len();
     let (body, truncated) = match capture_limit() {
-        Some(limit) if body.len() > limit => (&body[..limit], true),
+        Some(limit) if body.len() > limit => (body.get(..limit).unwrap_or_default(), true),
         _ => (body, false),
     };
     capture_body_with_metadata(body, original_bytes, truncated)
@@ -545,20 +560,22 @@ fn capture_body(body: &[u8]) -> CapturedBody {
 
 fn capture_body_with_metadata(body: &[u8], original_bytes: usize, truncated: bool) -> CapturedBody {
     if let Ok(json) = serde_json::from_slice(body) {
-        CapturedBody {
+        return CapturedBody {
             format: "json",
             content: json,
             truncated,
             original_bytes,
-        }
-    } else if let Ok(text) = std::str::from_utf8(body) {
-        CapturedBody {
+        };
+    }
+    if let Ok(text) = std::str::from_utf8(body) {
+        return CapturedBody {
             format: "text",
             content: serde_json::Value::String(text.to_string()),
             truncated,
             original_bytes,
-        }
-    } else {
+        };
+    }
+    {
         use base64::Engine;
         CapturedBody {
             format: "base64",
@@ -630,7 +647,7 @@ fn usage_from_value(value: &serde_json::Value) -> Option<TokenUsage> {
         total_tokens: usage
             .get("total_tokens")
             .and_then(serde_json::Value::as_u64)
-            .unwrap_or(prompt_tokens + completion_tokens),
+            .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens)),
         cached_tokens,
         reasoning_tokens: usage
             .get("reasoning_tokens")
@@ -652,7 +669,11 @@ fn merge_usage(current: &mut Option<TokenUsage>, next: Option<TokenUsage>) {
         current.completion_tokens = current.completion_tokens.max(next.completion_tokens);
         current.total_tokens = current
             .total_tokens
-            .max(current.prompt_tokens + current.completion_tokens)
+            .max(
+                current
+                    .prompt_tokens
+                    .saturating_add(current.completion_tokens),
+            )
             .max(next.total_tokens);
         current.cached_tokens = match (current.cached_tokens, next.cached_tokens) {
             (Some(left), Some(right)) => Some(left.max(right)),
@@ -691,7 +712,7 @@ fn append_usage_record(record: &SubscriptionUsageRecord) -> Result<(), String> {
         .open(&path)
         .map_err(|error| format!("opening {path}: {error}"))?;
     file.write_all(&line)
-        .and_then(|_| file.write_all(b"\n"))
+        .and_then(|()| file.write_all(b"\n"))
         .map_err(|error| format!("writing {path}: {error}"))
 }
 
@@ -711,7 +732,8 @@ fn secret_fingerprint(namespace: &str, value: &str) -> String {
     hasher.update(namespace.as_bytes());
     hasher.update([0]);
     hasher.update(value.as_bytes());
-    format!("anon_{}", &hex::encode(hasher.finalize())[..24])
+    let encoded = hex::encode(hasher.finalize());
+    format!("anon_{}", encoded.get(..24).unwrap_or(&encoded))
 }
 
 fn sanitize_user_id(value: &str) -> String {
@@ -734,20 +756,25 @@ fn trim_ascii(bytes: &[u8]) -> &[u8] {
     let end = bytes
         .iter()
         .rposition(|byte| !byte.is_ascii_whitespace())
-        .map(|position| position + 1)
-        .unwrap_or(start);
-    &bytes[start..end]
+        .map_or(start, |position| position.saturating_add(1));
+    bytes.get(start..end).unwrap_or_default()
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "tests use assertions and fixed fixtures where failures should abort"
+)]
 mod tests {
     use super::*;
     use actix_web::{test as actix_test, App};
     use axum::{routing::post, Router};
     use tokio::net::TcpListener;
 
-    static TEST_ENV_LOCK: once_cell::sync::Lazy<tokio::sync::Mutex<()>> =
-        once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
+    static TEST_ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
     #[test]
     fn credential_fingerprint_is_stable_and_provider_scoped() {

@@ -32,12 +32,15 @@ fn default_injection_mode() -> String {
     "prepend".to_string()
 }
 
-fn default_enabled() -> bool {
+const fn default_enabled() -> bool {
     true
 }
 
 impl SystemPromptConfig {
     /// Load system prompt configuration from a JSON file
+    ///
+    /// # Errors
+    /// Returns an error when the file cannot be read or parsed.
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path.as_ref()).with_context(|| {
             format!(
@@ -46,14 +49,15 @@ impl SystemPromptConfig {
             )
         })?;
 
-        let config: SystemPromptConfig = serde_json::from_str(&content)
+        let config: Self = serde_json::from_str(&content)
             .with_context(|| "Failed to parse system prompt config JSON")?;
 
         Ok(config)
     }
 
     /// Get the appropriate system prompt for a given context
-    /// Priority: per_model > per_api > global
+    /// Priority: `per_model` > `per_api` > global
+    #[must_use]
     pub fn get_prompt(&self, model: Option<&str>, api: Option<&str>) -> Option<String> {
         if !self.enabled {
             return None;
@@ -78,6 +82,7 @@ impl SystemPromptConfig {
     }
 
     /// Create a default configuration with no prompts
+    #[must_use]
     pub fn empty() -> Self {
         Self {
             global: None,
@@ -90,6 +95,7 @@ impl SystemPromptConfig {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test fixtures are fixed")]
 mod tests {
     use super::*;
 
@@ -159,7 +165,7 @@ mod tests {
         );
 
         // Disabled config should return None
-        let mut disabled_config = config.clone();
+        let mut disabled_config = config;
         disabled_config.enabled = false;
         assert_eq!(
             disabled_config.get_prompt(Some("gpt-4"), Some("chat")),

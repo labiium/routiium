@@ -14,6 +14,7 @@ pub enum JudgeSelectorScope {
 }
 
 impl JudgeSelectorScope {
+    #[must_use]
     pub fn from_env_value(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "gate_all" | "gate-all" | "all" => Self::GateAll,
@@ -21,7 +22,8 @@ impl JudgeSelectorScope {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::BaselineAlways => "baseline_always",
             Self::GateAll => "gate_all",
@@ -38,6 +40,7 @@ pub enum JudgeSelectorAction {
 }
 
 impl JudgeSelectorAction {
+    #[must_use]
     pub fn from_env_value(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "skip" | "off" | "false" => Self::Skip,
@@ -46,7 +49,8 @@ impl JudgeSelectorAction {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Judge => "judge",
             Self::Skip => "skip",
@@ -64,6 +68,7 @@ pub enum JudgeSelectorOnError {
 }
 
 impl JudgeSelectorOnError {
+    #[must_use]
     pub fn from_env_value(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "skip" | "off" | "false" => Self::Skip,
@@ -90,6 +95,7 @@ pub struct JudgeSelectorConfig {
 }
 
 impl JudgeSelectorConfig {
+    #[must_use]
     pub fn from_policy_and_env(policy: Option<Self>) -> Option<Self> {
         let mut config = policy;
 
@@ -166,6 +172,7 @@ impl JudgeSelectorConfig {
         config
     }
 
+    #[must_use]
     pub fn scope(&self) -> JudgeSelectorScope {
         self.scope.unwrap_or(JudgeSelectorScope::BaselineAlways)
     }
@@ -242,7 +249,8 @@ pub struct JudgeSelectorDecision {
 }
 
 impl JudgeSelectorDecision {
-    pub fn should_judge(&self) -> bool {
+    #[must_use]
+    pub const fn should_judge(&self) -> bool {
         matches!(self.action, JudgeSelectorAction::Judge)
     }
 }
@@ -292,7 +300,7 @@ async fn try_evaluate_selector(
             let id = rule
                 .id
                 .clone()
-                .unwrap_or_else(|| format!("rule_{}", index + 1));
+                .unwrap_or_else(|| format!("rule_{}", index.saturating_add(1)));
             return Ok(JudgeSelectorDecision {
                 scope: config.scope(),
                 action: rule.action,
@@ -562,10 +570,20 @@ async fn embed_text(
         .map(|value| {
             value
                 .as_f64()
-                .map(|number| number as f32)
+                .map(narrow_embedding_value)
                 .ok_or_else(|| "embedding vector contained a non-number".to_string())
         })
         .collect()
+}
+
+// Embedding APIs return bounded float vectors; classifier math intentionally uses f32.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::as_conversions,
+    reason = "embedding API values are intentionally narrowed to classifier f32 precision"
+)]
+const fn narrow_embedding_value(number: f64) -> f32 {
+    number as f32
 }
 
 fn selector_embedding_input(req: &RouteRequest, request_text: &str) -> String {
@@ -616,15 +634,12 @@ fn split_list(value: &str) -> Vec<String> {
 }
 
 fn truthy_env(key: &str) -> bool {
-    std::env::var(key)
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    std::env::var(key).ok().is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn sanitize_reason(reason: &str) -> String {

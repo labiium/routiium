@@ -1,16 +1,23 @@
 //! AWS Bedrock integration module
 //!
-//! Provides conversion between OpenAI Chat Completions / Responses API formats
-//! and AWS Bedrock's InvokeModel API, with full support for:
+//! Provides conversion between `OpenAI` Chat Completions / Responses API formats
+//! and AWS Bedrock's `InvokeModel` API, with full support for:
 //! - Tool/function calling
 //! - Multimodal input (vision)
 //! - Streaming responses
-//! - AWS SigV4 authentication
+//! - AWS `SigV4` authentication
 
 use crate::models::chat;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+
+fn set_body_field(body: &mut Value, key: &str, value: Value) {
+    if let Some(object) = body.as_object_mut() {
+        object.insert(key.to_string(), value);
+    }
+}
 
 /// Bedrock model provider types
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,21 +32,24 @@ pub enum BedrockProvider {
 
 impl BedrockProvider {
     /// Detect provider from model ID
+    ///
+    /// # Errors
+    /// Returns an error when the model ID does not identify a supported provider.
     pub fn from_model_id(model_id: &str) -> Result<Self> {
         if model_id.starts_with("anthropic.") {
-            Ok(BedrockProvider::Anthropic)
+            Ok(Self::Anthropic)
         } else if model_id.starts_with("amazon.titan") {
-            Ok(BedrockProvider::AmazonTitan)
+            Ok(Self::AmazonTitan)
         } else if model_id.starts_with("ai21.") {
-            Ok(BedrockProvider::AI21)
+            Ok(Self::AI21)
         } else if model_id.starts_with("cohere.") {
-            Ok(BedrockProvider::Cohere)
+            Ok(Self::Cohere)
         } else if model_id.starts_with("meta.") {
-            Ok(BedrockProvider::Meta)
+            Ok(Self::Meta)
         } else if model_id.starts_with("mistral.") {
-            Ok(BedrockProvider::Mistral)
+            Ok(Self::Mistral)
         } else {
-            Err(anyhow!("Unknown Bedrock model provider: {}", model_id))
+            Err(anyhow!("Unknown Bedrock model provider: {model_id}"))
         }
     }
 }
@@ -101,7 +111,6 @@ fn normalize_tool_call_id(id: &str) -> String {
         return trimmed.to_string();
     }
 
-    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(trimmed.as_bytes());
     let digest = hasher.finalize();
@@ -110,6 +119,9 @@ fn normalize_tool_call_id(id: &str) -> String {
 }
 
 /// Convert Chat Completions request to Bedrock format
+///
+/// # Errors
+/// Returns an error when the model provider is unsupported or conversion fails.
 pub fn chat_to_bedrock_request(chat_req: &chat::ChatCompletionRequest) -> Result<(String, Value)> {
     let provider = BedrockProvider::from_model_id(&chat_req.model)?;
 
@@ -118,14 +130,16 @@ pub fn chat_to_bedrock_request(chat_req: &chat::ChatCompletionRequest) -> Result
         BedrockProvider::AmazonTitan => chat_to_titan_bedrock(chat_req),
         BedrockProvider::Meta => chat_to_meta_bedrock(chat_req),
         BedrockProvider::Mistral => chat_to_mistral_bedrock(chat_req),
-        _ => Err(anyhow!(
-            "Bedrock provider {:?} not yet implemented",
-            provider
-        )),
+        _ => Err(anyhow!("Bedrock provider {provider:?} not yet implemented")),
     }
 }
 
 /// Convert Chat Completions to Anthropic Claude format on Bedrock
+#[expect(
+    clippy::too_many_lines,
+    reason = "conversion keeps local protocol assembly together"
+)]
+#[expect(clippy::match_same_arms)]
 fn chat_to_anthropic_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(String, Value)> {
     let mut messages: Vec<BedrockMessage> = Vec::new();
     let mut system_prompt: Option<String> = None;
@@ -171,7 +185,7 @@ fn chat_to_anthropic_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(
                     messages.push(BedrockMessage {
                         role: "user".to_string(),
                         content: vec![BedrockContentPart::Text {
-                            text: format!("Function {} result: {}", name, content_text),
+                            text: format!("Function {name} result: {content_text}"),
                         }],
                     });
                 }
@@ -228,19 +242,19 @@ fn chat_to_anthropic_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(
     });
 
     if let Some(sys) = system_prompt {
-        body["system"] = json!(sys);
+        set_body_field(&mut body, "system", json!(sys));
     }
 
     if let Some(temp) = chat_req.temperature {
-        body["temperature"] = json!(temp);
+        set_body_field(&mut body, "temperature", json!(temp));
     }
 
     if let Some(top_p) = chat_req.top_p {
-        body["top_p"] = json!(top_p);
+        set_body_field(&mut body, "top_p", json!(top_p));
     }
 
     if let Some(stop) = &chat_req.stop {
-        body["stop_sequences"] = stop.clone();
+        set_body_field(&mut body, "stop_sequences", stop.clone());
     }
 
     // Convert tools to Bedrock format
@@ -257,7 +271,7 @@ fn chat_to_anthropic_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(
             .collect();
 
         if !bedrock_tools.is_empty() {
-            body["tools"] = json!(bedrock_tools);
+            set_body_field(&mut body, "tools", json!(bedrock_tools));
         }
 
         // Handle tool_choice
@@ -265,10 +279,10 @@ fn chat_to_anthropic_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(
             if let Some(choice_str) = tool_choice.as_str() {
                 match choice_str {
                     "auto" => {
-                        body["tool_choice"] = json!({"type": "auto"});
+                        set_body_field(&mut body, "tool_choice", json!({"type": "auto"}));
                     }
                     "any" | "required" => {
-                        body["tool_choice"] = json!({"type": "any"});
+                        set_body_field(&mut body, "tool_choice", json!({"type": "any"}));
                     }
                     "none" => {
                         // Don't include tool_choice
@@ -278,10 +292,14 @@ fn chat_to_anthropic_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(
             } else if let Some(obj) = tool_choice.as_object() {
                 if let Some(func) = obj.get("function").and_then(|f| f.as_object()) {
                     if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
-                        body["tool_choice"] = json!({
-                            "type": "tool",
-                            "name": name
-                        });
+                        set_body_field(
+                            &mut body,
+                            "tool_choice",
+                            json!({
+                                "type": "tool",
+                                "name": name
+                            }),
+                        );
                     }
                 }
             }
@@ -292,6 +310,10 @@ fn chat_to_anthropic_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(
 }
 
 /// Convert Chat Completions to Amazon Titan format
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "provider conversion shares fallible public conversion signature"
+)]
 fn chat_to_titan_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(String, Value)> {
     // Titan uses a simpler prompt-based format
     let mut prompt = String::new();
@@ -326,6 +348,11 @@ fn chat_to_titan_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(Stri
 }
 
 /// Convert Chat Completions to Meta Llama format
+#[expect(
+    clippy::format_push_string,
+    clippy::unnecessary_wraps,
+    reason = "provider prompt formatting is intentionally incremental"
+)]
 fn chat_to_meta_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(String, Value)> {
     let mut prompt = String::new();
 
@@ -333,17 +360,17 @@ fn chat_to_meta_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(Strin
         match msg.role {
             chat::Role::System => {
                 if let Some(text) = msg.content.as_str() {
-                    prompt.push_str(&format!("<s>[INST] <<SYS>>\n{}\n<</SYS>>\n\n", text));
+                    prompt.push_str(&format!("<s>[INST] <<SYS>>\n{text}\n<</SYS>>\n\n"));
                 }
             }
             chat::Role::User => {
                 if let Some(text) = msg.content.as_str() {
-                    prompt.push_str(&format!("{} [/INST]", text));
+                    prompt.push_str(&format!("{text} [/INST]"));
                 }
             }
             chat::Role::Assistant => {
                 if let Some(text) = msg.content.as_str() {
-                    prompt.push_str(&format!(" {} </s><s>[INST] ", text));
+                    prompt.push_str(&format!(" {text} </s><s>[INST] "));
                 }
             }
             _ => {}
@@ -361,6 +388,15 @@ fn chat_to_meta_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(Strin
 }
 
 /// Convert Chat Completions to Mistral format
+#[expect(
+    clippy::too_many_lines,
+    clippy::unnecessary_wraps,
+    reason = "provider payload conversion handles several wire variants"
+)]
+#[expect(
+    clippy::option_if_let_else,
+    reason = "protocol payload branch preserves absent content semantics"
+)]
 fn chat_to_mistral_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(String, Value)> {
     // Mistral uses a messages format similar to OpenAI/Anthropic
     let mut messages: Vec<Value> = Vec::new();
@@ -493,10 +529,7 @@ fn chat_to_mistral_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(St
                     "content": content
                 });
 
-                let has_tool_calls = tool_calls
-                    .as_ref()
-                    .map(|calls| !calls.is_empty())
-                    .unwrap_or(false);
+                let has_tool_calls = tool_calls.as_ref().is_some_and(|calls| !calls.is_empty());
                 let has_content = match message.get("content") {
                     Some(Value::String(text)) => !text.trim().is_empty(),
                     Some(Value::Array(items)) => !items.is_empty(),
@@ -526,7 +559,7 @@ fn chat_to_mistral_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(St
                     }));
                 }
             }
-            _ => {}
+            chat::Role::Function => {}
         }
     }
 
@@ -536,10 +569,10 @@ fn chat_to_mistral_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(St
     });
 
     if let Some(temp) = chat_req.temperature {
-        body["temperature"] = json!(temp);
+        set_body_field(&mut body, "temperature", json!(temp));
     }
     if let Some(top_p) = chat_req.top_p {
-        body["top_p"] = json!(top_p);
+        set_body_field(&mut body, "top_p", json!(top_p));
     }
 
     // Add tool definitions if present
@@ -557,7 +590,7 @@ fn chat_to_mistral_bedrock(chat_req: &chat::ChatCompletionRequest) -> Result<(St
             }));
         }
         if !mistral_tools.is_empty() {
-            body["tools"] = json!(mistral_tools);
+            set_body_field(&mut body, "tools", json!(mistral_tools));
         }
     }
 
@@ -599,7 +632,13 @@ fn convert_message_content(content: &Value) -> Result<Vec<BedrockContentPart>> {
     }
 }
 
-/// Convert image_url to Bedrock image format
+/// Convert `image_url` to Bedrock image format
+#[expect(
+    clippy::string_slice,
+    clippy::arithmetic_side_effects,
+    clippy::option_if_let_else,
+    reason = "validated data URL compatibility parsing"
+)]
 fn convert_image_url(image_url: &Value) -> Result<BedrockContentPart> {
     let url = if let Some(url_str) = image_url.get("url").and_then(|u| u.as_str()) {
         url_str
@@ -640,6 +679,7 @@ fn convert_image_url(image_url: &Value) -> Result<BedrockContentPart> {
 }
 
 /// Convert role to Bedrock role
+#[expect(clippy::match_same_arms)]
 fn role_to_bedrock_role(role: &chat::Role) -> String {
     match role {
         chat::Role::User => "user".to_string(),
@@ -651,6 +691,9 @@ fn role_to_bedrock_role(role: &chat::Role) -> String {
 }
 
 /// Convert Bedrock response to Chat Completions format
+///
+/// # Errors
+/// Returns an error when the model provider is unsupported or response conversion fails.
 pub fn bedrock_to_chat_response(
     bedrock_response: Value,
     model: &str,
@@ -665,14 +708,17 @@ pub fn bedrock_to_chat_response(
         BedrockProvider::AmazonTitan => bedrock_titan_to_chat(bedrock_response, model, request_id),
         BedrockProvider::Meta => bedrock_meta_to_chat(bedrock_response, model, request_id),
         BedrockProvider::Mistral => bedrock_mistral_to_chat(bedrock_response, model, request_id),
-        _ => Err(anyhow!(
-            "Bedrock provider {:?} not yet implemented",
-            provider
-        )),
+        _ => Err(anyhow!("Bedrock provider {provider:?} not yet implemented")),
     }
 }
 
 /// Convert Anthropic Bedrock response to Chat Completions
+#[expect(
+    clippy::option_if_let_else,
+    clippy::needless_pass_by_value,
+    reason = "wire-format defaults are intentionally conservative"
+)]
+#[expect(clippy::arithmetic_side_effects)]
 fn bedrock_anthropic_to_chat(
     response: Value,
     model: &str,
@@ -733,11 +779,11 @@ fn bedrock_anthropic_to_chat(
     let usage = if let Some(usage_obj) = response.get("usage") {
         let prompt_tokens = usage_obj
             .get("input_tokens")
-            .and_then(|t| t.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         let completion_tokens = usage_obj
             .get("output_tokens")
-            .and_then(|t| t.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
 
         Some(chat::ChatUsage {
@@ -774,7 +820,7 @@ fn bedrock_anthropic_to_chat(
         object: "chat.completion".to_string(),
         created: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .map_err(|e| anyhow!("system clock before Unix epoch: {e}"))?
             .as_secs(),
         model: model.to_string(),
         choices: vec![chat::ChatChoice {
@@ -789,6 +835,18 @@ fn bedrock_anthropic_to_chat(
 }
 
 /// Convert Titan Bedrock response to Chat Completions
+#[expect(
+    clippy::unnecessary_wraps,
+    clippy::needless_pass_by_value,
+    clippy::option_if_let_else,
+    clippy::unwrap_used,
+    reason = "provider adapters preserve shared response API and protocol defaults"
+)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::match_same_arms,
+    reason = "protocol compatibility branches and checked offsets"
+)]
 fn bedrock_titan_to_chat(
     response: Value,
     model: &str,
@@ -809,33 +867,34 @@ fn bedrock_titan_to_chat(
         .and_then(|arr| arr.first())
         .and_then(|item| item.get("completionReason"))
         .and_then(|r| r.as_str())
-        .map(|r| match r {
+        .map_or("stop", |r| match r {
             "FINISH" => "stop",
             "LENGTH" => "length",
             _ => "stop",
+        });
+
+    let usage = if let Some(input_tokens) = response
+        .get("inputTextTokenCount")
+        .and_then(serde_json::Value::as_u64)
+    {
+        let output_tokens = response
+            .get("results")
+            .and_then(|r| r.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|item| item.get("tokenCount"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+
+        Some(chat::ChatUsage {
+            prompt_tokens: input_tokens,
+            completion_tokens: output_tokens,
+            total_tokens: input_tokens + output_tokens,
+            reasoning_tokens: None,
+            cached_tokens: None,
         })
-        .unwrap_or("stop");
-
-    let usage =
-        if let Some(input_tokens) = response.get("inputTextTokenCount").and_then(|t| t.as_u64()) {
-            let output_tokens = response
-                .get("results")
-                .and_then(|r| r.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|item| item.get("tokenCount"))
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0);
-
-            Some(chat::ChatUsage {
-                prompt_tokens: input_tokens,
-                completion_tokens: output_tokens,
-                total_tokens: input_tokens + output_tokens,
-                reasoning_tokens: None,
-                cached_tokens: None,
-            })
-        } else {
-            None
-        };
+    } else {
+        None
+    };
 
     let id = request_id.unwrap_or_else(|| format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()));
 
@@ -865,6 +924,18 @@ fn bedrock_titan_to_chat(
 }
 
 /// Convert Meta Bedrock response to Chat Completions
+#[expect(
+    clippy::unnecessary_wraps,
+    clippy::needless_pass_by_value,
+    clippy::option_if_let_else,
+    clippy::unwrap_used,
+    reason = "provider adapters preserve shared response API and protocol defaults"
+)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::match_same_arms,
+    reason = "protocol compatibility branches and checked offsets"
+)]
 fn bedrock_meta_to_chat(
     response: Value,
     model: &str,
@@ -879,30 +950,31 @@ fn bedrock_meta_to_chat(
     let finish_reason = response
         .get("stop_reason")
         .and_then(|r| r.as_str())
-        .map(|r| match r {
+        .map_or("stop", |r| match r {
             "stop" => "stop",
             "length" => "length",
             _ => "stop",
+        });
+
+    let usage = if let Some(prompt_tokens) = response
+        .get("prompt_token_count")
+        .and_then(serde_json::Value::as_u64)
+    {
+        let completion_tokens = response
+            .get("generation_token_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+
+        Some(chat::ChatUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+            reasoning_tokens: None,
+            cached_tokens: None,
         })
-        .unwrap_or("stop");
-
-    let usage =
-        if let Some(prompt_tokens) = response.get("prompt_token_count").and_then(|t| t.as_u64()) {
-            let completion_tokens = response
-                .get("generation_token_count")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0);
-
-            Some(chat::ChatUsage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
-                reasoning_tokens: None,
-                cached_tokens: None,
-            })
-        } else {
-            None
-        };
+    } else {
+        None
+    };
 
     let id = request_id.unwrap_or_else(|| format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()));
 
@@ -932,6 +1004,19 @@ fn bedrock_meta_to_chat(
 }
 
 /// Convert Mistral Bedrock response to Chat Completions
+#[expect(
+    clippy::too_many_lines,
+    clippy::needless_pass_by_value,
+    clippy::option_if_let_else,
+    clippy::unwrap_used,
+    clippy::or_fun_call,
+    reason = "provider adapter handles multiple Mistral wire variants"
+)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::match_same_arms,
+    reason = "protocol compatibility branches and checked offsets"
+)]
 fn bedrock_mistral_to_chat(
     response: Value,
     model: &str,
@@ -940,7 +1025,7 @@ fn bedrock_mistral_to_chat(
     // Debug: Log raw Bedrock response for Mistral models
     tracing::debug!(
         "Raw Mistral Bedrock response: {}",
-        serde_json::to_string_pretty(&response).unwrap_or_else(|_| format!("{:?}", response))
+        serde_json::to_string_pretty(&response).unwrap_or_else(|_| format!("{response:?}"))
     );
 
     if let Some(output) = response.get("Output").and_then(|o| o.as_object()) {
@@ -962,21 +1047,21 @@ fn bedrock_mistral_to_chat(
                 let content = message
                     .get("content")
                     .and_then(|c| c.as_str())
-                    .map(|s| s.to_string());
+                    .map(std::string::ToString::to_string);
 
                 let finish_reason = first_choice
                     .get("finish_reason")
                     .and_then(|f| f.as_str())
-                    .map(|s| s.to_string());
+                    .map(std::string::ToString::to_string);
 
                 let usage = if let Some(usage_obj) = response.get("usage") {
                     let prompt_tokens = usage_obj
                         .get("prompt_tokens")
-                        .and_then(|t| t.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     let completion_tokens = usage_obj
                         .get("completion_tokens")
-                        .and_then(|t| t.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
 
                     Some(chat::ChatUsage {
@@ -991,11 +1076,10 @@ fn bedrock_mistral_to_chat(
                 };
 
                 let id = request_id.unwrap_or_else(|| {
-                    response
-                        .get("id")
-                        .and_then(|i| i.as_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()))
+                    response.get("id").and_then(|i| i.as_str()).map_or_else(
+                        || format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()),
+                        std::string::ToString::to_string,
+                    )
                 });
 
                 return Ok(chat::ChatCompletionResponse {
@@ -1003,7 +1087,7 @@ fn bedrock_mistral_to_chat(
                     object: "chat.completion".to_string(),
                     created: response
                         .get("created")
-                        .and_then(|c| c.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or_else(|| {
                             std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -1198,12 +1282,12 @@ fn bedrock_mistral_to_chat(
         let prompt_tokens = usage_obj
             .get("prompt_tokens")
             .or_else(|| usage_obj.get("input_tokens"))
-            .and_then(|t| t.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         let completion_tokens = usage_obj
             .get("completion_tokens")
             .or_else(|| usage_obj.get("output_tokens"))
-            .and_then(|t| t.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
 
         Some(chat::ChatUsage {
@@ -1277,6 +1361,7 @@ where
 
 impl AwsConfig {
     /// Load AWS config from environment variables
+    #[must_use]
     pub fn from_env() -> Self {
         Self {
             region: std::env::var("AWS_REGION")
@@ -1289,10 +1374,9 @@ impl AwsConfig {
     }
 
     /// Get region from optional override or config
+    #[must_use]
     pub fn get_region(&self, override_region: Option<&str>) -> String {
-        override_region
-            .map(|r| r.to_string())
-            .unwrap_or_else(|| self.region.clone())
+        override_region.map_or_else(|| self.region.clone(), std::string::ToString::to_string)
     }
 }
 
@@ -1303,17 +1387,18 @@ impl AwsConfig {
 ///
 /// This is the recommended way to call Bedrock as it handles all AWS authentication
 /// and signing automatically.
+///
+/// # Errors
+/// Returns an error when request serialization, invocation, or response decoding fails.
 pub async fn invoke_bedrock_model(model_id: &str, body: Value, region: &str) -> Result<Value> {
     use aws_config::BehaviorVersion;
     use aws_sdk_bedrockruntime::config::Region;
     use aws_sdk_bedrockruntime::primitives::Blob;
 
-    // Load AWS SDK config
     let sdk_config = aws_config::defaults(BehaviorVersion::latest())
         .region(Region::new(region.to_string()))
         .load()
         .await;
-
     let client = aws_sdk_bedrockruntime::Client::new(&sdk_config);
 
     // Convert JSON body to bytes
@@ -1330,7 +1415,7 @@ pub async fn invoke_bedrock_model(model_id: &str, body: Value, region: &str) -> 
         .await
         .map_err(|e| {
             log_bedrock_error("invoke_model", model_id, region, &e);
-            anyhow!("Bedrock invocation failed: {}", e)
+            anyhow!("Bedrock invocation failed: {e}")
         })?;
 
     // Parse response body
@@ -1350,6 +1435,13 @@ pub struct BedrockStreamEvent {
 /// Invoke Bedrock model with streaming using AWS SDK
 ///
 /// Returns a stream of events that can be converted to SSE format
+///
+/// # Errors
+/// Returns an error when request serialization or stream initialization fails.
+#[expect(
+    clippy::too_many_lines,
+    reason = "stream adapter keeps event parsing state local"
+)]
 pub async fn invoke_bedrock_model_streaming(
     model_id: &str,
     body: Value,
@@ -1385,7 +1477,7 @@ pub async fn invoke_bedrock_model_streaming(
         .await
         .map_err(|e| {
             log_bedrock_error("invoke_model_streaming", model_id, region, &e);
-            anyhow!("Bedrock streaming invocation failed: {}", e)
+            anyhow!("Bedrock streaming invocation failed: {e}")
         })?;
 
     // Get the event stream
@@ -1422,118 +1514,115 @@ pub async fn invoke_bedrock_model_streaming(
                 Ok(Some(event)) => {
                     use aws_sdk_bedrockruntime::types::ResponseStream;
 
-                    match event {
-                        ResponseStream::Chunk(chunk) => {
-                            if let Some(bytes) = chunk.bytes() {
-                                if debug_stream && debug_stream_verbose {
-                                    let raw = String::from_utf8_lossy(bytes.as_ref());
-                                    let prefix: String = raw.chars().take(raw_log_chars).collect();
-                                    let suffix: String = raw
-                                        .chars()
-                                        .rev()
-                                        .take(raw_log_chars)
-                                        .collect::<String>()
-                                        .chars()
-                                        .rev()
-                                        .collect();
-                                    tracing::info!(
-                                        target: "routiium::bedrock_stream",
-                                        model_id = model_id_owned,
-                                        region = region_owned,
-                                        bytes_len = bytes.as_ref().len(),
-                                        raw_prefix = %prefix,
-                                        raw_suffix = %suffix,
-                                        "Bedrock stream raw bytes"
-                                    );
-                                }
-                                buffer.extend_from_slice(bytes.as_ref());
-                                if buffer.len() > max_buffer_bytes {
-                                    if debug_stream {
-                                        tracing::warn!(
-                                            target: "routiium::bedrock_stream",
-                                            model_id = model_id_owned,
-                                            region = region_owned,
-                                            bytes_len = buffer.len(),
-                                            max_buffer_bytes,
-                                            "Bedrock stream buffer exceeded limit; clearing"
-                                        );
-                                    }
-                                    buffer.clear();
-                                    continue;
-                                }
-
-                                let mut last_offset = 0usize;
-                                let mut had_error = false;
-                                let mut iter = serde_json::Deserializer::from_slice(buffer.as_slice())
-                                    .into_iter::<Value>();
-                                while let Some(value) = iter.next() {
-                                    match value {
-                                        Ok(chunk_json) => {
-                                            last_offset = iter.byte_offset();
-                                            if debug_stream {
-                                                tracing::info!(
-                                                    target: "routiium::bedrock_stream",
-                                                    model_id = model_id_owned,
-                                                    region = region_owned,
-                                                    chunk = %chunk_json,
-                                                    "Bedrock stream chunk"
-                                                );
-                                            }
-                                            yield Ok(BedrockStreamEvent {
-                                                chunk: Some(chunk_json),
-                                                done: false,
-                                            });
-                                        }
-                                        Err(err) => {
-                                            if err.is_eof() {
-                                                break;
-                                            }
-                                            had_error = true;
-                                            if debug_stream {
-                                                let raw = String::from_utf8_lossy(buffer.as_slice());
-                                                let prefix: String = raw.chars().take(200).collect();
-                                                let suffix: String = raw
-                                                    .chars()
-                                                    .rev()
-                                                    .take(200)
-                                                    .collect::<String>()
-                                                    .chars()
-                                                    .rev()
-                                                    .collect();
-                                                tracing::warn!(
-                                                    target: "routiium::bedrock_stream",
-                                                    model_id = model_id_owned,
-                                                    region = region_owned,
-                                                    bytes_len = buffer.len(),
-                                                    error = %err,
-                                                    raw_prefix = %prefix,
-                                                    raw_suffix = %suffix,
-                                                    "Bedrock stream JSON parse error"
-                                                );
-                                            }
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                if last_offset > 0 {
-                                    buffer.drain(0..last_offset);
-                                }
-                                if had_error {
-                                    buffer.clear();
-                                }
-                            } else if debug_stream {
-                                tracing::warn!(
+                    if let ResponseStream::Chunk(chunk) = event {
+                        if let Some(bytes) = chunk.bytes() {
+                            if debug_stream && debug_stream_verbose {
+                                let raw = String::from_utf8_lossy(bytes.as_ref());
+                                let prefix: String = raw.chars().take(raw_log_chars).collect();
+                                let suffix: String = raw
+                                    .chars()
+                                    .rev()
+                                    .take(raw_log_chars)
+                                    .collect::<String>()
+                                    .chars()
+                                    .rev()
+                                    .collect();
+                                tracing::info!(
                                     target: "routiium::bedrock_stream",
                                     model_id = model_id_owned,
                                     region = region_owned,
-                                    "Bedrock stream chunk had no bytes"
+                                    bytes_len = bytes.as_ref().len(),
+                                    raw_prefix = %prefix,
+                                    raw_suffix = %suffix,
+                                    "Bedrock stream raw bytes"
                                 );
                             }
+                            buffer.extend_from_slice(bytes.as_ref());
+                            if buffer.len() > max_buffer_bytes {
+                                if debug_stream {
+                                    tracing::warn!(
+                                        target: "routiium::bedrock_stream",
+                                        model_id = model_id_owned,
+                                        region = region_owned,
+                                        bytes_len = buffer.len(),
+                                        max_buffer_bytes,
+                                        "Bedrock stream buffer exceeded limit; clearing"
+                                    );
+                                }
+                                buffer.clear();
+                                continue;
+                            }
+
+                            let mut last_offset = 0usize;
+                            let mut had_error = false;
+                            let mut iter = serde_json::Deserializer::from_slice(buffer.as_slice())
+                                .into_iter::<Value>();
+                            while let Some(value) = iter.next() {
+                                match value {
+                                    Ok(chunk_json) => {
+                                        last_offset = iter.byte_offset();
+                                        if debug_stream {
+                                            tracing::info!(
+                                                target: "routiium::bedrock_stream",
+                                                model_id = model_id_owned,
+                                                region = region_owned,
+                                                chunk = %chunk_json,
+                                                "Bedrock stream chunk"
+                                            );
+                                        }
+                                        yield Ok(BedrockStreamEvent {
+                                            chunk: Some(chunk_json),
+                                            done: false,
+                                        });
+                                    }
+                                    Err(err) => {
+                                        if err.is_eof() {
+                                            break;
+                                        }
+                                        had_error = true;
+                                        if debug_stream {
+                                            let raw = String::from_utf8_lossy(buffer.as_slice());
+                                            let prefix: String = raw.chars().take(200).collect();
+                                            let suffix: String = raw
+                                                .chars()
+                                                .rev()
+                                                .take(200)
+                                                .collect::<String>()
+                                                .chars()
+                                                .rev()
+                                                .collect();
+                                            tracing::warn!(
+                                                target: "routiium::bedrock_stream",
+                                                model_id = model_id_owned,
+                                                region = region_owned,
+                                                bytes_len = buffer.len(),
+                                                error = %err,
+                                                raw_prefix = %prefix,
+                                                raw_suffix = %suffix,
+                                                "Bedrock stream JSON parse error"
+                                            );
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if last_offset > 0 {
+                                buffer.drain(0..last_offset);
+                            }
+                            if had_error {
+                                buffer.clear();
+                            }
+                        } else if debug_stream {
+                            tracing::warn!(
+                                target: "routiium::bedrock_stream",
+                                model_id = model_id_owned,
+                                region = region_owned,
+                                "Bedrock stream chunk had no bytes"
+                            );
                         }
-                        _ => {
-                            // Other event types, skip
-                        }
+                    } else {
+                        // Other event types, skip
                     }
                 }
                 Ok(None) => {
@@ -1541,7 +1630,7 @@ pub async fn invoke_bedrock_model_streaming(
                     break;
                 }
                 Err(e) => {
-                    yield Err(anyhow!("Stream error: {}", e));
+                    yield Err(anyhow!("Stream error: {e}"));
                     break;
                 }
             }
@@ -1556,6 +1645,21 @@ pub async fn invoke_bedrock_model_streaming(
 }
 
 /// Convert Bedrock streaming chunk to Chat Completions SSE format
+///
+/// # Errors
+/// Returns an error if serialization of the generated SSE event fails.
+///
+/// # Panics
+/// Panics only if the system clock is before the Unix epoch.
+#[expect(
+    clippy::too_many_lines,
+    clippy::unwrap_used,
+    reason = "stream compatibility adapter preserves wire-format fail-fast semantics"
+)]
+#[expect(
+    clippy::option_if_let_else,
+    reason = "stream compatibility branches preserve wire defaults"
+)]
 pub fn bedrock_chunk_to_sse(
     chunk: &Value,
     model: &str,
@@ -1581,7 +1685,7 @@ pub fn bedrock_chunk_to_sse(
                     let finish_reason = choice
                         .get("finish_reason")
                         .and_then(|v| v.as_str())
-                        .map(|v| v.to_string());
+                        .map(std::string::ToString::to_string);
 
                     let sse_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
                     let mut sse_event = json!({
@@ -1615,7 +1719,7 @@ pub fn bedrock_chunk_to_sse(
                         );
                     }
 
-                    return Ok(format!("data: {}\n\n", sse_event));
+                    return Ok(format!("data: {sse_event}\n\n"));
                 }
             }
             if let Some(message_content) = choice
@@ -1626,7 +1730,7 @@ pub fn bedrock_chunk_to_sse(
                 let finish_reason = choice
                     .get("finish_reason")
                     .and_then(|v| v.as_str())
-                    .map(|v| v.to_string());
+                    .map(std::string::ToString::to_string);
 
                 let sse_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
                 let mut sse_event = json!({
@@ -1660,13 +1764,13 @@ pub fn bedrock_chunk_to_sse(
                     );
                 }
 
-                return Ok(format!("data: {}\n\n", sse_event));
+                return Ok(format!("data: {sse_event}\n\n"));
             }
             if let Some(completion) = choice.get("completion").and_then(|v| v.as_str()) {
                 let finish_reason = choice
                     .get("finish_reason")
                     .and_then(|v| v.as_str())
-                    .map(|v| v.to_string());
+                    .map(std::string::ToString::to_string);
 
                 let sse_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
                 let mut sse_event = json!({
@@ -1700,7 +1804,7 @@ pub fn bedrock_chunk_to_sse(
                     );
                 }
 
-                return Ok(format!("data: {}\n\n", sse_event));
+                return Ok(format!("data: {sse_event}\n\n"));
             }
             if debug_stream {
                 tracing::warn!(
@@ -1814,7 +1918,7 @@ pub fn bedrock_chunk_to_sse(
         }]
     });
 
-    Ok(format!("data: {}\n\n", sse_event))
+    Ok(format!("data: {sse_event}\n\n"))
 }
 
 #[cfg(test)]
@@ -1825,6 +1929,10 @@ mod tests {
     };
 
     #[test]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test fixtures are fixed and must fail fast"
+    )]
     fn test_provider_detection() {
         assert_eq!(
             BedrockProvider::from_model_id("anthropic.claude-3-sonnet-20240229-v1:0").unwrap(),
@@ -1845,6 +1953,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        reason = "test fixtures are fixed and must fail fast"
+    )]
     fn test_simple_chat_to_anthropic() {
         let req = ChatCompletionRequest {
             model: "anthropic.claude-3-sonnet-20240229-v1:0".to_string(),
@@ -1893,6 +2006,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        reason = "test fixtures are fixed and must fail fast"
+    )]
     fn test_chat_with_tools() {
         let req = ChatCompletionRequest {
             model: "anthropic.claude-3-sonnet-20240229-v1:0".to_string(),
@@ -1942,6 +2060,13 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::match_wildcard_for_single_variants,
+        reason = "test fixtures are fixed and must fail fast"
+    )]
     fn test_multimodal_conversion() {
         let content = json!([
             {"type": "text", "text": "What's in this image?"},
@@ -1971,6 +2096,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        reason = "test fixtures are fixed and must fail fast"
+    )]
     fn test_mistral_conversion() {
         let req = ChatCompletionRequest {
             model: "mistral.mistral-7b-instruct-v0:2".to_string(),
@@ -2022,6 +2152,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        reason = "test fixtures are fixed and must fail fast"
+    )]
     fn test_mistral_ministral_with_tools() {
         let req = ChatCompletionRequest {
             model: "mistral.ministral-3b-instruct".to_string(),
@@ -2081,6 +2216,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        reason = "test fixtures are fixed and must fail fast"
+    )]
     fn test_mistral_ministral_multimodal() {
         let content = json!([
             {"type": "text", "text": "What's in this image?"},
@@ -2139,6 +2279,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        reason = "test fixtures are fixed and must fail fast"
+    )]
     fn test_mistral_ministral_response_with_tools() {
         // Simulate Mistral response with tool use
         let response = json!({

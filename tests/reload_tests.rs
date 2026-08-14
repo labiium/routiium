@@ -4,6 +4,12 @@ use routiium::util::AppState;
 use serde_json::json;
 use std::sync::Arc;
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_reload_mcp_without_path() {
     std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
@@ -34,6 +40,12 @@ async fn test_reload_mcp_without_path() {
         .contains("No MCP config path"));
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_reload_system_prompt_without_path() {
     std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
@@ -64,6 +76,12 @@ async fn test_reload_system_prompt_without_path() {
         .contains("No system prompt config path"));
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_reload_all_without_paths() {
     std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
@@ -92,6 +110,12 @@ async fn test_reload_all_without_paths() {
     assert_eq!(body_json["system_prompt"]["success"], false);
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_reload_system_prompt_with_valid_config() {
     std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
@@ -138,6 +162,12 @@ async fn test_reload_system_prompt_with_valid_config() {
     assert_eq!(body_json["injection_mode"], "prepend");
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_reload_system_prompt_with_invalid_config() {
     // Create a temporary invalid config file
@@ -169,6 +199,12 @@ async fn test_reload_system_prompt_with_invalid_config() {
     assert_eq!(resp.status(), 500);
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_convert_with_system_prompt() {
     std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
@@ -232,6 +268,12 @@ async fn test_convert_with_system_prompt() {
     assert_eq!(messages[1]["content"], "Hello");
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_status_endpoint_includes_new_routes() {
     let app_state = AppState::default();
@@ -265,6 +307,12 @@ async fn test_status_endpoint_includes_new_routes() {
     assert!(route_strings.contains(&"/reload/all".to_string()));
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_status_endpoint_includes_router_runtime_contract() {
     let app_state = AppState {
@@ -296,6 +344,12 @@ async fn test_status_endpoint_includes_router_runtime_contract() {
     assert_eq!(body_json["features"]["router"]["cache_ttl_ms"], 0);
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_health_endpoint() {
     let app_state = AppState::default();
@@ -316,6 +370,12 @@ async fn test_health_endpoint() {
     assert_eq!(body_json["status"], "ok");
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_models_alias_endpoint_is_registered() {
     let app_state = AppState::default();

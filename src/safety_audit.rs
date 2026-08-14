@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 const DEFAULT_MAX_EVENTS: usize = 1_000;
@@ -72,6 +73,10 @@ impl SafetyAuditManager {
         })
     }
 
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "audit queue lock must cover insertion and trimming"
+    )]
     pub async fn record(&self, builder: SafetyAuditEventBuilder) -> SafetyAuditEvent {
         let event = SafetyAuditEvent {
             id: new_event_id(),
@@ -115,11 +120,11 @@ impl SafetyAuditManager {
         events.iter().rev().take(limit).cloned().collect()
     }
 
-    pub fn jsonl_path(&self) -> Option<&PathBuf> {
+    pub const fn jsonl_path(&self) -> Option<&PathBuf> {
         self.jsonl_path.as_ref()
     }
 
-    pub fn max_events(&self) -> usize {
+    pub const fn max_events(&self) -> usize {
         self.max_events
     }
 }
@@ -134,7 +139,6 @@ async fn append_jsonl(path: &PathBuf, event: &SafetyAuditEvent) -> std::io::Resu
     let mut line = serde_json::to_string(event)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
     line.push('\n');
-    use tokio::io::AsyncWriteExt;
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -145,7 +149,7 @@ async fn append_jsonl(path: &PathBuf, event: &SafetyAuditEvent) -> std::io::Resu
 
 fn new_event_id() -> String {
     let uuid = uuid::Uuid::new_v4().simple().to_string();
-    format!("saf_{}", &uuid[..16])
+    format!("saf_{}", uuid.chars().take(16).collect::<String>())
 }
 
 fn unix_timestamp() -> u64 {

@@ -1,12 +1,12 @@
-use once_cell::sync::Lazy;
 use routiium::router_client::{
     extract_route_request, EmbeddedDefaultRouter, PrivacyMode, RouteError, RouterClient,
     UpstreamMode,
 };
 use serde_json::json;
+use std::sync::LazyLock;
 use tokio::sync::Mutex;
 
-static ENV_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static ENV_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn test_router() -> EmbeddedDefaultRouter {
     std::env::set_var("ROUTIIUM_JUDGE_MODE", "protect");
@@ -31,6 +31,13 @@ fn route_request(model: &str, text: &str) -> routiium::router_client::RouteReque
     extract_route_request(model, "responses", &payload, PrivacyMode::Full)
 }
 
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 #[tokio::test]
 async fn embedded_router_plans_auto_alias_by_default() {
     let _guard = ENV_GUARD.lock().await;
@@ -48,6 +55,13 @@ async fn embedded_router_plans_auto_alias_by_default() {
     assert_eq!(judge.verdict.as_deref(), Some("allow"));
 }
 
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 #[tokio::test]
 async fn embedded_router_downgrades_prompt_injection_and_disables_cache() {
     let _guard = ENV_GUARD.lock().await;
@@ -71,6 +85,13 @@ async fn embedded_router_downgrades_prompt_injection_and_disables_cache() {
     assert!(judge.policy_fingerprint.is_some());
 }
 
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 #[tokio::test]
 async fn embedded_router_blocks_secret_exfiltration() {
     let _guard = ENV_GUARD.lock().await;
@@ -97,6 +118,13 @@ async fn embedded_router_blocks_secret_exfiltration() {
     }
 }
 
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 #[tokio::test]
 async fn embedded_router_can_route_denials_when_explicitly_configured() {
     let _guard = ENV_GUARD.lock().await;

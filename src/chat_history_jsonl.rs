@@ -31,7 +31,7 @@ impl JsonlChatHistoryStore {
         let mut file_guard = self
             .file
             .lock()
-            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {e}")))?;
 
         if file_guard.is_none() {
             // Create parent directories
@@ -46,7 +46,7 @@ impl JsonlChatHistoryStore {
 
             *file_guard = Some(file);
         }
-
+        drop(file_guard);
         Ok(())
     }
 
@@ -56,13 +56,13 @@ impl JsonlChatHistoryStore {
         let mut file_guard = self
             .file
             .lock()
-            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {e}")))?;
 
         if let Some(ref mut file) = *file_guard {
-            writeln!(file, "{}", line)?;
+            writeln!(file, "{line}")?;
             file.flush()?;
         }
-
+        drop(file_guard);
         Ok(())
     }
 
@@ -75,7 +75,7 @@ impl JsonlChatHistoryStore {
         let reader = BufReader::new(file);
 
         let lines: std::result::Result<Vec<String>, _> = reader.lines().collect();
-        lines.map_err(|e| e.into())
+        lines.map_err(std::convert::Into::into)
     }
 
     fn parse_conversations(&self) -> Result<Vec<Conversation>> {
@@ -91,7 +91,10 @@ impl JsonlChatHistoryStore {
             if let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) {
                 if record.get("type").and_then(|t| t.as_str()) == Some("conversation") {
                     if let Ok(conv) = serde_json::from_value::<Conversation>(
-                        record.get("data").unwrap_or(&serde_json::json!({})).clone(),
+                        record
+                            .get("data")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({})),
                     ) {
                         conversations.push(conv);
                     }
@@ -115,7 +118,10 @@ impl JsonlChatHistoryStore {
             if let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) {
                 if record.get("type").and_then(|t| t.as_str()) == Some("message") {
                     if let Ok(msg) = serde_json::from_value::<Message>(
-                        record.get("data").unwrap_or(&serde_json::json!({})).clone(),
+                        record
+                            .get("data")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({})),
                     ) {
                         messages.push(msg);
                     }
@@ -140,8 +146,7 @@ impl ChatHistoryStore for JsonlChatHistoryStore {
             "data": conversation,
             "timestamp": std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
+                .map_or(0, |duration| duration.as_secs())
         });
 
         let line = serde_json::to_string(&record)?;
@@ -155,8 +160,7 @@ impl ChatHistoryStore for JsonlChatHistoryStore {
             "data": message,
             "timestamp": std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
+                .map_or(0, |duration| duration.as_secs())
         });
 
         let line = serde_json::to_string(&record)?;
@@ -178,7 +182,7 @@ impl ChatHistoryStore for JsonlChatHistoryStore {
             .into_iter()
             .find(|c| c.conversation_id == conversation_id)
             .ok_or_else(|| {
-                ChatHistoryError::NotFound(format!("Conversation {} not found", conversation_id))
+                ChatHistoryError::NotFound(format!("Conversation {conversation_id} not found"))
             })
     }
 
@@ -303,8 +307,9 @@ impl ChatHistoryStore for JsonlChatHistoryStore {
         let mut file_guard = self
             .file
             .lock()
-            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {e}")))?;
         *file_guard = None;
+        drop(file_guard);
 
         Ok(())
     }
@@ -334,6 +339,7 @@ mod tests {
     use crate::chat_history::{MessageRole, PrivacyLevel, RoutingInfo};
     use tempfile::NamedTempFile;
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_jsonl_store_conversation() {
         let temp_file = NamedTempFile::new().unwrap();
@@ -347,6 +353,7 @@ mod tests {
         assert_eq!(retrieved.conversation_id, "conv_123");
     }
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_jsonl_store_message() {
         let temp_file = NamedTempFile::new().unwrap();
@@ -372,6 +379,7 @@ mod tests {
         assert_eq!(messages[0].conversation_id, "conv_123");
     }
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_jsonl_store_filters() {
         let temp_file = NamedTempFile::new().unwrap();
@@ -417,6 +425,7 @@ mod tests {
         assert_eq!(messages[0].routing.backend, Some("openai".to_string()));
     }
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_jsonl_store_clear() {
         let temp_file = NamedTempFile::new().unwrap();
@@ -442,6 +451,7 @@ mod tests {
         assert_eq!(stats.total_messages, 0);
     }
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_jsonl_store_persistence() {
         let temp_file = NamedTempFile::new().unwrap();
@@ -476,6 +486,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_jsonl_store_batch_messages() {
         let temp_file = NamedTempFile::new().unwrap();

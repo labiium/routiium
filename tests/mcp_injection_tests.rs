@@ -5,6 +5,12 @@ use serde_json::json;
 use std::sync::Arc;
 
 /// Test that /convert endpoint injects MCP tools when MCP manager is configured
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_convert_with_mcp_tools_injection() {
     // Create a temporary MCP config file with a mock server
@@ -66,6 +72,12 @@ async fn test_convert_with_mcp_tools_injection() {
 }
 
 /// Test that /convert endpoint works without MCP when not configured
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_convert_without_mcp_configuration() {
     let app_state = AppState::default();
@@ -104,6 +116,12 @@ async fn test_convert_without_mcp_configuration() {
 }
 
 /// Test that MCP tools are merged with existing tools in request
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_convert_merges_mcp_tools_with_existing_tools() {
     let app_state = AppState::default();
@@ -159,14 +177,19 @@ async fn test_convert_merges_mcp_tools_with_existing_tools() {
             t["name"] == "existing_tool"
                 || t.get("function")
                     .and_then(|f| f.get("name"))
-                    .map(|n| n == "existing_tool")
-                    .unwrap_or(false)
+                    .is_some_and(|n| n == "existing_tool")
         });
         assert!(has_existing_tool);
     }
 }
 
 /// Test MCP config reload endpoint
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_reload_mcp_with_valid_config() {
     std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
@@ -225,6 +248,12 @@ async fn test_reload_mcp_with_valid_config() {
 }
 
 /// Test MCP config reload with invalid JSON
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_reload_mcp_with_invalid_json() {
     std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
@@ -262,6 +291,12 @@ async fn test_reload_mcp_with_invalid_json() {
 }
 
 /// Test combined MCP tools and system prompt injection
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_convert_with_mcp_and_system_prompt() {
     std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
@@ -351,6 +386,12 @@ async fn test_convert_with_mcp_and_system_prompt() {
 }
 
 /// Test /reload/all endpoint reloads both MCP and system prompt
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_reload_all_with_both_configs() {
     std::env::set_var("ROUTIIUM_ADMIN_TOKEN", "admin-test");
@@ -417,7 +458,13 @@ async fn test_reload_all_with_both_configs() {
     assert!(body_json.get("mcp").is_some());
 }
 
-/// Test that MCP tools are formatted correctly for OpenAI API
+/// Test that MCP tools are formatted correctly for `OpenAI` API
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_mcp_tool_format_compatibility() {
     // This test verifies the tool format matches OpenAI's expectations
@@ -487,6 +534,12 @@ async fn test_mcp_tool_format_compatibility() {
 }
 
 /// Test status endpoint shows MCP configuration
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn test_status_shows_mcp_info() {
     let temp_dir = tempfile::tempdir().unwrap();

@@ -201,29 +201,42 @@ pub struct AnalyticsManager {
     ttl_seconds: Option<u64>,
 }
 
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "backend locks intentionally span each operation"
+)]
 impl AnalyticsManager {
     /// Create with Redis backend
+    ///
+    /// # Errors
+    /// Returns an error when the Redis client cannot be initialized.
     pub fn new_redis(url: &str, ttl_seconds: Option<u64>) -> Result<Self, AnalyticsError> {
         let client = redis::Client::open(url)?;
         Ok(Self {
             backend: AnalyticsBackend::Redis(client),
-            max_events: 10000,
+            max_events: 10_000,
             ttl_seconds,
         })
     }
 
     /// Create with Sled backend
+    ///
+    /// # Errors
+    /// Returns an error when the Sled database cannot be opened.
     #[cfg(feature = "sled")]
     pub fn new_sled(path: &str, ttl_seconds: Option<u64>) -> Result<Self, AnalyticsError> {
         let db = sled::open(path).map_err(|e| AnalyticsError::Sled(e.to_string()))?;
         Ok(Self {
             backend: AnalyticsBackend::Sled(db),
-            max_events: 100000,
+            max_events: 100_000,
             ttl_seconds,
         })
     }
 
     /// Create with JSONL backend
+    ///
+    /// # Errors
+    /// Returns an error when the directory, file, or existing event log cannot be accessed.
     pub fn new_jsonl<P: Into<PathBuf>>(path: P) -> Result<Self, AnalyticsError> {
         let path = path.into();
 
@@ -254,6 +267,7 @@ impl AnalyticsManager {
     }
 
     /// Create with in-memory backend
+    #[must_use]
     pub fn new_memory(max_events: usize) -> Self {
         Self {
             backend: AnalyticsBackend::Memory(Arc::new(tokio::sync::RwLock::new(Vec::new()))),
@@ -263,6 +277,9 @@ impl AnalyticsManager {
     }
 
     /// Create from environment configuration
+    ///
+    /// # Errors
+    /// Returns an error when the configured backend cannot be initialized.
     pub fn from_env() -> Result<Self, AnalyticsError> {
         // Check for Redis URL
         if let Ok(url) = std::env::var("ROUTIIUM_ANALYTICS_REDIS_URL") {
@@ -298,17 +315,16 @@ impl AnalyticsManager {
         // Allow forcing the legacy in-memory backend
         let force_memory = std::env::var("ROUTIIUM_ANALYTICS_FORCE_MEMORY")
             .ok()
-            .map(|v| {
+            .is_some_and(|v| {
                 let normalized = v.trim().to_ascii_lowercase();
                 normalized == "1" || normalized == "true" || normalized == "yes"
-            })
-            .unwrap_or(false);
+            });
 
         if force_memory {
             let max_events = std::env::var("ROUTIIUM_ANALYTICS_MAX_EVENTS")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(10000);
+                .unwrap_or(10_000);
 
             return Ok(Self::new_memory(max_events));
         }
@@ -322,13 +338,16 @@ impl AnalyticsManager {
                 let max_events = std::env::var("ROUTIIUM_ANALYTICS_MAX_EVENTS")
                     .ok()
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or(10000);
+                    .unwrap_or(10_000);
                 Ok(Self::new_memory(max_events))
             }
         }
     }
 
     /// Record an analytics event
+    ///
+    /// # Errors
+    /// Returns an error when serialization or backend storage fails.
     pub async fn record(&self, event: AnalyticsEvent) -> Result<(), AnalyticsError> {
         match &self.backend {
             AnalyticsBackend::Redis(client) => {
@@ -359,7 +378,7 @@ impl AnalyticsManager {
                 // Index by model
                 if let Some(ref model) = event.request.model {
                     redis::cmd("SADD")
-                        .arg(format!("analytics:events:by_model:{}", model))
+                        .arg(format!("analytics:events:by_model:{model}"))
                         .arg(&event.id)
                         .query::<()>(&mut conn)?;
                 }
@@ -395,7 +414,7 @@ impl AnalyticsManager {
 
                 // Trim to max size
                 if events.len() > self.max_events {
-                    let excess = events.len() - self.max_events;
+                    let excess = events.len().saturating_sub(self.max_events);
                     events.drain(0..excess);
                 }
 
@@ -414,7 +433,7 @@ impl AnalyticsManager {
                 }
 
                 let mut count = backend.total_events.write().await;
-                *count += 1;
+                *count = count.saturating_add(1);
 
                 Ok(())
             }
@@ -422,6 +441,9 @@ impl AnalyticsManager {
     }
 
     /// Query events by time range
+    ///
+    /// # Errors
+    /// Returns an error when the backend query or event decoding fails.
     pub async fn query_range(
         &self,
         start_ts: u64,
@@ -447,7 +469,7 @@ impl AnalyticsManager {
 
                 let mut events = Vec::new();
                 for id in ids_to_fetch {
-                    let key = format!("analytics:event:{}", id);
+                    let key = format!("analytics:event:{id}");
                     if let Ok(value) = redis::cmd("GET").arg(&key).query::<String>(&mut conn) {
                         if let Ok(event) = serde_json::from_str(&value) {
                             events.push(event);
@@ -460,14 +482,14 @@ impl AnalyticsManager {
             #[cfg(feature = "sled")]
             AnalyticsBackend::Sled(db) => {
                 let mut events = Vec::new();
-                let start_key = format!("ts:{}", start_ts);
-                let end_key = format!("ts:{}", end_ts + 1);
+                let start_key = format!("ts:{start_ts}");
+                let end_key = format!("ts:{}", end_ts.saturating_add(1));
 
                 for (_, event_id_bytes) in
                     db.range(start_key.as_bytes()..end_key.as_bytes()).flatten()
                 {
                     if let Ok(event_id) = String::from_utf8(event_id_bytes.to_vec()) {
-                        let key = format!("event:{}", event_id);
+                        let key = format!("event:{event_id}");
                         if let Ok(Some(event_bytes)) = db.get(key.as_bytes()) {
                             if let Ok(event) = serde_json::from_slice(&event_bytes) {
                                 events.push(event);
@@ -543,6 +565,9 @@ impl AnalyticsManager {
     }
 
     /// Aggregate events in a time range
+    ///
+    /// # Errors
+    /// Returns an error when querying events fails.
     pub async fn aggregate(
         &self,
         start_ts: u64,
@@ -574,35 +599,38 @@ impl AnalyticsManager {
         let mut tps_count = 0u64;
 
         for event in events {
-            agg.total_requests += 1;
+            agg.total_requests = agg.total_requests.saturating_add(1);
 
             if let Some(ref response) = event.response {
                 if response.success {
-                    agg.successful_requests += 1;
+                    agg.successful_requests = agg.successful_requests.saturating_add(1);
                 } else {
-                    agg.failed_requests += 1;
+                    agg.failed_requests = agg.failed_requests.saturating_add(1);
                 }
 
                 // Prefer detailed token_usage when present to avoid inconsistencies.
                 if event.token_usage.is_none() {
                     if let Some(tokens) = response.output_tokens {
-                        agg.total_output_tokens += tokens;
+                        agg.total_output_tokens = agg.total_output_tokens.saturating_add(tokens);
                     }
                 }
             }
 
             // Aggregate token usage details
             if let Some(ref usage) = event.token_usage {
-                agg.total_input_tokens += usage.prompt_tokens;
-                agg.total_output_tokens += usage.completion_tokens;
+                agg.total_input_tokens = agg.total_input_tokens.saturating_add(usage.prompt_tokens);
+                agg.total_output_tokens = agg
+                    .total_output_tokens
+                    .saturating_add(usage.completion_tokens);
                 if let Some(cached) = usage.cached_tokens {
-                    agg.total_cached_tokens += cached;
+                    agg.total_cached_tokens = agg.total_cached_tokens.saturating_add(cached);
                 }
                 if let Some(reasoning) = usage.reasoning_tokens {
-                    agg.total_reasoning_tokens += reasoning;
+                    agg.total_reasoning_tokens =
+                        agg.total_reasoning_tokens.saturating_add(reasoning);
                 }
             } else if let Some(tokens) = event.request.input_tokens {
-                agg.total_input_tokens += tokens;
+                agg.total_input_tokens = agg.total_input_tokens.saturating_add(tokens);
             }
 
             // Aggregate cost
@@ -617,36 +645,46 @@ impl AnalyticsManager {
             // Aggregate tokens per second
             if let Some(tps) = event.performance.tokens_per_second {
                 total_tps += tps;
-                tps_count += 1;
+                tps_count = tps_count.saturating_add(1);
             }
 
             if let Some(ref model) = event.request.model {
-                *agg.models_used.entry(model.clone()).or_insert(0) += 1;
+                let count = agg.models_used.entry(model.clone()).or_insert(0);
+                *count = count.saturating_add(1);
             }
 
-            *agg.endpoints_hit
+            let count = agg
+                .endpoints_hit
                 .entry(event.request.endpoint.clone())
-                .or_insert(0) += 1;
+                .or_insert(0);
+            *count = count.saturating_add(1);
 
-            *agg.backends_used
+            let count = agg
+                .backends_used
                 .entry(event.routing.backend.clone())
-                .or_insert(0) += 1;
+                .or_insert(0);
+            *count = count.saturating_add(1);
 
-            total_duration += event.performance.duration_ms;
+            total_duration = total_duration.saturating_add(event.performance.duration_ms);
         }
 
         if agg.total_requests > 0 {
-            agg.avg_duration_ms = total_duration as f64 / agg.total_requests as f64;
+            agg.avg_duration_ms = f64::from(u32::try_from(total_duration).unwrap_or(u32::MAX))
+                / f64::from(u32::try_from(agg.total_requests).unwrap_or(u32::MAX));
         }
 
         if tps_count > 0 {
-            agg.avg_tokens_per_second = Some(total_tps / tps_count as f64);
+            agg.avg_tokens_per_second =
+                Some(total_tps / f64::from(u32::try_from(tps_count).unwrap_or(u32::MAX)));
         }
 
         Ok(agg)
     }
 
     /// Get statistics about the analytics system
+    ///
+    /// # Errors
+    /// Returns an error when the backend statistics query fails.
     pub async fn stats(&self) -> Result<AnalyticsStats, AnalyticsError> {
         match &self.backend {
             AnalyticsBackend::Redis(client) => {
@@ -698,6 +736,9 @@ impl AnalyticsManager {
     }
 
     /// Clear all analytics data
+    ///
+    /// # Errors
+    /// Returns an error when clearing backend storage fails.
     pub async fn clear(&self) -> Result<(), AnalyticsError> {
         match &self.backend {
             AnalyticsBackend::Redis(client) => {
@@ -759,7 +800,7 @@ fn count_jsonl_events(path: &Path) -> Result<usize, AnalyticsError> {
                 match line {
                     Ok(content) => {
                         if !content.trim().is_empty() {
-                            count += 1;
+                            count = count.saturating_add(1);
                         }
                     }
                     Err(err) => {
@@ -775,11 +816,13 @@ fn count_jsonl_events(path: &Path) -> Result<usize, AnalyticsError> {
 }
 
 /// Helper to create event ID
+#[must_use]
 pub fn generate_event_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
 /// Helper to get current timestamp
+#[must_use]
 pub fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -788,6 +831,10 @@ pub fn current_timestamp() -> u64 {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "unit tests use expect for fixture setup"
+)]
 mod tests {
     use super::*;
 

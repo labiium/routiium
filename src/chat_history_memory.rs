@@ -19,6 +19,7 @@ pub struct MemoryChatHistoryStore {
 }
 
 impl MemoryChatHistoryStore {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             conversations: Arc::new(RwLock::new(HashMap::new())),
@@ -27,6 +28,7 @@ impl MemoryChatHistoryStore {
         }
     }
 
+    #[must_use]
     pub fn with_max_messages(max_messages: usize) -> Self {
         Self {
             conversations: Arc::new(RwLock::new(HashMap::new())),
@@ -37,9 +39,12 @@ impl MemoryChatHistoryStore {
 
     fn prune_messages_if_needed(&self) {
         if let Some(max) = self.max_messages {
-            let mut messages = self.messages.write().unwrap();
+            let Ok(mut messages) = self.messages.write() else {
+                tracing::warn!("Failed to acquire message write lock while pruning");
+                return;
+            };
             if messages.len() > max {
-                let to_remove = messages.len() - max;
+                let to_remove = messages.len().saturating_sub(max);
                 messages.drain(0..to_remove);
             }
         }
@@ -63,9 +68,10 @@ impl ChatHistoryStore for MemoryChatHistoryStore {
         let mut conversations = self
             .conversations
             .write()
-            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {e}")))?;
 
         conversations.insert(conversation.conversation_id.clone(), conversation.clone());
+        drop(conversations);
         Ok(())
     }
 
@@ -73,7 +79,7 @@ impl ChatHistoryStore for MemoryChatHistoryStore {
         let mut messages = self
             .messages
             .write()
-            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {e}")))?;
 
         messages.push(message.clone());
         drop(messages);
@@ -86,7 +92,7 @@ impl ChatHistoryStore for MemoryChatHistoryStore {
         let mut msgs = self
             .messages
             .write()
-            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {e}")))?;
 
         msgs.extend_from_slice(messages);
         drop(msgs);
@@ -99,18 +105,20 @@ impl ChatHistoryStore for MemoryChatHistoryStore {
         let conversations = self
             .conversations
             .read()
-            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {e}")))?;
 
-        conversations.get(conversation_id).cloned().ok_or_else(|| {
-            ChatHistoryError::NotFound(format!("Conversation {} not found", conversation_id))
-        })
+        let result = conversations.get(conversation_id).cloned().ok_or_else(|| {
+            ChatHistoryError::NotFound(format!("Conversation {conversation_id} not found"))
+        });
+        drop(conversations);
+        result
     }
 
     async fn list_conversations(&self, filters: &ConversationFilters) -> Result<Vec<Conversation>> {
         let conversations = self
             .conversations
             .read()
-            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {e}")))?;
 
         let mut results: Vec<Conversation> = conversations
             .values()
@@ -137,6 +145,7 @@ impl ChatHistoryStore for MemoryChatHistoryStore {
             results.truncate(limit);
         }
 
+        drop(conversations);
         Ok(results)
     }
 
@@ -144,7 +153,7 @@ impl ChatHistoryStore for MemoryChatHistoryStore {
         let messages = self
             .messages
             .read()
-            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {e}")))?;
 
         let mut results: Vec<Message> = messages
             .iter()
@@ -211,6 +220,7 @@ impl ChatHistoryStore for MemoryChatHistoryStore {
             results.truncate(limit);
         }
 
+        drop(messages);
         Ok(results)
     }
 
@@ -218,16 +228,18 @@ impl ChatHistoryStore for MemoryChatHistoryStore {
         let mut conversations = self
             .conversations
             .write()
-            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {e}")))?;
 
         conversations.remove(conversation_id);
 
         let mut messages = self
             .messages
             .write()
-            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {e}")))?;
 
         messages.retain(|msg| msg.conversation_id != conversation_id);
+        drop(messages);
+        drop(conversations);
 
         Ok(())
     }
@@ -236,15 +248,17 @@ impl ChatHistoryStore for MemoryChatHistoryStore {
         let mut conversations = self
             .conversations
             .write()
-            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {e}")))?;
 
         let mut messages = self
             .messages
             .write()
-            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {e}")))?;
 
         conversations.clear();
         messages.clear();
+        drop(messages);
+        drop(conversations);
 
         Ok(())
     }
@@ -253,12 +267,12 @@ impl ChatHistoryStore for MemoryChatHistoryStore {
         let conversations = self
             .conversations
             .read()
-            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {e}")))?;
 
         let messages = self
             .messages
             .read()
-            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {}", e)))?;
+            .map_err(|e| ChatHistoryError::Storage(format!("Lock error: {e}")))?;
 
         Ok(StorageStats {
             total_conversations: conversations.len(),
@@ -279,6 +293,7 @@ mod tests {
     use super::*;
     use crate::chat_history::{MessageRole, PrivacyLevel, RoutingInfo};
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_memory_store_conversation() {
         let store = MemoryChatHistoryStore::new();
@@ -291,6 +306,7 @@ mod tests {
         assert_eq!(retrieved.conversation_id, "conv_123");
     }
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_memory_store_message() {
         let store = MemoryChatHistoryStore::new();
@@ -315,6 +331,7 @@ mod tests {
         assert_eq!(messages[0].conversation_id, "conv_123");
     }
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_memory_store_filters() {
         let store = MemoryChatHistoryStore::new();
@@ -372,6 +389,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_memory_store_delete() {
         let store = MemoryChatHistoryStore::new();
@@ -400,6 +418,7 @@ mod tests {
         assert_eq!(messages.len(), 0);
     }
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_memory_store_clear() {
         let store = MemoryChatHistoryStore::new();
@@ -423,6 +442,7 @@ mod tests {
         assert_eq!(stats.total_messages, 0);
     }
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_memory_store_max_messages() {
         let store = MemoryChatHistoryStore::with_max_messages(3);
@@ -432,7 +452,7 @@ mod tests {
             let msg = Message::new(
                 "conv_123".to_string(),
                 MessageRole::User,
-                serde_json::json!({"text": format!("Message {}", i)}),
+                serde_json::json!({"text": format!("Message {i}")}),
                 PrivacyLevel::Full,
             );
             store.record_message(&msg).await.unwrap();
@@ -443,6 +463,7 @@ mod tests {
         assert_eq!(messages.len(), 3);
     }
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_memory_store_stats() {
         let store = MemoryChatHistoryStore::new();
@@ -466,6 +487,7 @@ mod tests {
         assert!(stats.storage_path.is_none());
     }
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     #[tokio::test]
     async fn test_memory_store_time_filters() {
         let store = MemoryChatHistoryStore::new();

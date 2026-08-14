@@ -68,8 +68,10 @@ redis = "1.0"
 
 # AWS Bedrock support
 aws-config = { version = "1.8", default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process", "sso"] }
+aws-credential-types = "1.2"
 aws-sdk-bedrockruntime = { version = "1.135", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-smithy-runtime-api = "1.1"
+aws-sigv4 = "1.4"
 base64 = "0.21"
 async-stream = "0.3"
 
@@ -86,3 +88,21 @@ sled = []
 sqlite = ["sqlx/sqlite"]
 postgres = ["sqlx/postgres"]
 turso = []
+
+# Keep broad Clippy groups below explicit safety lints in priority.
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+unreachable = "deny"
+unimplemented = "deny"
+unchecked_time_subtraction = "deny"
+todo = "deny"
+string_slice = "deny"
+panic_in_result_fn = "deny"
+panic = "deny"
+exit = "deny"
+as_conversions = "deny"

@@ -40,6 +40,10 @@ struct StubState {
 }
 
 impl RouterStub {
+    #[expect(
+        clippy::expect_used,
+        reason = "test server setup failure is unrecoverable"
+    )]
     pub async fn start(response: RouterResponseConfig) -> Self {
         let calls = Arc::new(AtomicUsize::new(0));
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -72,8 +76,8 @@ impl RouterStub {
             }
         });
 
-        RouterStub {
-            base_url: format!("http://{}", addr),
+        Self {
+            base_url: format!("http://{addr}"),
             calls,
             requests,
             shutdown: Arc::new(Mutex::new(Some(tx))),
@@ -88,6 +92,7 @@ impl RouterStub {
         self.calls.load(Ordering::SeqCst)
     }
 
+    #[expect(clippy::expect_used, reason = "test mutex poisoning is unrecoverable")]
     pub fn take_requests(&self) -> Vec<RouteRequest> {
         let mut guard = self.requests.lock().expect("lock stub requests");
         guard.drain(..).collect()
@@ -110,12 +115,13 @@ async fn plan_handler(
 ) -> Result<Json<RoutePlan>, (StatusCode, Json<serde_json::Value>)> {
     let call_idx = state.calls.fetch_add(1, Ordering::SeqCst);
     if let Ok(mut guard) = state.requests.lock() {
-        guard.push(req.clone());
+        guard.push(req);
     }
 
     match &state.response {
         RouterResponseConfig::Plan(plan) => Ok(Json((**plan).clone())),
         RouterResponseConfig::Plans(plans) => {
+            #[expect(clippy::expect_used, reason = "test response config requires a plan")]
             let plan = plans
                 .get(call_idx)
                 .or_else(|| plans.last())

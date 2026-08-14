@@ -52,6 +52,7 @@ pub struct Conversation {
 }
 
 impl Conversation {
+    #[must_use]
     pub fn new(conversation_id: String) -> Self {
         let now = current_timestamp();
         Self {
@@ -119,8 +120,11 @@ pub struct TokenInfo {
 }
 
 impl TokenInfo {
+    #[must_use]
     pub fn total_tokens(&self) -> u64 {
-        self.input_tokens.unwrap_or(0) + self.output_tokens.unwrap_or(0)
+        self.input_tokens
+            .unwrap_or(0)
+            .saturating_add(self.output_tokens.unwrap_or(0))
     }
 }
 
@@ -167,6 +171,7 @@ pub struct Message {
 }
 
 impl Message {
+    #[must_use]
     pub fn new(
         conversation_id: String,
         role: MessageRole,
@@ -210,31 +215,37 @@ impl Message {
         }
     }
 
+    #[must_use]
     pub fn with_request_id(mut self, request_id: String) -> Self {
         self.request_id = Some(request_id);
         self
     }
 
+    #[must_use]
     pub fn with_routing(mut self, routing: RoutingInfo) -> Self {
         self.routing = routing;
         self
     }
 
+    #[must_use]
     pub fn with_mcp(mut self, mcp: MCPInfo) -> Self {
         self.mcp = mcp;
         self
     }
 
-    pub fn with_tokens(mut self, tokens: TokenInfo) -> Self {
+    #[must_use]
+    pub const fn with_tokens(mut self, tokens: TokenInfo) -> Self {
         self.tokens = tokens;
         self
     }
 
+    #[must_use]
     pub fn with_cost(mut self, cost: CostInfo) -> Self {
         self.cost_info = Some(cost);
         self
     }
 
+    #[must_use]
     pub fn with_tool_calls(mut self, tool_calls: serde_json::Value) -> Self {
         self.tool_calls = Some(tool_calls);
         self
@@ -326,6 +337,7 @@ pub struct CompositeStore {
 }
 
 impl CompositeStore {
+    #[must_use]
     pub fn new(primary: Box<dyn ChatHistoryStore>, strict: bool) -> Self {
         Self {
             primary,
@@ -457,30 +469,29 @@ impl ChatHistoryStore for CompositeStore {
 fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+        .map_or(0, |duration| duration.as_secs())
 }
 
 fn calculate_content_hash(content: &serde_json::Value) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    let content_str = content.to_string();
     let mut hasher = DefaultHasher::new();
-    content_str.hash(&mut hasher);
+    content.to_string().hash(&mut hasher);
     format!("{:x}", hasher.finish())
 }
 
 fn generate_content_summary(content: &serde_json::Value) -> String {
     let content_str = content.to_string();
-    if content_str.len() > 100 {
-        format!("{}...", &content_str[..100])
-    } else {
-        content_str
+    if content_str.len() <= 100 {
+        return content_str;
     }
+    let prefix: String = content_str.chars().take(100).collect();
+    format!("{prefix}...")
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test fixtures are fixed")]
 mod tests {
     use super::*;
 

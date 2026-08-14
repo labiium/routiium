@@ -21,6 +21,15 @@ use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -29,6 +38,15 @@ fn current_timestamp() -> u64 {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_conversation_lifecycle() {
     let store = MemoryChatHistoryStore::new();
     store.init().await.unwrap();
@@ -56,6 +74,16 @@ async fn test_conversation_lifecycle() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    clippy::float_cmp,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_message_with_full_routing_info() {
     let store = MemoryChatHistoryStore::new();
     store.init().await.unwrap();
@@ -142,6 +170,15 @@ async fn test_message_with_full_routing_info() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_privacy_levels() {
     let store = MemoryChatHistoryStore::new();
     store.init().await.unwrap();
@@ -180,6 +217,15 @@ async fn test_privacy_levels() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_routing_filter_by_backend() {
     let store = MemoryChatHistoryStore::new();
     store.init().await.unwrap();
@@ -248,6 +294,15 @@ async fn test_routing_filter_by_backend() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_model_aliasing_queries() {
     let store = MemoryChatHistoryStore::new();
     store.init().await.unwrap();
@@ -304,6 +359,15 @@ async fn test_model_aliasing_queries() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_mcp_tracking() {
     let store = MemoryChatHistoryStore::new();
     store.init().await.unwrap();
@@ -357,6 +421,15 @@ async fn test_mcp_tracking() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_upstream_mode_filter() {
     let store = MemoryChatHistoryStore::new();
     store.init().await.unwrap();
@@ -411,6 +484,15 @@ async fn test_upstream_mode_filter() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_route_id_filter() {
     let store = MemoryChatHistoryStore::new();
     store.init().await.unwrap();
@@ -449,6 +531,15 @@ async fn test_route_id_filter() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_time_range_filters() {
     let store = MemoryChatHistoryStore::new();
     store.init().await.unwrap();
@@ -494,6 +585,15 @@ async fn test_time_range_filters() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_jsonl_backend_persistence() {
     let temp_file = NamedTempFile::new().unwrap();
     let path = temp_file.path().to_path_buf();
@@ -538,6 +638,15 @@ async fn test_jsonl_backend_persistence() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_composite_store() {
     let temp_file = NamedTempFile::new().unwrap();
     let path = temp_file.path().to_path_buf();
@@ -567,6 +676,15 @@ async fn test_composite_store() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_manager_integration() {
     let temp_file = NamedTempFile::new().unwrap();
     let path = temp_file.path().to_string_lossy().to_string();
@@ -576,7 +694,7 @@ async fn test_manager_integration() {
         primary_backend: "memory".to_string(),
         sink_backends: vec!["jsonl".to_string()],
         privacy_level: PrivacyLevel::Full,
-        ttl_seconds: 2592000,
+        ttl_seconds: 2_592_000,
         strict: false,
         jsonl_path: Some(path.clone()),
         memory_max_messages: Some(1000),
@@ -621,13 +739,22 @@ async fn test_manager_integration() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_turso_backend_is_disabled_until_dependency_audit_is_clean() {
     let config = ChatHistoryConfig {
         enabled: true,
         primary_backend: "turso".to_string(),
         sink_backends: Vec::new(),
         privacy_level: PrivacyLevel::Full,
-        ttl_seconds: 2592000,
+        ttl_seconds: 2_592_000,
         strict: false,
         jsonl_path: None,
         memory_max_messages: Some(1000),
@@ -637,9 +764,8 @@ async fn test_turso_backend_is_disabled_until_dependency_audit_is_clean() {
         turso_auth_token: Some("token".to_string()),
     };
 
-    let err = match ChatHistoryManager::new(config).await {
-        Ok(_) => panic!("turso backend unexpectedly initialized"),
-        Err(err) => err,
+    let Err(err) = ChatHistoryManager::new(config).await else {
+        panic!("turso backend unexpectedly initialized");
     };
     assert!(
         err.to_string().contains("RustSec TLS advisories"),
@@ -648,6 +774,15 @@ async fn test_turso_backend_is_disabled_until_dependency_audit_is_clean() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_conversation_list_with_filters() {
     let store = MemoryChatHistoryStore::new();
     store.init().await.unwrap();
@@ -665,28 +800,37 @@ async fn test_conversation_list_with_filters() {
     store.record_conversation(&conv3).await.unwrap();
 
     // List all
-    let filters = ConversationFilters::default();
-    let convs = store.list_conversations(&filters).await.unwrap();
-    assert_eq!(convs.len(), 3);
+    let all_filters = ConversationFilters::default();
+    let all_conversations = store.list_conversations(&all_filters).await.unwrap();
+    assert_eq!(all_conversations.len(), 3);
 
     // List with limit
-    let filters = ConversationFilters {
+    let limit_filters = ConversationFilters {
         limit: Some(2),
         ..Default::default()
     };
-    let convs = store.list_conversations(&filters).await.unwrap();
-    assert_eq!(convs.len(), 2);
+    let limited_conversations = store.list_conversations(&limit_filters).await.unwrap();
+    assert_eq!(limited_conversations.len(), 2);
 
     // List with time filter
-    let filters = ConversationFilters {
+    let time_filters = ConversationFilters {
         start_time: Some(now),
         ..Default::default()
     };
-    let convs = store.list_conversations(&filters).await.unwrap();
-    assert!(!convs.is_empty());
+    let time_filtered_conversations = store.list_conversations(&time_filters).await.unwrap();
+    assert!(!time_filtered_conversations.is_empty());
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_delete_conversation() {
     let store = MemoryChatHistoryStore::new();
     store.init().await.unwrap();
@@ -730,16 +874,25 @@ async fn test_delete_conversation() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_clear_all_data() {
     let store = MemoryChatHistoryStore::new();
     store.init().await.unwrap();
 
     for i in 0..5 {
-        let conv = Conversation::new(format!("conv_{}", i));
+        let conv = Conversation::new(format!("conv_{i}"));
         store.record_conversation(&conv).await.unwrap();
 
         let msg = Message::new(
-            format!("conv_{}", i),
+            format!("conv_{i}"),
             MessageRole::User,
             json!({"text": format!("Message {}", i)}),
             PrivacyLevel::Full,
@@ -759,6 +912,16 @@ async fn test_clear_all_data() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    clippy::too_many_lines,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_complex_routing_scenario() {
     let store = MemoryChatHistoryStore::new();
     store.init().await.unwrap();
@@ -898,8 +1061,7 @@ async fn test_complex_routing_scenario() {
                 && m.routing
                     .actual_model
                     .as_ref()
-                    .map(|a| a.contains("claude"))
-                    .unwrap_or(false)
+                    .is_some_and(|a| a.contains("claude"))
         })
         .collect();
     assert_eq!(aliased.len(), 1);
@@ -914,6 +1076,15 @@ async fn test_complex_routing_scenario() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_health_check() {
     let store = MemoryChatHistoryStore::new();
     assert!(store.health().await.unwrap());
@@ -925,6 +1096,15 @@ async fn test_health_check() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::as_conversions,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 async fn test_stats_accuracy() {
     let store = MemoryChatHistoryStore::new();
     store.init().await.unwrap();
@@ -935,12 +1115,12 @@ async fn test_stats_accuracy() {
     assert_eq!(stats.total_messages, 0);
 
     for i in 0..3 {
-        let conv = Conversation::new(format!("conv_{}", i));
+        let conv = Conversation::new(format!("conv_{i}"));
         store.record_conversation(&conv).await.unwrap();
 
         for j in 0..5 {
             let msg = Message::new(
-                format!("conv_{}", i),
+                format!("conv_{i}"),
                 MessageRole::User,
                 json!({"text": format!("Message {}", j)}),
                 PrivacyLevel::Full,

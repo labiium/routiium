@@ -130,7 +130,9 @@ ROUTIIUM_CACHE_TTL_MS=0
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Default upstream base URL. |
 | `MODEL` | unset | Default model when clients omit `model`. |
 | `ROUTIIUM_MANAGED_MODE` | auto | Force managed or passthrough auth mode. |
-| `ROUTIIUM_UPSTREAM_MODE` | `responses` | `responses`, `chat`, or provider-specific modes. |
+| `ROUTIIUM_UPSTREAM_MODE` | `responses` | `responses`, `chat`, `bedrock`, or `bedrock_mantle`. |
+| `AWS_REGION` | unset | AWS region used for Bedrock Mantle routing and SigV4 signing. |
+| `AWS_BEARER_TOKEN_BEDROCK` | unset | Optional Amazon Bedrock API key for Mantle HTTP authentication. |
 | `ROUTIIUM_HTTP_TIMEOUT_SECONDS` | unset | Upstream request timeout. |
 | `RUST_LOG` | `info,tower_http=info` | Tracing filter. |
 

@@ -1,6 +1,5 @@
 use actix_web::{test, web, App};
 use axum::{extract::State, routing::post, Json, Router};
-use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,7 +11,8 @@ use routiium::server::config_routes;
 use routiium::system_prompt_config::SystemPromptConfig;
 use routiium::util::AppState;
 
-static ENV_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
+static ENV_LOCK: std::sync::LazyLock<AsyncMutex<()>> =
+    std::sync::LazyLock::new(|| AsyncMutex::new(()));
 
 #[derive(Clone)]
 struct UpstreamState {
@@ -36,6 +36,11 @@ struct MockUpstream {
 }
 
 impl MockUpstream {
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "test upstream setup intentionally fails fast"
+    )]
     async fn start(response: Value) -> Self {
         let requests = Arc::new(AsyncMutex::new(Vec::new()));
         let state = UpstreamState {
@@ -51,7 +56,7 @@ impl MockUpstream {
             .await
             .expect("bind upstream");
         let addr = listener.local_addr().expect("local addr");
-        let base_url = format!("http://{}", addr);
+        let base_url = format!("http://{addr}");
 
         let join = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -101,6 +106,12 @@ impl Drop for EnvRestore {
     }
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn chat_passthrough_preserves_vllm_args_with_prompt_injection() {
     let _guard = ENV_LOCK.lock().await;
@@ -187,6 +198,12 @@ async fn chat_passthrough_preserves_vllm_args_with_prompt_injection() {
     assert_eq!(messages[1]["role"], "user");
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn chat_passthrough_preserves_reasoning_content() {
     let _guard = ENV_LOCK.lock().await;
@@ -256,6 +273,12 @@ async fn chat_passthrough_preserves_reasoning_content() {
     assert!(parsed["choices"][0]["message"]["content"].is_null());
 }
 
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "integration tests intentionally fail fast on malformed fixtures"
+)]
 #[actix_web::test]
 async fn responses_passthrough_forwards_vllm_args_in_chat_mode() {
     let _guard = ENV_LOCK.lock().await;
