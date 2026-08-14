@@ -312,6 +312,17 @@ async fn test_status_endpoint_includes_new_routes() {
     );
     assert_eq!(body_json["component_profile"]["component"], "patchbay");
     assert_eq!(body_json["component_profile"]["profile"], "standard");
+    let source_revision = body_json["component_profile"]["source_revision"]
+        .as_str()
+        .unwrap();
+    assert!(
+        source_revision == "unknown" || {
+            source_revision.len() == 40
+                && source_revision
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        }
+    );
     assert_eq!(body_json["component_profile"]["ready"], true);
     assert_eq!(body_json["component_profile"]["effective_mode"], "protect");
     assert_eq!(

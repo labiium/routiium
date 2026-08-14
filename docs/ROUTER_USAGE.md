@@ -893,6 +893,16 @@ curl http://localhost:8088/analytics/events?limit=500 | jq '
 
 ## 10. Reference: Key Router Environment Variables
 
+### Patchbay source identity
+
+The live `/status.component_profile` object includes an immutable
+`source_revision`. The dependency-free `build.rs` resolver accepts an explicit
+40-character revision from `ROUTIIUM_BUILD_REVISION`; otherwise it records the
+local Git `HEAD`. If neither is available or valid, it emits `unknown`, which
+must not be treated as a certified source identity. Certified Bench deployments
+should set `ROUTIIUM_BUILD_REVISION` in the build environment and verify the
+`mesurii.component-profile.v1` status contract before serving traffic.
+
 | Env var | Default | Purpose |
 | ------- | ------- | ------- |
 | `ROUTIIUM_ROUTER_URL` | unset | Base URL for the remote Router API (`http(s)://...`). |

@@ -5548,6 +5548,7 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
             "schema": "mesurii.component-profile.v1",
             "component": "patchbay",
             "profile": safety_config.profile.clone(),
+            "source_revision": env!("ROUTIIUM_BUILD_REVISION"),
             "ready": true,
             "effective_mode": if patchbay_bench { "off" } else { safety_config.mode.as_str() },
             "gates": if patchbay_bench { serde_json::json!([]) } else { serde_json::json!(["content", "safety_judge"]) }
