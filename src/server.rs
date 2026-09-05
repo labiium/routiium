@@ -401,7 +401,13 @@ fn authorize_admin_request(
     };
 
     let provided = bearer_from_request(req);
-    if provided.as_deref() == Some(expected_token) {
+    let token_matches = provided.as_deref().is_some_and(|candidate| {
+        use subtle::ConstantTimeEq;
+        let expected = expected_token.as_bytes();
+        let candidate = candidate.as_bytes();
+        candidate.len() == expected.len() && bool::from(candidate.ct_eq(expected))
+    });
+    if token_matches {
         return Ok(());
     }
 
