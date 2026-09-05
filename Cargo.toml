@@ -1,6 +1,6 @@
 [package]
 name = "routiium"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "OpenAI-compatible LLM gateway for routing, safety, analytics, and provider proxying."
 license = "Apache-2.0"
