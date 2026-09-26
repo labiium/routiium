@@ -428,7 +428,7 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
     let mut router_config_path_state: Option<String> = None;
     let mut router_url_state: Option<String> = None;
     let mut embedded_router_active = false;
-    let router_client: Option<Arc<dyn routiium::router_client::RouterClient>> =
+    let base_router_client: Option<Arc<dyn routiium::router_client::RouterClient>> =
         if let Some(router_path) = router_config_arg.clone() {
             tracing::info!("Loading router configuration from: {}", router_path);
             match routiium::router_client::LocalPolicyRouter::from_file(&router_path) {
@@ -482,6 +482,65 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
             );
             None
         };
+
+    let router_client = base_router_client.map(|base_router| {
+        match routiium::decision::DecisionClientConfig::from_env() {
+            Ok(Some(decision_config)) => {
+                let routing_config =
+                    routiium::router_client::DecisionRouterConfig::from_env(decision_config.kind());
+                match routiium::decision::DecisionClient::new(decision_config) {
+                    Ok(decisions) => {
+                        tracing::info!(
+                            provider = decisions.kind().as_str(),
+                            model = %routing_config.model,
+                            "Typed-decision model routing enabled for aliases: {}",
+                            routing_config.route_aliases.join(",")
+                        );
+                        let wrapped: Arc<dyn routiium::router_client::RouterClient> = Arc::new(
+                            routiium::router_client::DecisionRouterClient::with_decision_client(
+                                base_router,
+                                decisions,
+                                &routing_config,
+                            ),
+                        );
+                        wrapped
+                    }
+                    Err(error) => {
+                        tracing::warn!("Unable to initialize decision provider: {error}");
+                        base_router
+                    }
+                }
+            }
+            Ok(None) => {
+                let Some(jev_config) = routiium::jev::JevConfig::from_env() else {
+                    return base_router;
+                };
+                match routiium::jev::JevClient::new(&jev_config) {
+                    Ok(jev) => {
+                        tracing::info!(
+                            "Legacy Jev model routing enabled for aliases: {}",
+                            jev_config.route_aliases.join(",")
+                        );
+                        let wrapped: Arc<dyn routiium::router_client::RouterClient> =
+                            Arc::new(routiium::router_client::JevRouterClient::new(
+                                base_router,
+                                jev,
+                                &jev_config,
+                            ));
+                        wrapped
+                    }
+                    Err(error) => {
+                        tracing::warn!("Unable to initialize legacy Jev routing: {error}");
+                        base_router
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!("Invalid typed-decision configuration: {error}");
+                base_router
+            }
+        }
+    });
 
     let effective_router_strict = if embedded_router_active {
         true

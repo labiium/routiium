@@ -881,6 +881,44 @@ fn runtime_config_summary(state: &AppState) -> serde_json::Value {
     })
 }
 
+fn jev_status() -> serde_json::Value {
+    let Some(config) = crate::jev::JevConfig::from_env() else {
+        return serde_json::json!({
+            "enabled": false
+        });
+    };
+    let enabled = crate::jev::JevClient::new(&config).is_ok();
+    serde_json::json!({
+        "enabled": enabled,
+        "route_aliases": config.route_aliases,
+        "fail_closed": config.fail_closed,
+        "catalog_ttl_ms": config.catalog_ttl_ms
+    })
+}
+
+fn decision_status() -> serde_json::Value {
+    match crate::decision::DecisionClientConfig::from_env() {
+        Ok(Some(config)) => {
+            let provider = config.kind();
+            let model = std::env::var("ROUTIIUM_DECISION_MODEL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| provider.default_model().to_string());
+            let enabled = crate::decision::DecisionClient::new(config).is_ok();
+            serde_json::json!({
+                "enabled": enabled,
+                "provider": provider.as_str(),
+                "model": model
+            })
+        }
+        Ok(None) => serde_json::json!({"enabled": false}),
+        Err(error) => serde_json::json!({
+            "enabled": false,
+            "error": error.to_string()
+        }),
+    }
+}
+
 fn log_request_start(
     api: &str,
     req: &HttpRequest,
@@ -4894,6 +4932,8 @@ async fn admin_panel_state(state: web::Data<AppState>, req: HttpRequest) -> impl
                 },
                 "config_path": state.router_config_path,
                 "url": state.router_url,
+                "jev": jev_status(),
+                "decision": decision_status(),
                 "catalog_revision": router_catalog.as_ref().map(|catalog| catalog.revision.clone()),
                 "catalog_models": router_catalog_models
             }
@@ -5526,7 +5566,9 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
             "url": router_url,
             "strict": state.router_strict,
             "cache_ttl_ms": state.router_cache_ttl_ms,
-            "privacy_mode": state.router_privacy_mode
+            "privacy_mode": state.router_privacy_mode,
+            "jev": jev_status(),
+            "decision": decision_status()
         },
         "governance": governance,
         "runtime_config": runtime_config_summary(&state),
@@ -5534,6 +5576,9 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
             "enabled": safety_config.mode != crate::safety_judge::SafetyMode::Off,
             "mode": safety_config.mode.as_str(),
             "llm_enabled": safety_config.llm_enabled,
+            "decision_provider": safety_config
+                .decision_provider
+                .map(crate::decision::DecisionProviderKind::as_str),
             "llm_model": safety_config.llm_model,
             "llm_api_key_env": safety_config.llm_api_key_env,
             "llm_key_present": judge_key_present,

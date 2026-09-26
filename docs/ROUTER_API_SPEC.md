@@ -324,7 +324,8 @@ Both endpoints follow the same schema rules and should emit `Router-Schema` head
 | `X-Policy-Rev` | Router | Mirrors `policy.revision`. |
 | `X-Content-Used` | Router | `none`, `summary`, `full`. |
 
-Routiium propagates these headers to client responses when `ROUTIIUM_EXPOSE_ROUTE_HEADERS=1` is set.
+Routiium propagates these headers to client responses when routing is active; there
+is no environment switch for disabling the route headers.
 
 ---
 

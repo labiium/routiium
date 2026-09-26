@@ -39,6 +39,8 @@ pub mod chat_history_sqlite;
 pub mod chat_history_postgres;
 
 pub mod conversion;
+pub mod decision;
+pub mod jev;
 pub mod judge_selector;
 pub mod mcp_client;
 pub mod mcp_config;
@@ -64,6 +66,11 @@ pub use crate::chat_history::{
 pub use crate::chat_history_jsonl::JsonlChatHistoryStore;
 pub use crate::chat_history_manager::{ChatHistoryConfig, ChatHistoryManager};
 pub use crate::chat_history_memory::MemoryChatHistoryStore;
+pub use crate::decision::{
+    choice_criteria, questions, state_object, ChoiceQuestion, DecisionAnswer, DecisionClient,
+    DecisionClientConfig, DecisionError, DecisionProvider, DecisionProviderKind, DecisionQuestion,
+    DecisionRequest, DecisionResponse, DecisionUsage, NoulQuestion, ScoreQuestion,
+};
 
 #[cfg(feature = "sqlite")]
 pub use crate::chat_history_sqlite::SqliteChatHistoryStore;
@@ -71,12 +78,16 @@ pub use crate::chat_history_sqlite::SqliteChatHistoryStore;
 #[cfg(feature = "postgres")]
 pub use crate::chat_history_postgres::PostgresChatHistoryStore;
 
+pub use crate::jev::{
+    JevCandidate, JevClient, JevConfig, JevError, JevModelRouteRequest, JevRouteDecision,
+};
 pub use crate::pricing::{ModelPricing, PricingConfig};
 pub use crate::router_client::{
-    CachedRouterClient, EmbeddedDefaultRouter, FallbackConfig, HttpRouterClient, HttpRouterConfig,
-    JudgeMetadata, LocalPolicyRouter, LocalRouter, PrivacyTier, RouteError, RouteFeedback,
-    RouteHints, RouteLimits, RoutePlan, RouteRequest, RouterCache, RouterClient, RouterMode,
-    UpstreamConfig, UpstreamMode as RouterUpstreamMode,
+    CachedRouterClient, DecisionRouterClient, DecisionRouterConfig, EmbeddedDefaultRouter,
+    FallbackConfig, HttpRouterClient, HttpRouterConfig, JevRouterClient, JudgeMetadata,
+    LocalPolicyRouter, LocalRouter, PrivacyTier, RouteError, RouteFeedback, RouteHints,
+    RouteLimits, RoutePlan, RouteRequest, RouterCache, RouterClient, RouterMode, UpstreamConfig,
+    UpstreamMode as RouterUpstreamMode,
 };
 pub use crate::routing_config::{
     BackendConfig, LoadBalanceStrategy, MatchStrategy, ModelAlias, RequestTransform, ResolvedRoute,

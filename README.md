@@ -57,6 +57,18 @@ routiium router probe --model gpt-4.1-nano
 
 Routiium ships with aliases such as `auto`, `fast`, `balanced`, `safe`, `secure`, and `premium` with cost/latency/context-aware scoring. You do not need another project to get default routing. Remote router mode is optional for teams that want a separate Router-compatible policy service for central policy, catalog, health, and overlay management; EduRouter is only a small companion/reference implementation of that interface.
 
+For provider-neutral typed-decision routing, set `ROUTIIUM_DECISION_PROVIDER`
+to `openrouter` or `typesafe`, configure that provider's API key environment
+variable, and send requests with `model: "auto"`. Routiium gives the decision
+model only approved Router catalog candidates; the existing Router still
+resolves the final upstream. Selection is fail-open by default and uses the
+built-in auto aliases. Request features are sent by default; bounded redacted
+context requires an explicit `ROUTIIUM_DECISION_PRIVACY_MODE` setting. The
+public `DecisionClient` also supports generic typed classification, and the
+request LLM judge can opt into it with `ROUTIIUM_JUDGE_DECISION_PROVIDER`.
+The existing `JEV_API_KEY` integration remains available as a legacy routing
+backend when `ROUTIIUM_DECISION_PROVIDER` is unset.
+
 ### 4. Inspect the built-in judge
 
 ```bash

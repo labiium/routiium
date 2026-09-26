@@ -174,8 +174,41 @@ YAML alias `rate_limit_policy` is a fallback policy id from `rate_limit_policies
 | `ROUTIIUM_ROUTER_PRIVACY_MODE` | `full` embedded, `features` remote profile | `features`, `summary`, or `full`. |
 | `ROUTIIUM_ROUTER_STRICT` | `1` embedded, unset otherwise | Preserve router errors instead of falling back. |
 | `ROUTIIUM_ROUTER_MTLS` | unset | Enable mTLS support in the HTTP router client. |
+| `ROUTIIUM_DECISION_PROVIDER` | unset | Enable typed-decision routing with `openrouter` or `typesafe`. |
+| `ROUTIIUM_DECISION_API_KEY_ENV` | provider default | Name of the environment variable holding the provider key; defaults to `OPENROUTER_API_KEY` or `TYPESAFE_API_KEY`. |
+| `ROUTIIUM_DECISION_MODEL` | provider default | Model passed to the decision API. Set an explicit versioned model for reproducible behavior. |
+| `ROUTIIUM_DECISION_ENDPOINT` | provider endpoint | Optional full endpoint override for compatible deployments and local tests. |
+| `ROUTIIUM_DECISION_TIMEOUT_MS` | `1000` | Typed-decision request timeout. |
+| `ROUTIIUM_DECISION_ROUTE_ALIASES` | built-in auto aliases | Comma-separated aliases routed through the typed decision provider. |
+| `ROUTIIUM_DECISION_STRICT` | unset | When truthy, return a routing error instead of falling back if the decision provider fails. |
+| `ROUTIIUM_DECISION_CATALOG_TTL_MS` | `60000` | How long the Router catalog is reused for model choices. |
+| `ROUTIIUM_DECISION_PRIVACY_MODE` | `features` | `features` sends no prompt content; `summary` or `full` sends bounded redacted context after local safety checks. |
+| `JEV_API_KEY` / `ROUTIIUM_JEV_API_KEY` | unset | Bearer key for the Jev model-routing API. |
+| `ROUTIIUM_JEV_API_KEY_ENV` | unset | Name of the environment variable holding the Jev key; takes precedence over direct key variables. |
+| `ROUTIIUM_JEV_BASE_URL` | `https://www.jevai.org` | Jev API base URL. Routiium calls `/api/v1/decisions/model-route`. |
+| `ROUTIIUM_JEV_TIMEOUT_MS` | `750` | Jev decision timeout in milliseconds. |
+| `ROUTIIUM_JEV_STRICT` | unset | When truthy, Jev failures fail the request instead of falling back to the normal Router. |
+| `ROUTIIUM_JEV_CATALOG_TTL_MS` | `60000` | How long the Router model catalog is reused for Jev decisions. |
+| `ROUTIIUM_JEV_PRIVACY_MODE` | `features` | `features` sends no prompt content; `summary` may send the bounded redacted summary; `full` may send bounded redacted recent user content after a local safety gate. |
 
 Use `routiium router explain --model auto` before starting a server and `routiium router probe --model <alias>` after changing router settings.
+
+When `ROUTIIUM_DECISION_PROVIDER` is set, Routiium sends the same typed
+`model`/`state`/`questions` request shape to OpenRouter Decisions or TypeSafe
+System One. It asks the model to choose among approved Router catalog entries;
+the wrapped Router still validates the selected ID and resolves the final
+upstream plan and credentials. Only healthy, non-deprecated catalog entries
+that satisfy known capability and context requirements are offered. Explicit
+model aliases bypass decision routing unless included in
+`ROUTIIUM_DECISION_ROUTE_ALIASES`. Failures fall back by default. The prior
+Jevai `/api/v1/decisions/model-route` integration remains available when the
+provider-neutral setting is unset.
+
+Routiium also exports a public `DecisionClient` for typed `noul`, `choice`, and
+`score` questions, so applications can use the same provider-neutral contract
+for classification. The request LLM judge can opt into the same protocol with
+`ROUTIIUM_JUDGE_DECISION_PROVIDER`; deterministic checks and local policy
+merging remain in Routiium. The response guard remains a separate local check.
 
 ## Built-in judge and remote judge profiles
 
@@ -185,7 +218,12 @@ Routiium consumes the `ROUTIIUM_JUDGE_*` variables for the embedded judge. The l
 | --- | --- | --- |
 | `ROUTIIUM_JUDGE_MODE` | `protect` | `off`, `shadow`, `protect`, or `enforce`. |
 | `ROUTIIUM_JUDGE_LLM` | `auto` | `auto` uses the LLM judge when the configured key is present; `off` uses deterministic checks only. |
-| `ROUTIIUM_JUDGE_MODEL` | `gpt-5-nano` | Judge model for optional external LLM judging. |
+| `ROUTIIUM_JUDGE_MODEL` | `gpt-5-nano` | Judge model for optional external LLM judging; also serves as typed-decision model unless the decision-specific variable is set. |
+| `ROUTIIUM_JUDGE_DECISION_PROVIDER` | unset | Optional typed-decision backend: `openrouter` or `typesafe`; unset preserves the existing chat-completions judge. |
+| `ROUTIIUM_JUDGE_DECISION_MODEL` | provider default | Typed-decision model for the request judge. |
+| `ROUTIIUM_JUDGE_DECISION_ENDPOINT` | provider endpoint | Optional typed-decision endpoint override. |
+| `ROUTIIUM_JUDGE_DECISION_MIN_CONFIDENCE` | unset | Optional minimum confidence for verdict and risk choices; lower or missing confidence makes the LLM judge unavailable for that request. |
+| `ROUTIIUM_JUDGE_DECISION_CATEGORY_THRESHOLD` | `0.5` | Probability threshold for typed safety-category signals. |
 | `ROUTIIUM_JUDGE_BASE_URL` | `https://api.openai.com/v1` | Judge provider base URL. |
 | `ROUTIIUM_JUDGE_SAFE_TARGET` | `safe` | Embedded route target for downgrades. |
 | `ROUTIIUM_JUDGE_SENSITIVE_TARGET` | `secure` | Embedded route target for sensitive-but-allowable requests such as prompt injection or secrets in prompts. |
@@ -194,10 +232,10 @@ Routiium consumes the `ROUTIIUM_JUDGE_*` variables for the embedded judge. The l
 | `ROUTIIUM_REJECTION_MODE` | `agent_result` | `agent_result` returns OpenAI-compatible rejected assistant results for agent loops; `http_error` returns strict HTTP 403 policy errors. |
 | `ROUTIIUM_JUDGE_POLICY_PATH` | unset | Optional JSON policy overlay for custom prompts and judge route targets. |
 | `ROUTIIUM_JUDGE_PROMPT_FILE` | unset | Optional operator prompt file appended after Routiium's immutable safety prompt. |
-| `ROUTIIUM_JUDGE_API_KEY_ENV` | `OPENAI_API_KEY` | Env var holding the judge provider key. |
+| `ROUTIIUM_JUDGE_API_KEY_ENV` | `OPENAI_API_KEY` or selected decision provider default | Env var holding the judge provider key. |
 | `ROUTIIUM_JUDGE_TIMEOUT_MS` | `800` | Judge timeout. |
 | `ROUTIIUM_JUDGE_OUTPUT_MODE` | `auto` | `auto` prefers tool/function calling and falls back to JSON; `tool` requires a judge tool call; `json` uses JSON response mode only. |
-| `ROUTIIUM_JUDGE_MAX_TOKENS` | `1024` | Maximum tokens for the JSON or tool-call LLM-judge response. Reasoning-heavy judge models may need this headroom. |
+| `ROUTIIUM_JUDGE_MAX_TOKENS` | `1024` | Maximum tokens for the chat-completions JSON or tool-call judge response; typed-decision APIs bound their own output. |
 | `ROUTIIUM_JUDGE_RECENT_MESSAGES` | `5` | Maximum messages included in full router/judge conversation context. The first user instruction is anchored when present, then recent tail messages fill the remaining window. |
 | `ROUTIIUM_JUDGE_RECENT_TOKEN_BUDGET` | `4000` | Approximate token budget for the full router/judge recent-message window. Large tool/MCP dumps are dropped from the window when they exceed this budget. |
 | `ROUTIIUM_WEB_JUDGE` | `restricted` | `off`, `restricted`, or `full`; restricted does URL/domain checks without sending private prompts to search. |

@@ -105,7 +105,9 @@ Three implementations of `RateLimitStore` are provided. Selection is automatic b
 
 Atomic Lua scripts perform check-and-increment in a single round-trip. Both fixed and sliding windows are supported. Requires a pool (controlled by `ROUTIIUM_REDIS_POOL_MAX`, default 16).
 
-Policy metadata (policy definitions, default policy ID, per-key assignments, emergency blocks) are stored as JSON in Redis keys, namespaced by `ROUTIIUM_REDIS_NAMESPACE` (default: none).
+Policy metadata (policy definitions, default policy ID, per-key assignments, and
+emergency blocks) is stored as JSON in Redis keys using Routiium's built-in key
+prefixes.
 
 ### 3.2 Sled
 

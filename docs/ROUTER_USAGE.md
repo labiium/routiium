@@ -43,6 +43,23 @@ The router layer lets Routiium resolve human-friendly model aliases into concret
 4. Routiium forwards the request upstream using that plan, adds observability headers (e.g. `x-route-id`, `x-resolved-model`, `router-schema`), and submits router feedback when supported.
 5. Embedded safety denials never fall back to legacy routing. Remote router failures can fall back only when strict mode is disabled.
 
+Set `ROUTIIUM_DECISION_PROVIDER=openrouter` or `typesafe` to route built-in auto
+aliases through the shared typed-decision interface. Routiium obtains the
+Router catalog, asks the configured model to choose one approved model with a
+typed `choice` question, validates that answer against the catalog, and passes
+it back through the normal Router. The catalog is cached for
+`ROUTIIUM_DECISION_CATALOG_TTL_MS` (default 60 seconds); failures fall back to
+the normal Router unless `ROUTIIUM_DECISION_STRICT=1` is set. Explicit model
+aliases remain deterministic unless listed in
+`ROUTIIUM_DECISION_ROUTE_ALIASES`.
+
+For direct classification use, construct the public `DecisionClient` and send a
+`DecisionRequest` with `noul`, `choice`, or `score` questions. The optional
+request LLM judge can use this same contract with
+`ROUTIIUM_JUDGE_DECISION_PROVIDER`; its deterministic checks and policy merge
+remain enabled. The legacy `JEV_API_KEY` path continues to call Jevai's
+specialized model-route endpoint if no provider-neutral provider is configured.
+
 The Router contract is documented in detail in [`ROUTER_API_SPEC.md`](ROUTER_API_SPEC.md); `../examples/router_service.rs` is a runnable reference implementation.
 
 ---
@@ -912,6 +929,27 @@ should set `ROUTIIUM_BUILD_REVISION` in the build environment and verify the
 | `ROUTIIUM_JUDGE_RECENT_TOKEN_BUDGET` | `4000` | Approximate full-mode token budget for router/judge recent-message context. |
 | `ROUTIIUM_ROUTER_STRICT` | unset | When truthy (`1`, `true`, `yes`, `on`), fail client requests if routing fails. |
 | `ROUTIIUM_ROUTER_MTLS` | unset | Enable mutual TLS for router calls (certs must already exist on the host). |
+| `ROUTIIUM_DECISION_PROVIDER` | unset | `openrouter` or `typesafe` provider for generic typed decisions. |
+| `ROUTIIUM_DECISION_API_KEY_ENV` | provider default | Environment variable holding the decision-provider key. |
+| `ROUTIIUM_DECISION_MODEL` | provider default | Model used for model-selection decisions; use a pinned version for reproducibility. |
+| `ROUTIIUM_DECISION_ENDPOINT` | provider endpoint | Full endpoint override for compatible providers or local tests. |
+| `ROUTIIUM_DECISION_TIMEOUT_MS` | `1000` | Timeout for typed-decision requests. |
+| `ROUTIIUM_DECISION_ROUTE_ALIASES` | built-in auto aliases | Comma-separated model aliases delegated to typed decisions. |
+| `ROUTIIUM_DECISION_STRICT` | unset | Fail closed instead of using the normal Router when the decision call fails. |
+| `ROUTIIUM_DECISION_CATALOG_TTL_MS` | `60000` | Router catalog cache horizon for typed model selection. |
+| `ROUTIIUM_DECISION_PRIVACY_MODE` | `features` | `features` sends no prompt content; `summary`/`full` sends bounded redacted context after a local safety gate. |
+| `ROUTIIUM_JUDGE_DECISION_PROVIDER` | unset | Opt the request LLM judge into `openrouter` or `typesafe`; unset keeps its chat-completions backend. |
+| `ROUTIIUM_JUDGE_DECISION_MODEL` | provider default | Typed-decision judge model; set a pinned version for reproducible behavior. |
+| `ROUTIIUM_JUDGE_DECISION_ENDPOINT` | provider endpoint | Optional endpoint override for the typed-decision judge. |
+| `ROUTIIUM_JUDGE_DECISION_MIN_CONFIDENCE` | unset | Optional minimum confidence for verdict and risk answers. |
+| `ROUTIIUM_JUDGE_DECISION_CATEGORY_THRESHOLD` | `0.5` | Probability threshold for typed safety-category signals. |
+| `JEV_API_KEY` / `ROUTIIUM_JEV_API_KEY` | unset | Bearer key for Jev. |
+| `ROUTIIUM_JEV_API_KEY_ENV` | unset | Environment variable name holding the Jev key. |
+| `ROUTIIUM_JEV_BASE_URL` | `https://www.jevai.org` | Jev API base URL. |
+| `ROUTIIUM_JEV_TIMEOUT_MS` | `750` | Jev request timeout in milliseconds. |
+| `ROUTIIUM_JEV_STRICT` | unset | Fail closed when Jev cannot select a route. |
+| `ROUTIIUM_JEV_CATALOG_TTL_MS` | `60000` | Router catalog cache horizon for Jev. |
+| `ROUTIIUM_JEV_PRIVACY_MODE` | `features` | `features` sends no prompt content; `summary` or `full` opt in to bounded redacted context after a local safety gate. |
 | `ROUTIIUM_CACHE_TTL_MS` | `15000` | Cache horizon for router plans when using `HttpRouterClient`; bounded by Router `valid_until`, and bypassed for freeze-keyed plans. |
 | `ROUTIIUM_GOVERNANCE_MODE` | `off` | Set to `router` only when Router is the fail-closed budget/token/safety enforcement authority. Requires strict router mode and zero plan cache for `/ready`. |
 | `ROUTIIUM_EXACT_RESPONSE_CACHE` | unset | Enable opt-in non-streaming exact response caching for route plans with safe cache metadata. |
