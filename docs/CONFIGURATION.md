@@ -164,6 +164,10 @@ YAML alias `rate_limit_policy` is a fallback policy id from `rate_limit_policies
 
 ## Routing and Router service
 
+See [Jev and Typed Decisions](TYPED_DECISIONS.md) for complete OpenRouter and
+TypeSafe recipes, provider-specific model IDs, and the difference between
+decision routing, request judging, and the legacy Jevai API.
+
 | Variable | Default | Description |
 | --- | --- | --- |
 | `ROUTIIUM_BACKENDS` | unset | Semicolon-separated legacy backend rules used only when embedded/remote routing is disabled or allowed to fall back. |

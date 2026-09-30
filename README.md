@@ -57,17 +57,37 @@ routiium router probe --model gpt-4.1-nano
 
 Routiium ships with aliases such as `auto`, `fast`, `balanced`, `safe`, `secure`, and `premium` with cost/latency/context-aware scoring. You do not need another project to get default routing. Remote router mode is optional for teams that want a separate Router-compatible policy service for central policy, catalog, health, and overlay management; EduRouter is only a small companion/reference implementation of that interface.
 
-For provider-neutral typed-decision routing, set `ROUTIIUM_DECISION_PROVIDER`
-to `openrouter` or `typesafe`, configure that provider's API key environment
-variable, and send requests with `model: "auto"`. Routiium gives the decision
-model only approved Router catalog candidates; the existing Router still
-resolves the final upstream. Selection is fail-open by default and uses the
-built-in auto aliases. Request features are sent by default; bounded redacted
-context requires an explicit `ROUTIIUM_DECISION_PRIVACY_MODE` setting. The
-public `DecisionClient` also supports generic typed classification, and the
-request LLM judge can opt into it with `ROUTIIUM_JUDGE_DECISION_PROVIDER`.
-The existing `JEV_API_KEY` integration remains available as a legacy routing
-backend when `ROUTIIUM_DECISION_PROVIDER` is unset.
+#### Use Jev-style decision models through OpenRouter
+
+Jev selects or classifies; it is **not the chat model that answers your user**.
+Keep your working upstream/catalog configuration, then add:
+
+```dotenv
+# Supply OPENROUTER_API_KEY privately via .env or a secret manager.
+ROUTIIUM_DECISION_PROVIDER=openrouter
+ROUTIIUM_DECISION_API_KEY_ENV=OPENROUTER_API_KEY
+ROUTIIUM_DECISION_MODEL=typesafe/jev-1.13
+ROUTIIUM_DECISION_PRIVACY_MODE=features
+ROUTIIUM_DECISION_STRICT=0
+```
+
+Restart `routiium serve` and send `model: "auto"` to the normal gateway API
+using your Routiium client key. Routiium asks Jev to choose among approved Router
+catalog models, validates the choice, and forwards to the selected upstream.
+`features` sends no prompt content for this routing decision; errors fall back
+to the normal Router unless `ROUTIIUM_DECISION_STRICT=1` is set. The decision
+key does not configure your answering upstream.
+
+For Jev-based request judging, separately set
+`ROUTIIUM_JUDGE_DECISION_PROVIDER=openrouter`,
+`ROUTIIUM_JUDGE_API_KEY_ENV=OPENROUTER_API_KEY`, and
+`ROUTIIUM_JUDGE_DECISION_MODEL=typesafe/jev-1.13`. Unlike feature-only routing,
+external judging sends bounded, redacted request context to the provider.
+
+See **[Jev and typed-decision models](docs/TYPED_DECISIONS.md)** for a complete
+request example, versioned model IDs, TypeSafe direct setup, privacy/fallback
+controls, classification, troubleshooting, and the separate legacy `JEV_API_KEY`
+integration. Pin a provider-supported model version for reproducible deployments.
 
 ### 4. Inspect the built-in judge
 
@@ -213,6 +233,7 @@ Start here:
 - [Production Checklist](docs/PRODUCTION_CHECKLIST.md) — launch checks for auth, CORS, guards, and streaming safety.
 - [API Reference](docs/API_REFERENCE.md) — HTTP routes and payload examples.
 - [Subscription Proxy](docs/SUBSCRIPTION_PROXY.md) — route Claude Code and Codex model traffic through Routiium without storing refresh tokens.
+- [Jev and Typed Decisions](docs/TYPED_DECISIONS.md) — OpenRouter/TypeSafe setup, decision routing, request judging, and classification.
 - [Router Usage](docs/ROUTER_USAGE.md) and [Router API Spec](docs/ROUTER_API_SPEC.md) — built-in routing plus optional remote Router-compatible integration.
 - [Rate Limits](docs/RATE_LIMITS.md), [Analytics](docs/ANALYTICS.md), [AWS Bedrock](docs/AWS_BEDROCK.md), and [Production Hardening](docs/PRODUCTION_HARDENING.md).
 

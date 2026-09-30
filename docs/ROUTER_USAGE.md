@@ -43,6 +43,11 @@ The router layer lets Routiium resolve human-friendly model aliases into concret
 4. Routiium forwards the request upstream using that plan, adds observability headers (e.g. `x-route-id`, `x-resolved-model`, `router-schema`), and submits router feedback when supported.
 5. Embedded safety denials never fall back to legacy routing. Remote router failures can fall back only when strict mode is disabled.
 
+For a copyable OpenRouter setup, provider-specific Jev model IDs, request-judge
+configuration, and troubleshooting, see **[Jev and Typed Decisions](TYPED_DECISIONS.md)**.
+The decision model selects an upstream; it is not the chat model that answers
+the client's request.
+
 Set `ROUTIIUM_DECISION_PROVIDER=openrouter` or `typesafe` to route built-in auto
 aliases through the shared typed-decision interface. Routiium obtains the
 Router catalog, asks the configured model to choose one approved model with a
