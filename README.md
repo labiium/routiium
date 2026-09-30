@@ -157,6 +157,10 @@ Run `routiium --help` or see [docs/CLI.md](docs/CLI.md) for the full command ref
 
 ## Docker
 
+The gateway accepts HTTP/1.1. Terminate inbound HTTP/2 at a reverse proxy;
+Actix's optional HTTP/2 backend is disabled because it depends on vulnerable
+`h2` 0.3 (RUSTSEC-2026-0258). Outbound HTTP/2 uses patched `h2` 0.4.
+
 ```bash
 docker build -t routiium .
 docker run --rm -p 8088:8088 -e OPENAI_API_KEY=sk-your-key routiium
@@ -213,6 +217,12 @@ Start here:
 - [Rate Limits](docs/RATE_LIMITS.md), [Analytics](docs/ANALYTICS.md), [AWS Bedrock](docs/AWS_BEDROCK.md), and [Production Hardening](docs/PRODUCTION_HARDENING.md).
 
 ## Development
+
+Rust is pinned in `rust-toolchain.toml`, CI, and `Dockerfile`; update them together.
+The audit gate is `scripts/cargo-audit.sh`. It allows only the existing
+maintenance-only `fxhash` and `instant` advisories in sled's dependency stack,
+not vulnerability advisories. Removing these last exceptions requires a
+storage-backend migration with tests for existing on-disk data.
 
 ```bash
 cargo fmt

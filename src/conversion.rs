@@ -576,7 +576,7 @@ mod tests_responses_to_chat {
         assert_eq!(out.model, "gpt-4o-mini");
         assert_eq!(out.messages.len(), 3);
         assert_eq!(out.max_tokens, Some(123));
-        assert!(out.tools.as_ref().unwrap().len() == 1);
+        assert_eq!(out.tools.as_ref().unwrap().len(), 1);
         assert!(out.tool_choice.is_some());
         assert!(out.response_format.is_some());
         assert_eq!(out.stream, Some(false));
@@ -1415,7 +1415,7 @@ mod tests {
         } = &tools[0]
         {
             assert_eq!(name, "lookup");
-            assert!(description.as_deref() == Some("Lookup a value"));
+            assert_eq!(description.as_deref(), Some("Lookup a value"));
         } else {
             panic!("expected function tool");
         }

@@ -1483,24 +1483,21 @@ pub async fn invoke_bedrock_model_streaming(
     // Get the event stream
     let mut stream = response.body;
 
-    let debug_stream = std::env::var("ROUTIIUM_BEDROCK_STREAM_DEBUG")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes" || v == "on"
-        })
-        .unwrap_or(false);
+    let debug_stream = std::env::var("ROUTIIUM_BEDROCK_STREAM_DEBUG").is_ok_and(|v| {
+        let v = v.trim().to_ascii_lowercase();
+        v == "1" || v == "true" || v == "yes" || v == "on"
+    });
     let model_id_owned = model_id.to_string();
     let region_owned = region.to_string();
     let max_buffer_bytes: usize = std::env::var("ROUTIIUM_BEDROCK_STREAM_MAX_BUFFER_BYTES")
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(1_048_576);
-    let debug_stream_verbose = std::env::var("ROUTIIUM_BEDROCK_STREAM_DEBUG_VERBOSE")
-        .map(|v| {
+    let debug_stream_verbose =
+        std::env::var("ROUTIIUM_BEDROCK_STREAM_DEBUG_VERBOSE").is_ok_and(|v| {
             let v = v.trim().to_ascii_lowercase();
             v == "1" || v == "true" || v == "yes" || v == "on"
-        })
-        .unwrap_or(false);
+        });
     let raw_log_chars: usize = std::env::var("ROUTIIUM_BEDROCK_STREAM_RAW_LOG_CHARS")
         .ok()
         .and_then(|v| v.trim().parse().ok())
@@ -1665,18 +1662,14 @@ pub fn bedrock_chunk_to_sse(
     model: &str,
     provider: &BedrockProvider,
 ) -> Result<String> {
-    let include_bedrock_id = std::env::var("ROUTIIUM_BEDROCK_STREAM_INCLUDE_ID")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes" || v == "on"
-        })
-        .unwrap_or(false);
-    let debug_stream = std::env::var("ROUTIIUM_BEDROCK_STREAM_DEBUG")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes" || v == "on"
-        })
-        .unwrap_or(false);
+    let include_bedrock_id = std::env::var("ROUTIIUM_BEDROCK_STREAM_INCLUDE_ID").is_ok_and(|v| {
+        let v = v.trim().to_ascii_lowercase();
+        v == "1" || v == "true" || v == "yes" || v == "on"
+    });
+    let debug_stream = std::env::var("ROUTIIUM_BEDROCK_STREAM_DEBUG").is_ok_and(|v| {
+        let v = v.trim().to_ascii_lowercase();
+        v == "1" || v == "true" || v == "yes" || v == "on"
+    });
     let bedrock_id = chunk.get("id").and_then(|v| v.as_str());
     if let Some(choices) = chunk.get("choices").and_then(|v| v.as_array()) {
         if let Some(choice) = choices.first() {

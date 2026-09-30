@@ -634,7 +634,7 @@ fn split_list(value: &str) -> Vec<String> {
 }
 
 fn truthy_env(key: &str) -> bool {
-    std::env::var(key).ok().is_some_and(|value| {
+    std::env::var(key).is_ok_and(|value| {
         matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on"

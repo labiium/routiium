@@ -1,21 +1,6 @@
-# rust-toolchain.toml
-#
-# Purpose:
-# - Use stable Rust toolchain for maximum compatibility
-# - Ensure required components (rustfmt, clippy) are available by default.
-#
-# Notes:
-# - Using "stable" channel to automatically get latest stable Rust version
-# - This ensures compatibility with all dependencies including AWS SDK
-# - CI may additionally test on specific versions for MSRV verification
-# - Developers can temporarily override with `RUSTUP_TOOLCHAIN=<version>` or by using
-#   `rustup override set <toolchain>` in their workspace if needed.
-#
-# Changelog:
-# - 2024: Changed from pinned version to "stable" to resolve AWS SDK compatibility
-#   (AWS SDK packages require rustc 1.88+, using stable ensures latest version)
-
+# Keep this version aligned with .github/workflows and Dockerfile.
+# Pinning avoids new Clippy lints unexpectedly breaking CI on a stable update.
 [toolchain]
-channel = "stable"
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

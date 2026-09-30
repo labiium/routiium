@@ -694,14 +694,11 @@ fn exact_response_cache_insert(
 }
 
 fn exact_response_cache_clear() -> usize {
-    EXACT_RESPONSE_CACHE
-        .lock()
-        .map(|mut cache| {
-            let count = cache.len();
-            cache.clear();
-            count
-        })
-        .unwrap_or(0)
+    EXACT_RESPONSE_CACHE.lock().map_or(0, |mut cache| {
+        let count = cache.len();
+        cache.clear();
+        count
+    })
 }
 
 fn maybe_exact_response_cache_key(
@@ -727,9 +724,7 @@ fn governance_readiness(state: &AppState) -> (bool, serde_json::Value) {
     let router_client = state.router_client.is_some();
     let router_strict = state.router_strict || env_truthy("ROUTIIUM_ROUTER_STRICT");
     let router_cache_disabled = state.router_cache_ttl_ms == Some(0)
-        || std::env::var("ROUTIIUM_CACHE_TTL_MS")
-            .ok()
-            .is_some_and(|value| value.trim() == "0");
+        || std::env::var("ROUTIIUM_CACHE_TTL_MS").is_ok_and(|value| value.trim() == "0");
     let exact_cache_enabled = exact_response_cache_enabled();
     let exact_cache_safe = !(mode == "router" && exact_cache_enabled);
 
@@ -1181,7 +1176,7 @@ fn request_message_count(body: &serde_json::Value) -> Option<usize> {
 }
 
 fn request_size_bytes(body: &serde_json::Value) -> usize {
-    serde_json::to_string(body).map(|s| s.len()).unwrap_or(0)
+    serde_json::to_string(body).map_or(0, |s| s.len())
 }
 
 fn estimate_streaming_token_usage(
@@ -4021,9 +4016,7 @@ async fn responses_passthrough(
                             &resolution,
                             started_at,
                             200,
-                            serde_json::to_vec(&responses_response)
-                                .map(|v| v.len())
-                                .unwrap_or(0),
+                            serde_json::to_vec(&responses_response).map_or(0, |v| v.len()),
                             token_usage,
                             authenticated,
                             api_key_id.clone(),
@@ -5376,25 +5369,16 @@ async fn ready(state: web::Data<AppState>) -> impl Responder {
         "ROUTIIUM_CODEX_SUBSCRIPTION_BASE_URL",
     ]
     .into_iter()
-    .any(|name| {
-        std::env::var(name)
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty())
-    });
+    .any(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()));
     let upstream_ready = state.router_client.is_some()
         || state.runtime_config.is_some()
         || state.router_config_path.is_some()
         || state.router_url.is_some()
-        || std::env::var("OPENAI_API_KEY")
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false)
-        || std::env::var("OPENAI_BASE_URL")
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false)
+        || std::env::var("OPENAI_API_KEY").is_ok_and(|v| !v.trim().is_empty())
+        || std::env::var("OPENAI_BASE_URL").is_ok_and(|v| !v.trim().is_empty())
         || std::env::var("AWS_REGION")
             .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false)
+            .is_ok_and(|v| !v.trim().is_empty())
         || subscription_upstream_ready;
 
     let (governance_ready, governance) = governance_readiness(&state);
@@ -5522,9 +5506,8 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
     let safety_config = crate::safety_judge::SafetyJudgeConfig::from_env();
     let response_guard_mode = crate::safety_judge::response_guard_mode_from_env();
     let streaming_safety_mode = crate::safety_judge::streaming_safety_mode_from_env();
-    let judge_key_present = std::env::var(&safety_config.llm_api_key_env)
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
+    let judge_key_present =
+        std::env::var(&safety_config.llm_api_key_env).is_ok_and(|value| !value.trim().is_empty());
     let (_, governance) = governance_readiness(&state);
     let patchbay_bench = crate::safety_judge::is_bench_profile();
 
@@ -5540,10 +5523,7 @@ async fn status(state: web::Data<AppState>) -> impl Responder {
         .ok()
         .filter(|v| !v.trim().is_empty());
     let managed_mode = managed_mode_from_env();
-    let openai_key_present = std::env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .is_some();
+    let openai_key_present = std::env::var("OPENAI_API_KEY").is_ok_and(|v| !v.trim().is_empty());
     let auth_mode = if managed_mode {
         "managed"
     } else {
@@ -6340,9 +6320,7 @@ async fn chat_completions_passthrough(
                         &resolution,
                         started_at,
                         200,
-                        serde_json::to_vec(&chat_response)
-                            .map(|v| v.len())
-                            .unwrap_or(0),
+                        serde_json::to_vec(&chat_response).map_or(0, |v| v.len()),
                         token_usage,
                         authenticated,
                         api_key_id.clone(),
@@ -6982,12 +6960,10 @@ fn resolve_ttl_seconds(
     ttl_seconds: Option<u64>,
 ) -> Result<Option<u64>, HttpResponse> {
     // Env flag to require expiration at creation
-    let require_exp = std::env::var("ROUTIIUM_KEYS_REQUIRE_EXPIRATION")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes" || v == "on"
-        })
-        .unwrap_or(false);
+    let require_exp = std::env::var("ROUTIIUM_KEYS_REQUIRE_EXPIRATION").is_ok_and(|v| {
+        let v = v.trim().to_ascii_lowercase();
+        v == "1" || v == "true" || v == "yes" || v == "on"
+    });
 
     // Optional default TTL (seconds) from env
     let default_ttl_secs: Option<u64> = std::env::var("ROUTIIUM_KEYS_DEFAULT_TTL_SECONDS")

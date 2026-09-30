@@ -195,13 +195,8 @@ impl JevClient {
             ));
         }
 
-        let body = serde_json::to_vec(request)
+        let body = crate::decision::serialize_bounded_json(request, MAX_REQUEST_BYTES)
             .map_err(|error| JevError::InvalidRequest(error.to_string()))?;
-        if body.len() > MAX_REQUEST_BYTES {
-            return Err(JevError::InvalidRequest(format!(
-                "Jev model-routing request exceeds {MAX_REQUEST_BYTES} bytes"
-            )));
-        }
 
         let response = self
             .client
@@ -498,7 +493,7 @@ fn env_u64(name: &str, default: u64) -> u64 {
 }
 
 fn env_truthy(name: &str) -> bool {
-    std::env::var(name).ok().is_some_and(|value| {
+    std::env::var(name).is_ok_and(|value| {
         matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on"
@@ -507,11 +502,6 @@ fn env_truthy(name: &str) -> bool {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    reason = "fixed Jev protocol fixtures"
-)]
 mod tests {
     use super::*;
     use axum::extract::State;
@@ -521,6 +511,39 @@ mod tests {
     use serde_json::json;
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
+
+    #[derive(Clone)]
+    struct TestState {
+        seen_auth: Arc<Mutex<Option<String>>>,
+        seen_body: Arc<Mutex<Option<Value>>>,
+    }
+
+    async fn jev_route_stub(
+        State(state): State<TestState>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        *state
+            .seen_auth
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        *state
+            .seen_body
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(body);
+        Json(json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "decision": "fast-model",
+                "confidence": 0.88,
+                "probabilities": {"fast-model": 0.88}
+            }
+        }))
+    }
 
     #[test]
     fn extracts_documented_decision_shape() {
@@ -570,52 +593,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn posts_to_model_route_with_bearer_and_parses_envelope() {
-        #[derive(Clone)]
-        struct TestState {
-            seen_auth: Arc<Mutex<Option<String>>>,
-            seen_body: Arc<Mutex<Option<Value>>>,
-        }
-
-        async fn handler(
-            State(state): State<TestState>,
-            headers: HeaderMap,
-            Json(body): Json<Value>,
-        ) -> Json<Value> {
-            *state.seen_auth.lock().unwrap() = headers
-                .get("authorization")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned);
-            *state.seen_body.lock().unwrap() = Some(body);
-            Json(json!({
-                "code": 0,
-                "message": "ok",
-                "data": {
-                    "decision": "fast-model",
-                    "confidence": 0.88,
-                    "probabilities": {"fast-model": 0.88}
-                }
-            }))
-        }
-
+    async fn posts_to_model_route_with_bearer_and_parses_envelope(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let seen_auth = Arc::new(Mutex::new(None));
         let seen_body = Arc::new(Mutex::new(None));
         let state = TestState {
             seen_auth: Arc::clone(&seen_auth),
             seen_body: Arc::clone(&seen_body),
         };
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind stub");
-        let address = listener.local_addr().expect("stub address");
-        tokio::spawn(async move {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
             axum::serve(
                 listener,
                 Router::new()
-                    .route("/api/v1/decisions/model-route", post(handler))
+                    .route("/api/v1/decisions/model-route", post(jev_route_stub))
                     .with_state(state)
                     .into_make_service(),
             )
             .await
-            .expect("serve stub");
         });
 
         let config = JevConfig {
@@ -626,7 +622,7 @@ mod tests {
             fail_closed: false,
             catalog_ttl_ms: 1_000,
         };
-        let client = JevClient::new(&config).expect("client");
+        let client = JevClient::new(&config)?;
         let decision = client
             .route(&JevModelRouteRequest {
                 task: "Choose a model".to_string(),
@@ -648,17 +644,36 @@ mod tests {
                 constraints: Vec::new(),
                 stakes: Some("low".to_string()),
             })
-            .await
-            .expect("Jev decision");
+            .await?;
 
-        assert_eq!(decision.selected_id, "fast-model");
-        assert_eq!(
-            *seen_auth.lock().unwrap(),
-            Some("Bearer jev-test-key".to_string())
-        );
-        assert_eq!(
-            seen_body.lock().unwrap().as_ref().unwrap()["task"],
-            "Choose a model"
-        );
+        server.abort();
+        let server_result = server.await;
+        if !server_result.is_err_and(|error| error.is_cancelled()) {
+            return Err(std::io::Error::other("Jev stub server was not cancelled").into());
+        }
+
+        if decision.selected_id != "fast-model" {
+            return Err(std::io::Error::other("Jev selected an unexpected model").into());
+        }
+        let authorization = seen_auth
+            .lock()
+            .map_err(|_| std::io::Error::other("poisoned Jev auth capture mutex"))?
+            .clone();
+        if authorization.as_deref() != Some("Bearer jev-test-key") {
+            return Err(std::io::Error::other("Jev stub observed unexpected authorization").into());
+        }
+        let task = {
+            let body = seen_body
+                .lock()
+                .map_err(|_| std::io::Error::other("poisoned Jev body capture mutex"))?;
+            body.as_ref()
+                .and_then(|value| value.get("task"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        if task.as_deref() != Some("Choose a model") {
+            return Err(std::io::Error::other("Jev stub observed an unexpected task").into());
+        }
+        Ok(())
     }
 }

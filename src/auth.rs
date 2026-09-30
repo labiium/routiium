@@ -815,11 +815,6 @@ impl AuthManager {
     // Async wrappers
     // --------------------------
 
-    #[expect(
-        clippy::unused_async,
-        reason = "async compatibility wrapper preserves public API"
-    )]
-    ///
     /// # Errors
     /// Returns an error when key persistence fails.
     pub async fn generate_key_async(
@@ -828,59 +823,35 @@ impl AuthManager {
         ttl: Option<Duration>,
         scopes: Option<Vec<String>>,
     ) -> Result<GeneratedKey> {
-        self.generate_key(label, ttl, scopes)
+        std::future::ready(self.generate_key(label, ttl, scopes)).await
     }
 
-    #[expect(
-        clippy::unused_async,
-        reason = "async compatibility wrapper preserves public API"
-    )]
     pub async fn verify_async(&self, token: &str) -> Verification {
-        self.verify(token)
+        std::future::ready(self.verify(token)).await
     }
 
-    #[expect(
-        clippy::unused_async,
-        reason = "async compatibility wrapper preserves public API"
-    )]
-    ///
     /// # Errors
     /// Returns an error when the backing key store operation fails.
     pub async fn revoke_async(&self, id: &str) -> Result<bool> {
-        self.revoke(id)
+        std::future::ready(self.revoke(id)).await
     }
 
-    #[expect(
-        clippy::unused_async,
-        reason = "async compatibility wrapper preserves public API"
-    )]
-    ///
     /// # Errors
     /// Returns an error when the backing key store operation fails.
     pub async fn set_expiration_async(&self, id: &str, expires_at: Option<u64>) -> Result<bool> {
-        self.set_expiration(id, expires_at)
+        std::future::ready(self.set_expiration(id, expires_at)).await
     }
 
-    #[expect(
-        clippy::unused_async,
-        reason = "async compatibility wrapper preserves public API"
-    )]
-    ///
     /// # Errors
     /// Returns an error when the backing key store operation fails.
     pub async fn list_keys_async(&self) -> Result<Vec<ApiKeyInfo>> {
-        self.list_keys()
+        std::future::ready(self.list_keys()).await
     }
 
-    #[expect(
-        clippy::unused_async,
-        reason = "async compatibility wrapper preserves public API"
-    )]
-    ///
     /// # Errors
     /// Returns an error when the backing key store operation fails.
     pub async fn purge_async(&self, cutoff_epoch: u64) -> Result<usize> {
-        self.purge(cutoff_epoch)
+        std::future::ready(self.purge(cutoff_epoch)).await
     }
 }
 
@@ -984,8 +955,7 @@ fn env_truthy(name: &str, default: bool) -> bool {
 fn now_epoch() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 fn uuid_hex() -> String {

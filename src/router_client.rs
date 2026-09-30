@@ -2247,14 +2247,12 @@ impl DecisionRouterConfig {
                 .filter(|model| !model.trim().is_empty())
                 .unwrap_or_else(|| provider.default_model().to_string()),
             route_aliases: aliases,
-            fail_closed: std::env::var("ROUTIIUM_DECISION_STRICT")
-                .ok()
-                .is_some_and(|value| {
-                    matches!(
-                        value.trim().to_ascii_lowercase().as_str(),
-                        "1" | "true" | "yes" | "on"
-                    )
-                }),
+            fail_closed: std::env::var("ROUTIIUM_DECISION_STRICT").is_ok_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            }),
             catalog_ttl_ms: std::env::var("ROUTIIUM_DECISION_CATALOG_TTL_MS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
@@ -3102,9 +3100,7 @@ fn parse_positive_env_usize(name: &str, default: usize) -> usize {
 }
 
 fn estimate_message_tokens(message: &serde_json::Value) -> usize {
-    serde_json::to_string(message)
-        .map(|value| (value.len() / 4).saturating_add(10).max(1))
-        .unwrap_or(1)
+    serde_json::to_string(message).map_or(1, |value| (value.len() / 4).saturating_add(10).max(1))
 }
 
 fn sha256_hex(s: &str) -> String {
@@ -4263,11 +4259,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(
-        clippy::unwrap_used,
+    #[expect(
         clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::panic
+        reason = "the local Jev HTTP fixture and route plan must initialize successfully"
     )]
     async fn jev_router_client_routes_only_to_catalog_candidates() {
         async fn jev_handler(Json(_body): Json<serde_json::Value>) -> Json<serde_json::Value> {
@@ -4286,7 +4280,7 @@ mod tests {
             .await
             .expect("bind Jev stub");
         let address = listener.local_addr().expect("Jev stub address");
-        tokio::spawn(async move {
+        let server = tokio::spawn(async move {
             axum::serve(
                 listener,
                 Router::new()
@@ -4331,6 +4325,9 @@ mod tests {
             .plan(&sample_route_request("auto"))
             .await
             .expect("Jev-routed plan");
+        server.abort();
+        let server_result = server.await;
+        assert!(server_result.is_err_and(|error| error.is_cancelled()));
         assert_eq!(plan.upstream.model_id, "deep-model");
         assert!(plan
             .policy
@@ -4339,11 +4336,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(
-        clippy::unwrap_used,
+    #[expect(
         clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::panic
+        reason = "the local typed-decision HTTP fixture and route plan must initialize successfully"
     )]
     async fn typed_decision_router_uses_the_shared_choice_contract() {
         async fn decision_handler(Json(_body): Json<serde_json::Value>) -> Json<serde_json::Value> {
@@ -4365,7 +4360,7 @@ mod tests {
             .await
             .expect("bind typed decision stub");
         let address = listener.local_addr().expect("typed decision stub address");
-        tokio::spawn(async move {
+        let server = tokio::spawn(async move {
             axum::serve(
                 listener,
                 Router::new()
@@ -4413,6 +4408,9 @@ mod tests {
             .plan(&sample_route_request("auto"))
             .await
             .expect("decision-routed plan");
+        server.abort();
+        let server_result = server.await;
+        assert!(server_result.is_err_and(|error| error.is_cancelled()));
         assert_eq!(plan.upstream.model_id, "deep-model");
         assert!(plan
             .policy
@@ -4421,7 +4419,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::expect_used)]
+    #[expect(
+        clippy::expect_used,
+        reason = "the Jev client fixture must initialize for the local safety-gate test"
+    )]
     async fn jev_router_client_skips_safety_restricted_requests() {
         let inner: Arc<dyn RouterClient> = Arc::new(LocalPolicyRouter::empty());
         let config = JevConfig {

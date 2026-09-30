@@ -172,14 +172,12 @@ fn build_app_state(router_url: &str, cache_ttl: u64) -> AppState {
     AppState {
         router_client: Some(router_client),
         router_url: Some(router_url.to_string()),
-        router_strict: std::env::var("ROUTIIUM_ROUTER_STRICT")
-            .ok()
-            .is_some_and(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            }),
+        router_strict: std::env::var("ROUTIIUM_ROUTER_STRICT").is_ok_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        }),
         router_cache_ttl_ms: Some(cache_ttl),
         analytics: Some(Arc::new(AnalyticsManager::new_memory(1000))),
         // Use a short timeout so unreachable upstreams fail fast in tests rather than hanging.

@@ -299,8 +299,7 @@ pub fn build_http_client_from_env() -> reqwest::Client {
     // Proxy configuration
     let no_proxy = std::env::var("ROUTIIUM_NO_PROXY")
         .map(|v| v.trim().to_ascii_lowercase())
-        .map(|v| v == "1" || v == "true" || v == "yes" || v == "on")
-        .unwrap_or(false);
+        .is_ok_and(|v| v == "1" || v == "true" || v == "yes" || v == "on");
 
     if no_proxy {
         builder = builder.no_proxy();
@@ -538,10 +537,7 @@ pub fn managed_mode_from_env() -> bool {
     if let Ok(raw) = std::env::var("ROUTIIUM_MANAGED_MODE") {
         let v = raw.trim().to_ascii_lowercase();
         if v.is_empty() {
-            return std::env::var("OPENAI_API_KEY")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .is_some();
+            return std::env::var("OPENAI_API_KEY").is_ok_and(|s| !s.trim().is_empty());
         }
         if matches!(
             v.as_str(),
@@ -556,10 +552,7 @@ pub fn managed_mode_from_env() -> bool {
             return false;
         }
     }
-    std::env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .is_some()
+    std::env::var("OPENAI_API_KEY").is_ok_and(|s| !s.trim().is_empty())
 }
 
 /// Forward a request upstream with streaming enabled and return an SSE response.
@@ -974,13 +967,11 @@ pub async fn post_responses_with_input_retry(
     payload: &serde_json::Value,
     bearer: Option<String>,
 ) -> Result<HttpResponse, anyhow::Error> {
-    let effective_bearer = bearer
-        .and_then(|s| if s.is_empty() { None } else { Some(s) })
-        .or_else(|| {
-            std::env::var("OPENAI_API_KEY")
-                .ok()
-                .filter(|s| !s.is_empty())
-        });
+    let effective_bearer = bearer.filter(|s| !s.is_empty()).or_else(|| {
+        std::env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+    });
     let mut req = client
         .post(url)
         .header(http::header::CONTENT_TYPE, "application/json");
@@ -1194,7 +1185,7 @@ pub fn cors_config_from_env() -> actix_cors::Cors {
     let mut cors = actix_cors::Cors::default();
 
     // Allowed origins
-    let allow_all = std::env::var("CORS_ALLOW_ALL").ok().is_some_and(|v| {
+    let allow_all = std::env::var("CORS_ALLOW_ALL").is_ok_and(|v| {
         matches!(
             v.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on"

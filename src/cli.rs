@@ -1692,8 +1692,7 @@ fn local_bind_addr_for_proxy_url(proxy_url: &str) -> Option<String> {
 fn subscription_bind_is_local(bind_addr: &str) -> bool {
     bind_addr
         .parse::<std::net::SocketAddr>()
-        .map(|address| address.ip().is_loopback())
-        .unwrap_or(false)
+        .is_ok_and(|address| address.ip().is_loopback())
 }
 
 fn default_subscription_log_path() -> PathBuf {

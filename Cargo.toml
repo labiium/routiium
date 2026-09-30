@@ -22,7 +22,9 @@ path = "src/main.rs"
 
 
 [dependencies]
-actix-web = "4"
+# Terminate HTTP/2 at the reverse proxy: Actix's optional HTTP/2 stack uses
+# unpatched h2 0.3 (RUSTSEC-2026-0258). Keep the other default features.
+actix-web = { version = "4", default-features = false, features = ["macros", "compress-brotli", "compress-gzip", "compress-zstd", "cookies", "unicode", "compat"] }
 actix-cors = "0.7"
 actix-rt = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util"] }

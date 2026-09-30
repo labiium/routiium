@@ -1,17 +1,20 @@
 # syntax=docker/dockerfile:1
 
 # ---------- Build stage ----------
-FROM rust:1.92-bookworm AS builder
+FROM rust:1.98.1-bookworm AS builder
+
+ARG ROUTIIUM_BUILD_REVISION=unknown
+ENV ROUTIIUM_BUILD_REVISION=${ROUTIIUM_BUILD_REVISION}
 
 WORKDIR /build
 
-# System deps (certs only; reqwest defaults to rustls in this project)
+# reqwest's default native-tls backend needs OpenSSL headers at build time.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates pkg-config \
+    && apt-get install -y --no-install-recommends ca-certificates pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy manifest first to leverage Docker layer caching for deps
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
 # Copy sources
 COPY src ./src
 
@@ -30,7 +33,7 @@ RUN useradd -u 10001 -ms /bin/bash app \
     && ln -fs /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo $TZ > /etc/timezone \
     && apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tzdata \
+    && apt-get install -y --no-install-recommends ca-certificates tzdata libssl3 \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /data /app \
     && chown -R app:app /data /app

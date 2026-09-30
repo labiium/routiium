@@ -313,12 +313,10 @@ impl AnalyticsManager {
         }
 
         // Allow forcing the legacy in-memory backend
-        let force_memory = std::env::var("ROUTIIUM_ANALYTICS_FORCE_MEMORY")
-            .ok()
-            .is_some_and(|v| {
-                let normalized = v.trim().to_ascii_lowercase();
-                normalized == "1" || normalized == "true" || normalized == "yes"
-            });
+        let force_memory = std::env::var("ROUTIIUM_ANALYTICS_FORCE_MEMORY").is_ok_and(|v| {
+            let normalized = v.trim().to_ascii_lowercase();
+            normalized == "1" || normalized == "true" || normalized == "yes"
+        });
 
         if force_memory {
             let max_events = std::env::var("ROUTIIUM_ANALYTICS_MAX_EVENTS")

@@ -8,6 +8,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 use std::time::Duration;
 
 const DEFAULT_TIMEOUT_MS: u64 = 1_000;
@@ -16,6 +17,55 @@ const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_QUESTION_ID_BYTES: usize = 128;
 const MAX_MODEL_ID_BYTES: usize = 256;
 const MAX_ERROR_MESSAGE_CHARS: usize = 512;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum BoundedJsonError {
+    #[error("serialized JSON exceeds {max_bytes} bytes")]
+    TooLarge { max_bytes: usize },
+    #[error("JSON serialization failed: {0}")]
+    Serialization(#[from] serde_json::Error),
+}
+
+struct BoundedJsonWriter {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    exceeded: bool,
+}
+
+impl Write for BoundedJsonWriter {
+    fn write(&mut self, chunk: &[u8]) -> io::Result<usize> {
+        let Some(next_length) = self.bytes.len().checked_add(chunk.len()) else {
+            self.exceeded = true;
+            return Err(io::Error::other("serialized JSON size overflow"));
+        };
+        if next_length > self.max_bytes {
+            self.exceeded = true;
+            return Err(io::Error::other("serialized JSON size limit exceeded"));
+        }
+        self.bytes.extend_from_slice(chunk);
+        Ok(chunk.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(crate) fn serialize_bounded_json<T: Serialize>(
+    value: &T,
+    max_bytes: usize,
+) -> Result<Vec<u8>, BoundedJsonError> {
+    let mut writer = BoundedJsonWriter {
+        bytes: Vec::with_capacity(max_bytes.min(1_024)),
+        max_bytes,
+        exceeded: false,
+    };
+    match serde_json::to_writer(&mut writer, value) {
+        Ok(()) => Ok(writer.bytes),
+        Err(_) if writer.exceeded => Err(BoundedJsonError::TooLarge { max_bytes }),
+        Err(error) => Err(BoundedJsonError::Serialization(error)),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecisionProviderKind {
@@ -333,13 +383,8 @@ impl DecisionRequest {
         for (id, question) in &self.questions {
             question.validate(id)?;
         }
-        let encoded = serde_json::to_vec(self)
+        serialize_bounded_json(self, MAX_REQUEST_BYTES)
             .map_err(|error| DecisionError::InvalidRequest(error.to_string()))?;
-        if encoded.len() > MAX_REQUEST_BYTES {
-            return Err(DecisionError::InvalidRequest(format!(
-                "decision request exceeds {MAX_REQUEST_BYTES} bytes"
-            )));
-        }
         Ok(())
     }
 }
@@ -501,6 +546,7 @@ impl DecisionClient {
         &self,
         request: &DecisionRequest,
     ) -> Result<DecisionResponse, DecisionError> {
+        request.validate()?;
         self.provider.decide(request).await
     }
 }
@@ -602,9 +648,8 @@ impl DecisionProvider for HttpDecisionProvider {
     }
 
     async fn decide(&self, request: &DecisionRequest) -> Result<DecisionResponse, DecisionError> {
-        request.validate()?;
         let provider = self.kind.as_str();
-        let body = serde_json::to_vec(request)
+        let body = serialize_bounded_json(request, MAX_REQUEST_BYTES)
             .map_err(|error| DecisionError::InvalidRequest(error.to_string()))?;
         let response = self
             .client
@@ -826,13 +871,6 @@ pub fn state_object(entries: impl IntoIterator<Item = (String, Value)>) -> Value
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::panic,
-        clippy::unwrap_used
-    )]
-
     use super::*;
     use axum::extract::State;
     use axum::http::HeaderMap;
@@ -840,6 +878,10 @@ mod tests {
     use axum::{Json, Router};
     use std::sync::{Arc, Mutex};
 
+    #[expect(
+        clippy::expect_used,
+        reason = "the shared request fixture is intentionally known-valid"
+    )]
     fn sample_request(model: &str) -> DecisionRequest {
         DecisionRequest::new(
             model,
@@ -907,6 +949,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        reason = "the serialization fixture asserts its fixed wire-schema paths"
+    )]
     fn serializes_shared_typed_question_shapes() {
         let request = sample_request("~typesafe/jev-latest");
         let value = serde_json::to_value(request).expect("serializes");
@@ -916,6 +963,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the response fixture is required to test typed answer validation"
+    )]
     fn validates_typed_answers_against_questions() {
         let request = sample_request("typesafe/jev-1.13");
         let response =
@@ -932,6 +983,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        reason = "the malformed response fixture changes one fixed answer field"
+    )]
     fn rejects_invalid_score_scales_and_probabilities() {
         assert!(DecisionRequest::new(
             "jev",
@@ -950,9 +1006,69 @@ mod tests {
         assert!(response.validate_for(&request).is_err());
     }
 
+    #[test]
+    fn stops_serializing_as_soon_as_the_request_limit_is_exceeded() {
+        let oversized_state = "x".repeat(MAX_REQUEST_BYTES * 8);
+        let result = serialize_bounded_json(&oversized_state, 16);
+        assert!(matches!(
+            result,
+            Err(BoundedJsonError::TooLarge { max_bytes: 16 })
+        ));
+
+        let request = DecisionRequest {
+            model: "test-model".to_string(),
+            state: Value::String(oversized_state),
+            questions: questions([(
+                "urgent".to_string(),
+                DecisionQuestion::noul("Does this need urgent attention?"),
+            )]),
+        };
+        assert!(matches!(
+            request.validate(),
+            Err(DecisionError::InvalidRequest(message)) if message.contains("exceeds")
+        ));
+    }
+
+    struct UncalledProvider;
+
+    #[async_trait::async_trait]
+    impl DecisionProvider for UncalledProvider {
+        fn kind(&self) -> DecisionProviderKind {
+            DecisionProviderKind::TypeSafe
+        }
+
+        async fn decide(
+            &self,
+            _request: &DecisionRequest,
+        ) -> Result<DecisionResponse, DecisionError> {
+            Err(DecisionError::Network(
+                "custom provider should not receive invalid input".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn validates_before_invoking_custom_providers() {
+        let client = DecisionClient::from_provider(Arc::new(UncalledProvider));
+        let invalid_request = DecisionRequest {
+            model: String::new(),
+            state: Value::Null,
+            questions: BTreeMap::new(),
+        };
+
+        assert!(matches!(
+            client.decide(&invalid_request).await,
+            Err(DecisionError::InvalidRequest(_))
+        ));
+    }
+
     #[derive(Clone, Default)]
     struct CapturedRequests(Arc<Mutex<Vec<(String, Value)>>>);
 
+    #[expect(
+        clippy::expect_used,
+        reason = "a poisoned in-memory capture lock invalidates this test fixture"
+    )]
     async fn capture_decision(
         State(captured): State<CapturedRequests>,
         headers: HeaderMap,
@@ -981,11 +1097,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(
+    #[expect(
         clippy::expect_used,
-        clippy::unwrap_used,
         clippy::indexing_slicing,
-        clippy::panic
+        reason = "local HTTP fixture setup and fixed wire-schema assertions must succeed"
     )]
     async fn provider_adapters_use_distinct_paths_and_the_same_body() {
         let captured = CapturedRequests::default();
@@ -1018,6 +1133,8 @@ mod tests {
         }
 
         server.abort();
+        let server_result = server.await;
+        assert!(server_result.is_err_and(|error| error.is_cancelled()));
         let calls = captured.0.lock().expect("request capture lock");
         assert_eq!(calls.len(), 2);
         for (authorization, body) in calls.iter() {
@@ -1029,7 +1146,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    #[expect(
+        clippy::expect_used,
+        reason = "local HTTP fixture setup must succeed before checking provider errors"
+    )]
     async fn provider_errors_do_not_echo_the_api_key() {
         let app = Router::new().route("/api/alpha/decisions", post(decision_auth_error));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1049,6 +1169,8 @@ mod tests {
             .await
             .expect_err("provider should reject the key");
         server.abort();
+        let server_result = server.await;
+        assert!(server_result.is_err_and(|error| error.is_cancelled()));
         let message = error.to_string();
         assert!(!message.contains("decision-test-key"));
         assert!(message.contains("[redacted]"));

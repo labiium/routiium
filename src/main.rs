@@ -600,8 +600,7 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
     let rate_limit_manager = {
         let enabled = env::var("ROUTIIUM_RATE_LIMIT_ENABLED")
             .map(|v| v.trim().to_lowercase())
-            .map(|v| v == "true" || v == "1" || v == "yes")
-            .unwrap_or(true); // enabled by default when a config or backend is provided
+            .map_or(true, |v| v == "true" || v == "1" || v == "yes"); // enabled by default when a config or backend is provided
 
         // Only initialise when explicitly configured or when a backend env is set.
         let has_backend = env::var("ROUTIIUM_RATE_LIMIT_BACKEND").is_ok()

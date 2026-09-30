@@ -558,9 +558,7 @@ impl SafetyJudgeConfig {
                     .map_or("OPENAI_API_KEY", DecisionProviderKind::default_api_key_env)
                     .to_string()
             });
-        let has_key = std::env::var(&api_key_env)
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty());
+        let has_key = std::env::var(&api_key_env).is_ok_and(|value| !value.trim().is_empty());
         let llm_enabled = match llm_setting.trim().to_ascii_lowercase().as_str() {
             "off" | "0" | "false" | "disabled" => false,
             "1" | "true" | "yes" | "on" | "force" => true,
@@ -643,8 +641,7 @@ impl SafetyJudgeConfig {
                     .as_deref()
                     .unwrap_or(&base.llm_api_key_env),
             )
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty()),
+            .is_ok_and(|value| !value.trim().is_empty()),
         } && !matches!(mode, SafetyMode::Off);
 
         Self {
@@ -1261,11 +1258,9 @@ fn tool_result_guard_applies(
 ) -> bool {
     let matched = tool_name.is_some_and(|name| {
         tools.iter().any(|tool| name.eq_ignore_ascii_case(tool))
-            || tool_regex.iter().any(|pattern| {
-                Regex::new(pattern)
-                    .map(|regex| regex.is_match(name))
-                    .unwrap_or(false)
-            })
+            || tool_regex
+                .iter()
+                .any(|pattern| Regex::new(pattern).is_ok_and(|regex| regex.is_match(name)))
     });
     match selection {
         ToolResultGuardSelection::Inclusive => matched,
