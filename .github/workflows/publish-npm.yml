@@ -59,6 +59,8 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+          # This dependency-free package has no root npm lockfile.
+          package-manager-cache: false
 
       - name: Verify npm package metadata
         run: npm run package:verify
@@ -145,6 +147,8 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+          # Disable automatic caching here too, including for OIDC publishing.
+          package-manager-cache: false
 
       - name: Verify package metadata
         run: npm run package:verify
