@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// Pricing information for a specific model
@@ -67,113 +68,15 @@ pub struct PricingConfig {
 }
 
 impl PricingConfig {
-    /// Create with `OpenAI` default pricing (as of 2024)
+    /// Built-in pricing: no hand-maintained per-model table.
+    ///
+    /// Models without an entry in `models` are priced from the dated, source-cited
+    /// `llm-prices` table (`OpenAI`, Anthropic, Gemini, `DeepSeek`, Mistral, xAI, ...). The
+    /// `default` rate is only used for model ids that table does not know.
     #[must_use]
     pub fn openai_defaults() -> Self {
-        let mut models = HashMap::new();
-
-        // GPT-4o models
-        models.insert(
-            "gpt-4o".to_string(),
-            ModelPricing {
-                input_per_million: 2.50,
-                output_per_million: 10.00,
-                cached_per_million: Some(1.25), // 50% discount
-                reasoning_per_million: None,
-            },
-        );
-        models.insert(
-            "gpt-4o-2024-11-20".to_string(),
-            ModelPricing {
-                input_per_million: 2.50,
-                output_per_million: 10.00,
-                cached_per_million: Some(1.25),
-                reasoning_per_million: None,
-            },
-        );
-
-        // GPT-4o mini
-        models.insert(
-            "gpt-4o-mini".to_string(),
-            ModelPricing {
-                input_per_million: 0.150,
-                output_per_million: 0.600,
-                cached_per_million: Some(0.075),
-                reasoning_per_million: None,
-            },
-        );
-        models.insert(
-            "gpt-4o-mini-2024-07-18".to_string(),
-            ModelPricing {
-                input_per_million: 0.150,
-                output_per_million: 0.600,
-                cached_per_million: Some(0.075),
-                reasoning_per_million: None,
-            },
-        );
-
-        // o1 models
-        models.insert(
-            "o1".to_string(),
-            ModelPricing {
-                input_per_million: 15.00,
-                output_per_million: 60.00,
-                cached_per_million: Some(7.50),
-                reasoning_per_million: None, // Included in output
-            },
-        );
-        models.insert(
-            "o1-preview".to_string(),
-            ModelPricing {
-                input_per_million: 15.00,
-                output_per_million: 60.00,
-                cached_per_million: Some(7.50),
-                reasoning_per_million: None,
-            },
-        );
-        models.insert(
-            "o1-mini".to_string(),
-            ModelPricing {
-                input_per_million: 3.00,
-                output_per_million: 12.00,
-                cached_per_million: Some(1.50),
-                reasoning_per_million: None,
-            },
-        );
-
-        // GPT-4 Turbo
-        models.insert(
-            "gpt-4-turbo".to_string(),
-            ModelPricing {
-                input_per_million: 10.00,
-                output_per_million: 30.00,
-                cached_per_million: None,
-                reasoning_per_million: None,
-            },
-        );
-        models.insert(
-            "gpt-4-turbo-2024-04-09".to_string(),
-            ModelPricing {
-                input_per_million: 10.00,
-                output_per_million: 30.00,
-                cached_per_million: None,
-                reasoning_per_million: None,
-            },
-        );
-
-        // GPT-3.5 Turbo
-        models.insert(
-            "gpt-3.5-turbo".to_string(),
-            ModelPricing {
-                input_per_million: 0.50,
-                output_per_million: 1.50,
-                cached_per_million: None,
-                reasoning_per_million: None,
-            },
-        );
-
         Self {
-            models,
+            models: HashMap::new(),
             default: Some(ModelPricing {
                 input_per_million: 2.50,
                 output_per_million: 10.00,
@@ -181,6 +84,19 @@ impl PricingConfig {
                 reasoning_per_million: None,
             }),
         }
+    }
+
+    /// Pricing for `model` from the bundled `llm-prices` table, if it lists the model with
+    /// both an input and an output rate.
+    #[must_use]
+    pub fn catalog_pricing(model: &str) -> Option<ModelPricing> {
+        let price = llm_prices::lookup(model)?;
+        Some(ModelPricing {
+            input_per_million: price.input?,
+            output_per_million: price.output?,
+            cached_per_million: price.cache_read,
+            reasoning_per_million: None,
+        })
     }
 
     /// Load from JSON file
@@ -193,23 +109,31 @@ impl PricingConfig {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
 
-    /// Get pricing for a model, with prefix matching and fallback
+    /// Get pricing for a model.
+    ///
+    /// Order: exact entry in `models`, then the longest `models` key that prefixes the id
+    /// (so `gpt-4o-mini-2024-07-18` takes `gpt-4o-mini`, never `gpt-4o`), then the bundled
+    /// `llm-prices` table, then `default`.
     #[must_use]
-    pub fn get_pricing(&self, model: &str) -> Option<&ModelPricing> {
-        // Exact match first
+    pub fn get_pricing(&self, model: &str) -> Option<Cow<'_, ModelPricing>> {
         if let Some(pricing) = self.models.get(model) {
-            return Some(pricing);
+            return Some(Cow::Borrowed(pricing));
         }
 
-        // Prefix match (e.g., "gpt-4o-2024-08-06" matches "gpt-4o")
-        for (key, pricing) in &self.models {
-            if model.starts_with(key) {
-                return Some(pricing);
-            }
+        if let Some((_, pricing)) = self
+            .models
+            .iter()
+            .filter(|(key, _)| model.starts_with(key.as_str()))
+            .max_by_key(|(key, _)| key.len())
+        {
+            return Some(Cow::Borrowed(pricing));
         }
 
-        // Default fallback
-        self.default.as_ref()
+        if let Some(pricing) = Self::catalog_pricing(model) {
+            return Some(Cow::Owned(pricing));
+        }
+
+        self.default.as_ref().map(Cow::Borrowed)
     }
 
     /// Calculate cost for a request
@@ -321,5 +245,54 @@ mod tests {
 
         assert_approx_eq(cost.input_cost, 2.50);
         assert_approx_eq(cost.output_cost, 10.00);
+    }
+
+    #[test]
+    fn test_current_models_use_catalog_not_gpt4o_default() {
+        let config = PricingConfig::openai_defaults();
+        for model in ["gpt-4.1", "o3", "claude-sonnet-4-5", "gemini-2.5-pro"] {
+            let expected = PricingConfig::catalog_pricing(model);
+            assert!(expected.is_some(), "llm-prices should list {model}");
+            let got = config.get_pricing(model).map(Cow::into_owned);
+            assert_eq!(
+                got.map(|p| (p.input_per_million, p.output_per_million)),
+                expected.map(|p| (p.input_per_million, p.output_per_million)),
+                "{model}"
+            );
+        }
+        let gemini = test_cost(&config, "gemini-2.5-pro", 1_000_000, 1_000_000, None);
+        assert_approx_eq(gemini.output_cost, 10.00);
+        let claude = test_cost(&config, "claude-sonnet-4-5", 1_000_000, 1_000_000, None);
+        assert_approx_eq(claude.input_cost, 3.00);
+        assert_approx_eq(claude.output_cost, 15.00);
+    }
+
+    #[test]
+    fn test_longest_configured_prefix_wins() {
+        let rate = |input: f64| ModelPricing {
+            input_per_million: input,
+            output_per_million: input,
+            cached_per_million: None,
+            reasoning_per_million: None,
+        };
+        let mut models = HashMap::new();
+        models.insert("gpt-4o".to_string(), rate(2.50));
+        models.insert("gpt-4o-mini".to_string(), rate(0.15));
+        let config = PricingConfig {
+            models,
+            default: None,
+        };
+        // HashMap iteration order used to decide this; the more specific key must win.
+        for _ in 0..32 {
+            let cost = test_cost(&config, "gpt-4o-mini-2024-07-18", 1_000_000, 0, None);
+            assert_approx_eq(cost.input_cost, 0.15);
+        }
+    }
+
+    #[test]
+    fn test_unknown_model_uses_default() {
+        let config = PricingConfig::openai_defaults();
+        let cost = test_cost(&config, "my-local-finetune", 1_000_000, 1_000_000, None);
+        assert_approx_eq(cost.total_cost, 12.50);
     }
 }
