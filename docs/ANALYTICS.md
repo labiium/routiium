@@ -752,9 +752,10 @@ The analytics system is designed with privacy in mind:
 ### Pricing Lookup Logic
 
 1. Exact model name match (e.g., "gpt-4o-mini-2024-07-18")
-2. Fallback to prefix match (e.g., "gpt-4o-mini")
-3. Use default pricing if no match found
-4. Skip cost calculation if pricing unavailable
+2. Longest configured prefix match (e.g., "gpt-4o-mini" wins over "gpt-4o")
+3. The bundled [`llm-prices`](https://crates.io/crates/llm-prices) table (dated, source-cited list prices for OpenAI, Anthropic, Gemini, DeepSeek, Mistral, xAI and others)
+4. Use default pricing if no match found
+5. Skip cost calculation if pricing unavailable
 
 ### Updating Pricing
 
